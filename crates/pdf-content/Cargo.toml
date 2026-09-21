@@ -1,0 +1,16 @@
+[package]
+name = "pdf-content"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pdf-bytes = { path = "../pdf-bytes" }
+pdf-font = { path = "../pdf-font" }
+pdf-security = { path = "../pdf-security" }
+pdf-syntax = { path = "../pdf-syntax" }
+
+[lints]
+workspace = true

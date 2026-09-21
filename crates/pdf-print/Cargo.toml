@@ -1,0 +1,18 @@
+[package]
+name = "pdf-print"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pdf-bytes = { path = "../pdf-bytes" }
+pdf-content = { path = "../pdf-content" }
+pdf-render = { path = "../pdf-render" }
+pdf-session = { path = "../pdf-session" }
+pdf-syntax = { path = "../pdf-syntax" }
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "pdf-edit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+icu_segmenter = { version = "=2.3.0", default-features = false, features = ["compiled_data", "auto"] }
+pdf-bytes = { path = "../pdf-bytes" }
+pdf-content = { path = "../pdf-content" }
+pdf-paint = { path = "../pdf-paint" }
+pdf-security = { path = "../pdf-security" }
+pdf-semantics = { path = "../pdf-semantics" }
+pdf-syntax = { path = "../pdf-syntax" }
+
+[lints]
+workspace = true

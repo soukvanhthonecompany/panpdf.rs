@@ -1,0 +1,16 @@
+[package]
+name = "pdf-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pdf-bytes = { path = "../pdf-bytes" }
+pdf-content = { path = "../pdf-content" }
+pdf-paint = { path = "../pdf-paint" }
+
+[lints]
+workspace = true

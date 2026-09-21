@@ -1,0 +1,25 @@
+[package]
+name = "pdf-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pdf-bytes = { path = "../pdf-bytes" }
+pdf-cli = { path = "../pdf-cli" }
+pdf-content = { path = "../pdf-content" }
+pdf-edit = { path = "../pdf-edit" }
+pdf-paint = { path = "../pdf-paint" }
+pdf-render = { path = "../pdf-render" }
+pdf-semantics = { path = "../pdf-semantics" }
+pdf-session = { path = "../pdf-session" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "panpdf-mcp"
+path = "src/main.rs"

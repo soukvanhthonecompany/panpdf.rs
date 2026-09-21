@@ -1,0 +1,21 @@
+[package]
+name = "pdf-ocr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pdf-content = { path = "../pdf-content" }
+pdf-edit = { path = "../pdf-edit" }
+pdf-paint = { path = "../pdf-paint" }
+pdf-render = { path = "../pdf-render" }
+
+[dev-dependencies]
+pdf-bytes = { path = "../pdf-bytes" }
+pdf-session = { path = "../pdf-session" }
+
+[lints]
+workspace = true

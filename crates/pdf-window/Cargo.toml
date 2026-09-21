@@ -1,0 +1,65 @@
+[package]
+name = "pdf-window"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pdf-app = { path = "../pdf-app" }
+pdf-bytes = { path = "../pdf-bytes" }
+pdf-cli = { path = "../pdf-cli" }
+pdf-content = { path = "../pdf-content" }
+pdf-edit = { path = "../pdf-edit" }
+pdf-ocr = { path = "../pdf-ocr" }
+pdf-print = { path = "../pdf-print" }
+pdf-paint = { path = "../pdf-paint" }
+pdf-render = { path = "../pdf-render" }
+pdf-semantics = { path = "../pdf-semantics" }
+pdf-session = { path = "../pdf-session" }
+pdf-syntax = { path = "../pdf-syntax" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pdf-agent = { path = "../pdf-agent" }
+# Both renderers, and `wgpu` tried first (`app::run`). `glow` alone meant
+# OpenGL alone, and on Windows OpenGL comes from the vendor's driver or from
+# nowhere: a fresh install, a Remote Desktop session or a virtual machine has
+# OpenGL 1.1 and the program did not open at all. `wgpu` reaches DX12 there,
+# which every Windows 10 and 11 has and which has WARP in software behind it;
+# Metal on macOS; Vulkan on Linux. `glow` stays as the second try.
+eframe = { version = "0.35.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wgpu",
+    "wayland",
+    "x11",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { version = "0.35.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+] }
+js-sys = "0.3.77"
+wasm-bindgen = "0.2.108"
+wasm-bindgen-futures = "0.4.58"
+web-sys = { version = "0.3.77", features = [
+    "Blob",
+    "BlobPropertyBag",
+    "console",
+    "Document",
+    "Element",
+    "File",
+    "FileList",
+    "HtmlAnchorElement",
+    "HtmlCanvasElement",
+    "HtmlInputElement",
+    "Performance",
+    "Url",
+    "Window",
+] }
+
+[lints]
+workspace = true

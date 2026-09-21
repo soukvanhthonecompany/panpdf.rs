@@ -1,0 +1,16 @@
+/target/
+/dist/
+*.profraw
+*.swp
+*.py[cod]
+__pycache__/
+.DS_Store
+
+# Font binaries are vendored by `fonts/vendor.py` from the URLs and SHA-256
+# values in `fonts/manifest.json`. The manifest, the procedure and the licence
+# notices are committed; the several megabytes of `.ttf` they name are not.
+/fonts/packaged/
+
+# A directory of PDFs to try the program on. Nothing here is committed: the
+# files a person measures with are their own.
+/documents/

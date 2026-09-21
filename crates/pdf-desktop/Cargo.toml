@@ -1,0 +1,25 @@
+[package]
+name = "pdf-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "pdf-app"
+path = "src/main.rs"
+
+[dependencies]
+pdf-app = { path = "../pdf-app" }
+pdf-bytes = { path = "../pdf-bytes" }
+pdf-cli = { path = "../pdf-cli" }
+pdf-edit = { path = "../pdf-edit" }
+pdf-semantics = { path = "../pdf-semantics" }
+pdf-session = { path = "../pdf-session" }
+pdf-window = { path = "../pdf-window" }
+
+[lints]
+workspace = true

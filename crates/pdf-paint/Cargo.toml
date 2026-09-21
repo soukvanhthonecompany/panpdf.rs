@@ -1,0 +1,18 @@
+[package]
+name = "pdf-paint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+jpeg2000 = { git = "https://github.com/soukvanhthonecompany/jpeg2000", tag = "v0.1.0" }
+hayro-jbig2 = { version = "=0.3.0", default-features = false, features = ["std"] }
+jpeg-decoder = { version = "=0.3.2", default-features = false, features = ["platform_independent"] }
+pdf-bytes = { path = "../pdf-bytes" }
+pdf-content = { path = "../pdf-content" }
+pdf-syntax = { path = "../pdf-syntax" }
+
+[lints]
+workspace = true

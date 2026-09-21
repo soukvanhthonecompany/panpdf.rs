@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+exclude = ["fuzz"]
+members = [
+    "crates/pdf-agent",
+    "crates/pdf-app",
+    "crates/pdf-bytes",
+    "crates/pdf-cli",
+    "crates/pdf-desktop",
+    "crates/pdf-content",
+    "crates/pdf-edit",
+    "crates/pdf-font",
+    "crates/pdf-ocr",
+    "crates/pdf-paint",
+    "crates/pdf-print",
+    "crates/pdf-render",
+    "crates/pdf-semantics",
+    "crates/pdf-session",
+    "crates/pdf-security",
+    "crates/pdf-syntax",
+    "crates/pdf-window",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "AGPL-3.0-only"
+repository = "https://github.com/soukvanhthonecompany/panpdf.rs"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

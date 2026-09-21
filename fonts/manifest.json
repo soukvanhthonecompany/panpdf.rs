@@ -1,0 +1,297 @@
+{
+ "schema": "panpdf.font-package/1",
+ "package_version": "packaged-1",
+ "purpose": "The faces a substitution may draw from on a machine with no fonts installed, so a fixture renders the same bytes anywhere. Chosen from what this corpus measurably asks for, not for completeness; docs/research/font-substitution-upstream.md records the comparison.",
+ "sources": [
+  {
+   "name": "liberation",
+   "version": "2.1.5",
+   "project": "https://github.com/liberationfonts/liberation-fonts",
+   "url": "https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz",
+   "archive": "liberation-fonts-ttf-2.1.5.tar.gz",
+   "sha256": "7191c669bf38899f73a2094ed00f7b800553364f90e2637010a69c0e268f25d0",
+   "licence": "SIL Open Font License 1.1",
+   "notices": [
+    {
+     "member": "liberation-fonts-ttf-2.1.5/LICENSE",
+     "file": "LICENSE-liberation.txt",
+     "sha256": "93fed46019c38bbe566b479d22148e2e8a1e85ada614accb0211c37b2c61c19b"
+    },
+    {
+     "member": "liberation-fonts-ttf-2.1.5/AUTHORS",
+     "file": "AUTHORS-liberation.txt",
+     "sha256": "b627404917ef824675cb24c32e2facd0b57650627955f3fc3d8a8863c5d0adfc"
+    }
+   ]
+  },
+  {
+   "name": "noto-sans-lao",
+   "version": "2.003",
+   "project": "https://github.com/notofonts/lao",
+   "url": "https://github.com/notofonts/lao/releases/download/NotoSansLao-v2.003/NotoSansLao-v2.003.zip",
+   "archive": "NotoSansLao-v2.003.zip",
+   "sha256": "5a87c31b1a40ef8147c1e84437e5f0ceba2d4dbbfc0b56a65821ad29870da8c0",
+   "licence": "SIL Open Font License 1.1",
+   "notices": [
+    {
+     "member": "OFL.txt",
+     "file": "LICENSE-noto-lao.txt",
+     "sha256": "a42993999944845fb5af693ea678a372a053db1f0981d55e911dcfa9d330f279"
+    }
+   ]
+  },
+  {
+   "name": "noto-serif-lao",
+   "version": "2.003",
+   "project": "https://github.com/notofonts/lao",
+   "url": "https://github.com/notofonts/lao/releases/download/NotoSerifLao-v2.003/NotoSerifLao-v2.003.zip",
+   "archive": "NotoSerifLao-v2.003.zip",
+   "sha256": "e96a303d3347790b0ef3db274971a989a736ce766ec9ea1bea0e1458568a80b2",
+   "licence": "SIL Open Font License 1.1",
+   "notices": []
+  },
+  {
+   "name": "noto-sans-thai",
+   "version": "2.002",
+   "project": "https://github.com/notofonts/thai",
+   "url": "https://github.com/notofonts/thai/releases/download/NotoSansThai-v2.002/NotoSansThai-v2.002.zip",
+   "archive": "NotoSansThai-v2.002.zip",
+   "sha256": "af889cc673fc714060ce5e4e088fbad32aa4c0571a19958efeaff128a22da485",
+   "licence": "SIL Open Font License 1.1",
+   "notices": [
+    {
+     "member": "OFL.txt",
+     "file": "LICENSE-noto-thai.txt",
+     "sha256": "2e98fd23a52d253db8612cd5942c8f2ff4111b21d2367050fdca91d8ccc374a0"
+    }
+   ]
+  },
+  {
+   "name": "dejavu",
+   "version": "2.37",
+   "project": "https://github.com/dejavu-fonts/dejavu-fonts",
+   "url": "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2",
+   "archive": "dejavu-fonts-ttf-2.37.tar.bz2",
+   "sha256": "fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7",
+   "licence": "Bitstream Vera Fonts Copyright and the Arev fonts licence, both permissive",
+   "notices": [
+    {
+     "member": "dejavu-fonts-ttf-2.37/LICENSE",
+     "file": "LICENSE-dejavu.txt",
+     "sha256": "7a083b136e64d064794c3419751e5c7dd10d2f64c108fe5ba161eae5e5958a93"
+    }
+   ]
+  },
+  {
+   "name": "noto-cjk-sc",
+   "version": "Sans2.004",
+   "commit": "523d033d6cb47f4a80c58a35753646f5c3608a78",
+   "project": "https://github.com/notofonts/noto-cjk",
+   "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+   "archive": "NotoSansCJKsc-Regular.otf",
+   "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+   "licence": "SIL Open Font License 1.1",
+   "notices": [
+    {
+     "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/LICENSE",
+     "file": "LICENSE-noto-cjk.txt",
+     "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+    }
+   ]
+  },
+  {
+   "name": "saysettha-ot",
+   "version": "2.000",
+   "project": "https://laoscript.net/download/",
+   "url": "https://laoscript.net/download/saysettha_ot.ttf",
+   "archive": "saysettha_ot.ttf",
+   "sha256": "040e652ee34f010f8f08764b8669cac1b713eb89270f3e83e8c855e00db60bc2",
+   "licence": "SIL Open Font License 1.1, Reserved Font Name Saysettha; Copyright (c) 2015, John M. Durdin (in the face's name table)",
+   "notices": [
+    {
+     "url": "https://openfontlicense.org/documents/OFL.txt",
+     "file": "LICENSE-saysettha-ot-OFL.txt",
+     "sha256": "1d361a8f8e8ce6e68457dcd93fb56e162e6baa3bbb7e7573a290d44399f6b57e"
+    }
+   ]
+  }
+ ],
+ "faces": [
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationSerif-Regular.ttf",
+   "file": "LiberationSerif-Regular.ttf",
+   "role": "serif",
+   "face_index": 0,
+   "sha256": "058ea80864aef09a23f45cbec2bb5400bc3dfbdea01c3f10538a21fcb497fb74"
+  },
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationSerif-Bold.ttf",
+   "file": "LiberationSerif-Bold.ttf",
+   "role": "serif",
+   "face_index": 0,
+   "sha256": "d754ba427cfe0bca54ae052384baa8f842da5bd6550ad4da024ac441e7a7d5ce"
+  },
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationSerif-Italic.ttf",
+   "file": "LiberationSerif-Italic.ttf",
+   "role": "serif",
+   "face_index": 0,
+   "sha256": "0e3dea9f8d613e006ccfa62201f33e265d19167bd0907725c3e145368b04fc2e"
+  },
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationSerif-BoldItalic.ttf",
+   "file": "LiberationSerif-BoldItalic.ttf",
+   "role": "serif",
+   "face_index": 0,
+   "sha256": "f17db8af71e24d2066b587546021d4f0b296be389512b658dec3c09affeb11a7"
+  },
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationSans-Regular.ttf",
+   "file": "LiberationSans-Regular.ttf",
+   "role": "sans-serif",
+   "face_index": 0,
+   "sha256": "76d04c18ea243f426b7de1f3ad208e927008f961dc5945e5aad352d0dfde8ee8"
+  },
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationSans-Bold.ttf",
+   "file": "LiberationSans-Bold.ttf",
+   "role": "sans-serif",
+   "face_index": 0,
+   "sha256": "788abee4c806d660e8aee46689dd8540cd4bb98da03dcc9d171ce3efd99a9173"
+  },
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationSans-Italic.ttf",
+   "file": "LiberationSans-Italic.ttf",
+   "role": "sans-serif",
+   "face_index": 0,
+   "sha256": "e5bae5c4cde31f22142753855f4f8fb86da6ff39955ed3c0a11248b0d16948b0"
+  },
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationSans-BoldItalic.ttf",
+   "file": "LiberationSans-BoldItalic.ttf",
+   "role": "sans-serif",
+   "face_index": 0,
+   "sha256": "698da70fc191cc5f33ad4d6d3fe830fe4624b898ea2e3169955928b7c491f1ee"
+  },
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationMono-Regular.ttf",
+   "file": "LiberationMono-Regular.ttf",
+   "role": "monospace",
+   "face_index": 0,
+   "sha256": "f2b83c763e8afd21709333370bed4774337fae82267937e2b5aea7e2fbd922c1"
+  },
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationMono-Bold.ttf",
+   "file": "LiberationMono-Bold.ttf",
+   "role": "monospace",
+   "face_index": 0,
+   "sha256": "bd62a0672d0b9b6710b01df434c80ad54fa5f0835207eb7b17b7a761463067bb"
+  },
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationMono-Italic.ttf",
+   "file": "LiberationMono-Italic.ttf",
+   "role": "monospace",
+   "face_index": 0,
+   "sha256": "605c01c711b44480a7508d349dfbf3264e81fa43d69e61cfa7d10b86e764c4d1"
+  },
+  {
+   "source": "liberation",
+   "member": "liberation-fonts-ttf-2.1.5/LiberationMono-BoldItalic.ttf",
+   "file": "LiberationMono-BoldItalic.ttf",
+   "role": "monospace",
+   "face_index": 0,
+   "sha256": "79451f3c09fe25116098853b7a2ca6e2436220ccc11af022979adbcf195be130"
+  },
+  {
+   "source": "noto-sans-lao",
+   "member": "NotoSansLao/full/ttf/NotoSansLao-Regular.ttf",
+   "file": "NotoSansLao-Regular.ttf",
+   "role": "lao",
+   "face_index": 0,
+   "sha256": "123d912762592efc26466671be8443958bd117aeac2e4beee0310b5b834e63f9"
+  },
+  {
+   "source": "noto-sans-lao",
+   "member": "NotoSansLao/full/ttf/NotoSansLao-Bold.ttf",
+   "file": "NotoSansLao-Bold.ttf",
+   "role": "lao",
+   "face_index": 0,
+   "sha256": "9f7d30ce049ceac2a24e9d3b8799249e734bc2b42be9f240dbed5dc451a1796e"
+  },
+  {
+   "source": "noto-serif-lao",
+   "member": "NotoSerifLao/full/ttf/NotoSerifLao-Regular.ttf",
+   "file": "NotoSerifLao-Regular.ttf",
+   "role": "lao",
+   "face_index": 0,
+   "sha256": "ff5ab4f3270c448b99b113a8ac6275bc6e4a4ca922ed2271df9a95132b5c2db6"
+  },
+  {
+   "source": "noto-serif-lao",
+   "member": "NotoSerifLao/full/ttf/NotoSerifLao-Bold.ttf",
+   "file": "NotoSerifLao-Bold.ttf",
+   "role": "lao",
+   "face_index": 0,
+   "sha256": "bdf8a669685277125be9a0071ede42baf80147180bbd4bbb541301c7266250a4"
+  },
+  {
+   "source": "noto-sans-thai",
+   "member": "NotoSansThai/full/ttf/NotoSansThai-Regular.ttf",
+   "file": "NotoSansThai-Regular.ttf",
+   "role": "thai",
+   "face_index": 0,
+   "sha256": "2101faa471942570d506a394df7da555d15246c7814c7522c63d4fa85b0d8d88"
+  },
+  {
+   "source": "noto-sans-thai",
+   "member": "NotoSansThai/full/ttf/NotoSansThai-Bold.ttf",
+   "file": "NotoSansThai-Bold.ttf",
+   "role": "thai",
+   "face_index": 0,
+   "sha256": "dd99014fba00806b1d8da54afa978b37149b950b56c6b44b5e0b5c5dcd78f245"
+  },
+  {
+   "source": "dejavu",
+   "member": "dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf",
+   "file": "DejaVuSans.ttf",
+   "role": "symbol",
+   "face_index": 0,
+   "sha256": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954"
+  },
+  {
+   "source": "dejavu",
+   "member": "dejavu-fonts-ttf-2.37/ttf/DejaVuSans-Bold.ttf",
+   "file": "DejaVuSans-Bold.ttf",
+   "role": "symbol",
+   "face_index": 0,
+   "sha256": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724"
+  },
+  {
+   "source": "noto-cjk-sc",
+   "member": "NotoSansCJKsc-Regular.otf",
+   "file": "NotoSansCJKsc-Regular.otf",
+   "role": "cjk-sc",
+   "face_index": 0,
+   "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
+  },
+  {
+   "source": "saysettha-ot",
+   "member": "saysettha_ot.ttf",
+   "file": "SaysetthaOT-Regular.ttf",
+   "role": "lao-reference",
+   "face_index": 0,
+   "sha256": "040e652ee34f010f8f08764b8669cac1b713eb89270f3e83e8c855e00db60bc2"
+  }
+ ]
+}

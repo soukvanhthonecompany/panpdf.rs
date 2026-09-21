@@ -1,0 +1,148 @@
+# Cut a release.
+#
+# Exported to the public tree as `.github/workflows/release.yml`; it is only a
+# workflow there, because that is where the tags are cut. The release's own
+# page is written from `.github/release-notes.md`, which is where the download
+# table people actually click lives.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# No one machine can build all six packages -- Apple's SDK is not
+# redistributable, and the Debian and Fedora tools are not on macOS -- so the
+# three hosts that between them can each run `packaging/build.sh` for their own
+# targets, and the last job collects what they made into one release.
+#
+# Run it by hand from the Actions tab to get the packages without a tag; that
+# run uploads artifacts and publishes nothing.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      # Every run compiled `wgpu` and `naga` from nothing, which is most of the
+      # wall clock and none of the work: the dependency graph only changes when
+      # `Cargo.lock` does. `actions/cache` is GitHub's own, so this borrows
+      # nothing new. A miss is a cold build, exactly as before.
+      - name: What was compiled last time
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: The tools packaging/build.sh looks for
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev rpm librsvg2-bin gcc-mingw-w64-x86-64 zip
+          curl -sSLo /usr/local/bin/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /usr/local/bin/appimagetool
+      - name: The substitution faces
+        run: python3 fonts/vendor.py
+      - run: packaging/build.sh --list
+      - name: Build
+        run: packaging/build.sh tarball deb rpm appimage windows
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-and-windows
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+            dist/*.AppImage
+            dist/*.zip
+            dist/*.exe
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      # Every run compiled `wgpu` and `naga` from nothing, which is most of the
+      # wall clock and none of the work: the dependency graph only changes when
+      # `Cargo.lock` does. `actions/cache` is GitHub's own, so this borrows
+      # nothing new. A miss is a cold build, exactly as before.
+      - name: What was compiled last time
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - run: brew install librsvg
+      - name: The substitution faces
+        run: python3 fonts/vendor.py
+      - run: packaging/build.sh --list
+      - name: Build
+        run: packaging/build.sh macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            dist/*.tar.gz
+            dist/*.dmg
+
+  publish:
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+      - uses: actions/checkout@v4
+        with:
+          path: source
+      - name: One list of everything, with its hashes
+        run: |
+          mkdir -p dist
+          find packages -type f -not -name SHA256SUMS -exec mv {} dist/ \;
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: The download page
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          sed -e "s|__REPO__|${GITHUB_REPOSITORY}|g" \
+              -e "s|__TAG__|${tag}|g" \
+              -e "s|__VERSION__|${tag#v}|g" \
+              source/.github/release-notes.md > notes.md
+          cat notes.md
+      - name: Every file the page offers is a file this release has
+        run: |
+          bad=0
+          for f in $(grep -o 'releases/download/[^)]*' notes.md | sed 's|.*/||' | sort -u); do
+            if [ ! -e "dist/$f" ]; then
+              echo "the page offers $f, which this release does not have"
+              bad=1
+            fi
+          done
+          [ "$bad" -eq 0 ]
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: notes.md
+          generate_release_notes: true

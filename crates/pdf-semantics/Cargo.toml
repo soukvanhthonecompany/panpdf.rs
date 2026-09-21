@@ -1,0 +1,17 @@
+[package]
+name = "pdf-semantics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+icu_segmenter = { version = "=2.3.0", default-features = false, features = ["compiled_data", "auto"] }
+pdf-bytes = { path = "../pdf-bytes" }
+pdf-font = { path = "../pdf-font" }
+pdf-paint = { path = "../pdf-paint" }
+pdf-syntax = { path = "../pdf-syntax" }
+
+[lints]
+workspace = true

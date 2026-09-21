@@ -1,0 +1,15 @@
+[package]
+name = "pdf-font"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rustybuzz = "=0.20.1"
+pdf-bytes = { path = "../pdf-bytes" }
+pdf-syntax = { path = "../pdf-syntax" }
+
+[lints]
+workspace = true
