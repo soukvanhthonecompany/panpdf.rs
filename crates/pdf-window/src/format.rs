@@ -5,6 +5,8 @@ use pdf_app::wording::{Control, Lang, Message};
 use crate::icons::Icon;
 use crate::window_state::Window;
 
+mod font_search;
+
 const SIZES: [f64; 16] = [
     8.0, 9.0, 10.0, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 28.0, 36.0, 48.0, 60.0, 72.0,
 ];
@@ -332,25 +334,59 @@ fn opener(
 fn font_box(ui: &mut egui::Ui, lang: Lang, font: Option<&str>) -> Option<pdf_edit::TextStyle> {
     let mut chosen = None;
     let shown = font.map_or_else(|| Message::Font.say(lang), str::to_owned);
-    egui::ComboBox::from_id_salt("format-font")
+    let query_id = egui::Id::new("format-font-query");
+    let opened_id = egui::Id::new("format-font-opened");
+    let list = egui::ComboBox::from_id_salt("format-font")
         .selected_text(egui::RichText::new(shown))
         .width(150.0)
-        .height(360.0)
+        .height(400.0)
         .truncate()
         .show_ui(ui, |ui| {
-            for family in pdf_cli::font_families() {
-                let current = font.is_some_and(|font| font.eq_ignore_ascii_case(family));
-                if ui.selectable_label(current, family).clicked() {
-                    chosen = Some(pdf_edit::TextStyle {
-                        family: Some(family.clone()),
-                        ..pdf_edit::TextStyle::default()
-                    });
-                }
+            let mut query: String = ui.data(|data| data.get_temp(query_id)).unwrap_or_default();
+            let line = ui.add(
+                egui::TextEdit::singleline(&mut query)
+                    .hint_text(Message::Font.say(lang))
+                    .desired_width(f32::INFINITY),
+            );
+            if ui.data(|data| data.get_temp::<bool>(opened_id)).is_none() {
+                line.request_focus();
+                ui.data_mut(|data| data.insert_temp(opened_id, true));
             }
-        })
-        .response
-        .on_hover_text(Message::FontHelp.say(lang));
-    chosen
+            let families = pdf_cli::font_families();
+            let shortlist = font_search::matching(families, &query);
+            let took_the_first =
+                line.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            if took_the_first {
+                if let Some(&first) = shortlist.first() {
+                    chosen = Some(&families[first]);
+                }
+                ui.close();
+            }
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .max_height(340.0)
+                .show(ui, |ui| {
+                    for at in shortlist {
+                        let family = &families[at];
+                        let current = font.is_some_and(|font| font.eq_ignore_ascii_case(family));
+                        if ui.selectable_label(current, family).clicked() {
+                            chosen = Some(family);
+                        }
+                    }
+                });
+            ui.data_mut(|data| data.insert_temp(query_id, query));
+        });
+    if list.inner.is_none() {
+        ui.data_mut(|data| {
+            data.remove::<String>(query_id);
+            data.remove::<bool>(opened_id);
+        });
+    }
+    list.response.on_hover_text(Message::FontHelp.say(lang));
+    chosen.map(|family| pdf_edit::TextStyle {
+        family: Some(family.clone()),
+        ..pdf_edit::TextStyle::default()
+    })
 }
 
 fn size_box(

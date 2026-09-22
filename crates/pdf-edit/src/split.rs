@@ -122,10 +122,6 @@ pub(crate) fn rewrite_cluster(
     ))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "resolution, one-stream rewrite, proof, and plan assembly are one fail-closed transaction"
-)]
 pub(crate) fn rewrite_runs(
     source: &ByteStore,
     program: &pdf_content::PageProgram,
@@ -135,13 +131,40 @@ pub(crate) fn rewrite_runs(
     runs: &[RunRewrite],
     fonts: crate::Fonts<'_>,
 ) -> Result<Plan, SpikeError> {
-    if runs.is_empty() {
+    rewrite_group(
+        source,
+        program,
+        operations,
+        graph,
+        page_index,
+        (runs, &[]),
+        fonts,
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "resolution, one-stream rewrite, proof, and plan assembly are one fail-closed transaction"
+)]
+pub(crate) fn rewrite_group(
+    source: &ByteStore,
+    program: &pdf_content::PageProgram,
+    operations: &[Vec<pdf_content::Operation>],
+    graph: &pdf_paint::PaintGraph,
+    page_index: usize,
+    (runs, objects): (&[RunRewrite], &[SourceAnchor]),
+    fonts: crate::Fonts<'_>,
+) -> Result<Plan, SpikeError> {
+    if runs.is_empty() && objects.is_empty() {
         return Err(SpikeError::SelectionNamesNoRun);
     }
     if let Some(invocation) = crate::form_edit::invocation_of(
         runs.iter()
             .filter_map(|run| graph.atoms.iter().find(|atom| run.anchor.names(&atom.id))),
     )? {
+        if !objects.is_empty() {
+            return Err(SpikeError::ObjectInsideForm);
+        }
         return rewrite_runs_in_form(
             source, program, operations, graph, page_index, runs, invocation, fonts,
         );
@@ -227,6 +250,52 @@ pub(crate) fn rewrite_runs(
         });
     }
 
+    let mut removals = Vec::with_capacity(objects.len());
+    for anchor in objects {
+        let ordinal = crate::place_object::resolve(graph, anchor)?;
+        if seen.contains(&ordinal) {
+            return Err(SpikeError::ObjectNamedMoreThanOnce);
+        }
+        seen.push(ordinal);
+        let atom = &graph.atoms[ordinal];
+        let region = crate::place_object::declared_region(&atom.kind, Some(atom));
+        let placed = crate::place_object::placement_of(&atom.kind)?;
+        let (index, operation_index) = crate::place_object::written_at(program, operations, atom)?;
+        match stream_index {
+            None => {
+                stream_index = Some(index);
+                stream_reference = Some(atom.id.stream);
+            }
+            Some(had) if had == index => {}
+            Some(_) => return Err(SpikeError::SelectionSpansSeveralStreams),
+        }
+        let span = operations[index][operation_index].span();
+        let begin = crate::place_object::construction_start(atom).unwrap_or_else(|| span.start());
+        if begin < span.start()
+            && !crate::remove_object::only_draws(
+                &program.streams[index].bytes,
+                &operations[index],
+                begin..span.end(),
+            )
+        {
+            return Err(SpikeError::ObjectIsDrawing);
+        }
+        if span.end() > program.streams[index].bytes.as_bytes().len() || begin > span.end() {
+            return Err(SpikeError::ObjectNotInPageContent);
+        }
+        removals.push(ObjectRemoval {
+            ordinal,
+            start: begin,
+            end: span.end(),
+            region,
+            moved: MovedRun {
+                anchor: anchor.clone(),
+                atom_ordinal: ordinal,
+                original_matrix: placed,
+            },
+        });
+    }
+
     let reference = stream_reference.ok_or(SpikeError::SelectionNamesNoRun)?;
     if program
         .streams
@@ -240,26 +309,46 @@ pub(crate) fn rewrite_runs(
     let index = stream_index.ok_or(SpikeError::SelectionNamesNoRun)?;
     rewrites.sort_by_key(|splice| splice.start);
     let decoded = program.streams[index].bytes.as_bytes();
+    let mut spliced: Vec<(usize, usize, &[u8])> = rewrites
+        .iter()
+        .map(|splice| (splice.start, splice.end, splice.replacement.as_slice()))
+        .chain(
+            removals
+                .iter()
+                .map(|removal| (removal.start, removal.end, b" ".as_slice())),
+        )
+        .collect();
+    spliced.sort_by_key(|(start, _, _)| *start);
     let mut edited = Vec::with_capacity(decoded.len());
     let mut cursor = 0_usize;
-    for splice in &rewrites {
-        if splice.start < cursor || splice.end < splice.start || splice.end > decoded.len() {
+    for (start, end, replacement) in spliced {
+        if start < cursor || end < start || end > decoded.len() {
             return Err(SpikeError::SelectionNamesNoRun);
         }
-        edited.extend_from_slice(&decoded[cursor..splice.start]);
-        edited.extend_from_slice(&splice.replacement);
-        cursor = splice.end;
+        edited.extend_from_slice(&decoded[cursor..start]);
+        edited.extend_from_slice(replacement);
+        cursor = end;
     }
     edited.extend_from_slice(&decoded[cursor..]);
 
     let rewritten = interpret_candidate(program, index, &edited, fonts)
         .map_err(|()| SpikeError::DeleteNotIsolated)?;
-    let (correspondence, inserted) = prove_rewrite(graph, &rewritten, &rewrites)?;
+    let gone: Vec<usize> = removals.iter().map(|removal| removal.ordinal).collect();
+    let (correspondence, inserted) = prove_rewrite(graph, &rewritten, &rewrites, &gone)?;
 
-    let declared_region = combine_regions(rewrites.iter().map(|splice| &splice.region))?;
-    let moved = rewrites.into_iter().map(|splice| splice.moved).collect();
+    let declared_region = declared_over(&rewrites, &removals)?;
+    let capability = if rewrites.is_empty() {
+        Capability::Exact
+    } else {
+        Capability::Normalized
+    };
+    let moved = rewrites
+        .into_iter()
+        .map(|splice| splice.moved)
+        .chain(removals.into_iter().map(|removal| removal.moved))
+        .collect();
     Ok(Plan::new(
-        Capability::Normalized,
+        capability,
         vec![PlannedWrite {
             reference,
             body: PlannedBody::ReplacedStream { decoded: edited },
@@ -273,6 +362,38 @@ pub(crate) fn rewrite_runs(
     )
     .with_correspondence(correspondence)
     .with_inserted(inserted))
+}
+
+struct ObjectRemoval {
+    ordinal: usize,
+    start: usize,
+    end: usize,
+    region: Option<[f64; 4]>,
+    moved: MovedRun,
+}
+
+fn declared_over(
+    rewrites: &[RunSplice],
+    removals: &[ObjectRemoval],
+) -> Result<Option<[f64; 4]>, SpikeError> {
+    let text = combine_regions(rewrites.iter().map(|splice| &splice.region))?;
+    if removals.is_empty() {
+        return Ok(text);
+    }
+    let mut bounds: Option<[f64; 4]> = None;
+    for removal in removals {
+        let Some(region) = removal.region else {
+            return Ok(None);
+        };
+        bounds = Some(bounds.map_or(region, |old| union(old, region)));
+    }
+    if rewrites.is_empty() {
+        return Ok(bounds);
+    }
+    Ok(match (text, bounds) {
+        (Some(text), Some(objects)) => Some(union(text, objects)),
+        _ => None,
+    })
 }
 
 #[expect(
@@ -401,7 +522,7 @@ fn rewrite_runs_in_form(
             .checked_sub(base)
             .ok_or(SpikeError::MoveNotProvable)?;
     }
-    let (mapping, inserted) = prove_rewrite(&before, &after, &rewrites)?;
+    let (mapping, inserted) = prove_rewrite(&before, &after, &rewrites, &[])?;
     let gained = i64::try_from(after.atoms.len()).map_err(|_| SpikeError::MoveNotProvable)?
         - i64::try_from(before.atoms.len()).map_err(|_| SpikeError::MoveNotProvable)?;
     let correspondence = carried_to_page(graph, &mapping, base, inside.len(), gained)?;
@@ -671,12 +792,16 @@ fn prove_rewrite(
     before: &pdf_paint::PaintGraph,
     after: &pdf_paint::PaintGraph,
     rewrites: &[RunSplice],
+    gone: &[usize],
 ) -> Result<(Correspondence, Insertions), SpikeError> {
     use pdf_semantics::ClusterKey;
     let mut mapping = std::collections::BTreeMap::new();
     let mut inserted = Vec::new();
     let mut rewritten = after.atoms.iter().enumerate();
     for (ordinal, one) in before.atoms.iter().enumerate() {
+        if gone.contains(&ordinal) {
+            continue;
+        }
         let Some(splice) = rewrites.iter().find(|splice| splice.ordinal == ordinal) else {
             let (after_atom, other) = rewritten.next().ok_or(SpikeError::DeleteNotIsolated)?;
             match (&one.kind, &other.kind) {
@@ -2155,5 +2280,239 @@ mod tests {
             })
             .collect();
         assert!(codes.contains("<4142>") && codes.contains("<43>"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod group_delete_tests {
+    use pdf_bytes::ByteStore;
+    use pdf_paint::PaintAtomKind;
+
+    use crate::block_move::tests::{page_with, read};
+    use crate::history::History;
+    use crate::plan::{Command, GlyphChange, Plan, RunRewrite, SourceAnchor};
+    use crate::spike_move_text::{PlannerPage, SpikeError, plan_command_in};
+
+    fn diagram() -> ByteStore {
+        page_with(
+            b"BT /F1 12 Tf 1 0 0 1 20 150 Tm (A) Tj ET\n\
+              BT /F1 12 Tf 1 0 0 1 20 110 Tm (A) Tj ET\n\
+              10 10 40 30 re f\n\
+              100 100 40 30 re f",
+        )
+    }
+
+    fn painted(source: &ByteStore) -> (usize, usize) {
+        let read = read(source);
+        let text = read
+            .graph
+            .atoms
+            .iter()
+            .filter(|atom| matches!(atom.kind, PaintAtomKind::Text(_)))
+            .count();
+        let paths = read
+            .graph
+            .atoms
+            .iter()
+            .filter(|atom| matches!(atom.kind, PaintAtomKind::Path(_)))
+            .count();
+        (text, paths)
+    }
+
+    fn members(source: &ByteStore) -> (Vec<RunRewrite>, Vec<SourceAnchor>) {
+        let read = read(source);
+        let mut runs = Vec::new();
+        let mut objects = Vec::new();
+        for atom in &read.graph.atoms {
+            match &atom.kind {
+                PaintAtomKind::Text(text) => runs.push(RunRewrite {
+                    anchor: SourceAnchor::of(&atom.id),
+                    glyphs: Some(GlyphChange::Remove {
+                        glyphs: 0..text.glyphs.len(),
+                        close_gap: false,
+                    }),
+                    displace: (0.0, 0.0),
+                }),
+                PaintAtomKind::Path(_) => objects.push(SourceAnchor::of(&atom.id)),
+                _ => {}
+            }
+        }
+        (runs, objects)
+    }
+
+    fn plan(source: &ByteStore, command: &Command) -> Result<Plan, SpikeError> {
+        let read = read(source);
+        plan_command_in(
+            source,
+            PlannerPage {
+                program: &read.program,
+                operations: &read.operations,
+                graph: &read.graph,
+                fonts: None,
+                restrictions: crate::Restrictions::Respect,
+                credential: b"",
+            },
+            command,
+        )
+    }
+
+    #[test]
+    fn the_diagram_paints_two_labels_and_two_boxes() {
+        assert_eq!(painted(&diagram()), (2, 2));
+    }
+
+    #[test]
+    fn a_group_of_four_is_deleted_at_once_and_one_undo_brings_all_four_back() {
+        let source = diagram();
+        let (runs, objects) = members(&source);
+        assert_eq!(runs.len() + objects.len(), 4, "the band caught four things");
+
+        let plan = plan(
+            &source,
+            &Command::DeleteGroup {
+                page_index: 0,
+                runs,
+                objects,
+            },
+        )
+        .expect("a group of text and drawings is deletable");
+        let mut history = History::new(source.clone(), b"");
+        history.apply(plan).expect("it commits");
+
+        assert_eq!(
+            painted(history.source()),
+            (0, 0),
+            "four were chosen and fewer than four went"
+        );
+        assert_eq!(history.undo_depth(), 1, "one gesture, one step");
+        assert!(history.undo().expect("it undoes"), "there was a step");
+        assert_eq!(
+            painted(history.source()),
+            (2, 2),
+            "one undo did not bring all four back"
+        );
+    }
+
+    #[test]
+    fn a_command_that_deletes_one_thing_does_not_meet_the_count() {
+        let source = diagram();
+        let (runs, objects) = members(&source);
+
+        let one = plan(
+            &source,
+            &Command::RemoveObject {
+                page_index: 0,
+                target: objects[0].clone(),
+            },
+        )
+        .expect("one box is removable");
+        let mut history = History::new(source.clone(), b"");
+        history.apply(one).expect("it commits");
+        assert_eq!(
+            painted(history.source()),
+            (2, 1),
+            "the one-object command is not the group command"
+        );
+
+        let text_only = plan(
+            &source,
+            &Command::RewriteText {
+                page_index: 0,
+                runs,
+            },
+        )
+        .expect("text");
+        let mut history = History::new(source, b"");
+        history.apply(text_only).expect("it commits");
+        assert_eq!(
+            painted(history.source()),
+            (0, 2),
+            "a text-only delete left the drawings, which is the bug"
+        );
+    }
+
+    #[test]
+    fn a_group_of_drawings_alone_is_one_command() {
+        let source = page_with(
+            b"10 10 40 30 re f\n\
+              60 10 40 30 re f\n\
+              110 10 40 30 re f",
+        );
+        assert_eq!(painted(&source), (0, 3));
+        let (_, objects) = members(&source);
+
+        let plan = plan(
+            &source,
+            &Command::DeleteGroup {
+                page_index: 0,
+                runs: Vec::new(),
+                objects,
+            },
+        )
+        .expect("three drawings are deletable together");
+        let mut history = History::new(source, b"");
+        history.apply(plan).expect("it commits");
+        assert_eq!(painted(history.source()), (0, 0));
+        assert_eq!(history.undo_depth(), 1);
+        assert!(history.undo().expect("it undoes"));
+        assert_eq!(painted(history.source()), (0, 3));
+    }
+
+    #[test]
+    fn a_member_that_cannot_be_deleted_refuses_the_whole_group() {
+        let source = diagram();
+        let (runs, mut objects) = members(&source);
+        objects.push(runs[0].anchor.clone());
+
+        let refused = plan(
+            &source,
+            &Command::DeleteGroup {
+                page_index: 0,
+                runs,
+                objects,
+            },
+        );
+        assert!(
+            matches!(refused, Err(SpikeError::ObjectIsText)),
+            "the group was not refused by name: {refused:?}"
+        );
+        assert_eq!(painted(&source), (2, 2), "a refused group changed the page");
+    }
+
+    #[test]
+    fn a_member_named_twice_is_refused() {
+        let source = diagram();
+        let (runs, mut objects) = members(&source);
+        objects.push(objects[0].clone());
+
+        let refused = plan(
+            &source,
+            &Command::DeleteGroup {
+                page_index: 0,
+                runs,
+                objects,
+            },
+        );
+        assert!(
+            matches!(refused, Err(SpikeError::ObjectNamedMoreThanOnce)),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_group_naming_nothing_is_refused() {
+        let source = diagram();
+        let refused = plan(
+            &source,
+            &Command::DeleteGroup {
+                page_index: 0,
+                runs: Vec::new(),
+                objects: Vec::new(),
+            },
+        );
+        assert!(
+            matches!(refused, Err(SpikeError::SelectionNamesNoRun)),
+            "{refused:?}"
+        );
     }
 }

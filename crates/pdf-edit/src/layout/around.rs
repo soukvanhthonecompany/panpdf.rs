@@ -353,10 +353,8 @@ pub fn shapes_over(graph: &pdf_paint::PaintGraph, frame: [f64; 4]) -> Vec<Shape<
             pdf_paint::PaintAtomKind::Path(paint) => {
                 shapes.push(Shape::Drawn(&paint.path, paint.state.ctm.value));
             }
-            pdf_paint::PaintAtomKind::Image(image) => {
-                shapes.push(Shape::Placed(image.state.ctm.value));
-            }
-            pdf_paint::PaintAtomKind::TransparencyGroup(_)
+            pdf_paint::PaintAtomKind::Image(_)
+            | pdf_paint::PaintAtomKind::TransparencyGroup(_)
             | pdf_paint::PaintAtomKind::Shading(_) => shapes.push(Shape::Box(bounds)),
         }
     }

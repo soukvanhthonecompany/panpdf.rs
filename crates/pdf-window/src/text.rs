@@ -2,14 +2,16 @@ use eframe::egui;
 
 use pdf_app::EditJob;
 use pdf_app::draft::{Intent, Landing as TextLanding, Target};
-use pdf_app::view::{Quad, Step, caret_step_in, selection_between, toolbar_at};
+use pdf_app::view::{
+    HANDLE_REACH, Quad, ROTATE_REACH_OUT, Step, caret_step_in, selection_between, toolbar_at,
+};
 use pdf_app::wording::Message;
 use pdf_edit::BlockRange;
 
 use crate::canvas::box_on_screen;
 use crate::format::Set;
 use crate::format::Wanted;
-use crate::window_state::{Caret, Pointing, Window};
+use crate::window_state::{Caret, Pointing, Regrouping, Window};
 
 impl Window {
     pub(crate) fn selection(&self) -> Option<(usize, usize, usize)> {
@@ -95,13 +97,24 @@ impl Window {
         let Some(page) = self.pointing.page() else {
             return;
         };
-        let anchors = if self.chosen.is_a_group() && self.chosen.page == page {
-            self.group_anchors()
-        } else {
-            self.pointing
-                .block()
-                .and_then(|at| self.anchors_of(page, at))
-        };
+        if self.chosen.is_a_group() && self.chosen.page == page {
+            if let Some((anchors, objects)) = self.group_members() {
+                let job = if objects.is_empty() {
+                    self.editor.begin_delete_block(page, &anchors)
+                } else {
+                    self.editor.begin_delete_group(page, &anchors, &objects)
+                };
+                if job.is_some() {
+                    self.point_at(Pointing::Nothing);
+                }
+                self.send(job);
+            }
+            return;
+        }
+        let anchors = self
+            .pointing
+            .block()
+            .and_then(|at| self.anchors_of(page, at));
         let picture = self.pointing.object_on(page).and_then(|at| {
             let object = self.overlay(page)?.objects.get(at)?;
             Some((
@@ -113,12 +126,7 @@ impl Window {
             (Some(anchors), _) => self.editor.begin_delete_block(page, &anchors),
             (None, Some((anchor, false))) => self.editor.begin_remove_object(page, &anchor),
             (None, Some((anchor, true))) => self.editor.begin_remove_drawing(page, &anchor),
-            (None, None) => {
-                if self.chosen.count() > 0 {
-                    self.editor.say(Message::GroupDeleteIsTextOnly);
-                }
-                return;
-            }
+            (None, None) => return,
         };
         if job.is_some() {
             self.point_at(Pointing::Nothing);
@@ -126,29 +134,44 @@ impl Window {
         self.send(job);
     }
 
-    fn group_anchors(&self) -> Option<Vec<String>> {
+    pub(crate) fn group_members(&self) -> Option<(Vec<String>, Vec<String>)> {
         let overlay = self.overlay(self.chosen.page)?;
-        if !self.chosen.objects.is_empty() {
-            return None;
-        }
-        let mut anchors = Vec::new();
+        let mut anchors: Vec<String> = Vec::new();
         for block in &self.chosen.blocks {
-            anchors.extend(overlay.blocks.get(*block)?.anchors.iter().cloned());
+            for anchor in &overlay.blocks.get(*block)?.anchors {
+                if !anchors.iter().any(|had| had == anchor) {
+                    anchors.push(anchor.clone());
+                }
+            }
         }
-        (!anchors.is_empty()).then_some(anchors)
-    }
-
-    fn group_members(&self) -> Option<(Vec<String>, Vec<String>)> {
-        let overlay = self.overlay(self.chosen.page)?;
-        let mut anchors = Vec::new();
-        for block in &self.chosen.blocks {
-            anchors.extend(overlay.blocks.get(*block)?.anchors.iter().cloned());
-        }
-        let mut objects = Vec::new();
+        let mut objects: Vec<String> = Vec::new();
         for object in &self.chosen.objects {
-            objects.push(overlay.objects.get(*object)?.anchor.clone());
+            let anchor = &overlay.objects.get(*object)?.anchor;
+            if !objects.iter().any(|had| had == anchor) {
+                objects.push(anchor.clone());
+            }
         }
         (!anchors.is_empty() || !objects.is_empty()).then_some((anchors, objects))
+    }
+
+    fn group_moved_to(&self, page: usize, (dx, dy): (f64, f64)) -> Option<Regrouping> {
+        let overlay = self.overlay(page)?;
+        let moved = |quad: pdf_cli::QuadPixels| Quad::from_pixels(quad).shifted(dx, dy);
+        Some(Regrouping {
+            page,
+            blocks: self
+                .chosen
+                .blocks
+                .iter()
+                .filter_map(|at| overlay.blocks.get(*at).map(|block| moved(block.quad)))
+                .collect(),
+            objects: self
+                .chosen
+                .objects
+                .iter()
+                .filter_map(|at| overlay.objects.get(*at).map(|object| moved(object.quad)))
+                .collect(),
+        })
     }
 
     pub(crate) fn begin_group_move(
@@ -157,12 +180,18 @@ impl Window {
         (dx, dy): (f64, f64),
     ) -> Option<EditJob> {
         let (anchors, objects) = self.group_members()?;
-        if objects.is_empty() {
-            self.editor.begin_move_block(page, &anchors, dx, dy)
+        let going = self.group_moved_to(page, (dx, dy));
+        let job = if objects.is_empty() {
+            self.editor
+                .begin_move_block_as_group(page, &anchors, dx, dy)
         } else {
             self.editor
                 .begin_move_group(page, &anchors, &objects, (dx, dy))
+        };
+        if job.is_some() {
+            self.regroup = going;
         }
+        job
     }
 
     #[expect(
@@ -176,6 +205,15 @@ impl Window {
         }
         if self.text_draft.is_some() {
             self.drawn_frame_toolbar(ui);
+            return;
+        }
+        if !self.pointing.editing()
+            && self
+                .pointing
+                .page()
+                .is_some_and(|page| self.offer_on(page) == Offer::Group)
+        {
+            self.group_toolbar(ui);
             return;
         }
         let at = self
@@ -265,6 +303,7 @@ impl Window {
             .map(f64::from),
             (f64::from(size.0), f64::from(size.1)),
             [view.min.x, view.min.y, view.max.x, view.max.y].map(f64::from),
+            stem_on_screen(laid.placed),
         );
         #[allow(clippy::cast_possible_truncation)]
         let corner = egui::pos2(x as f32, y as f32);
@@ -607,6 +646,10 @@ impl Window {
         let Pointing::Object { page, object } = self.pointing else {
             return;
         };
+        let offer = self.offer_on(page);
+        if offer != Offer::Object {
+            return;
+        }
         let Some(laid) = self.laid.iter().copied().find(|laid| laid.page == page) else {
             return;
         };
@@ -618,7 +661,8 @@ impl Window {
             return;
         };
         let bounds = Quad::from_pixels(quad).bounds();
-        let size = (52.0, 44.0);
+        #[allow(clippy::cast_precision_loss)]
+        let size = (ONE_CONTROL * controls_in(offer) as f32, 44.0);
         let on_screen = box_on_screen(laid.placed, bounds);
         let view = ui.clip_rect();
         let (x, y) = toolbar_at(
@@ -631,6 +675,7 @@ impl Window {
             .map(f64::from),
             (f64::from(size.0), f64::from(size.1)),
             [view.min.x, view.min.y, view.max.x, view.max.y].map(f64::from),
+            stem_on_screen(laid.placed),
         );
         #[allow(clippy::cast_possible_truncation)]
         let corner = self
@@ -658,6 +703,93 @@ impl Window {
         }
     }
 
+    fn group_toolbar(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        let page = self.chosen.page;
+        let Some(laid) = self.laid.iter().copied().find(|laid| laid.page == page) else {
+            return;
+        };
+        let Some(bounds) = self.group_bounds(page) else {
+            return;
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let size = (ONE_CONTROL * controls_in(Offer::Group) as f32, 44.0);
+        let on_screen = box_on_screen(laid.placed, bounds);
+        let view = ui.clip_rect();
+        let (x, y) = toolbar_at(
+            [
+                on_screen.min.x,
+                on_screen.min.y,
+                on_screen.max.x,
+                on_screen.max.y,
+            ]
+            .map(f64::from),
+            (f64::from(size.0), f64::from(size.1)),
+            [view.min.x, view.min.y, view.max.x, view.max.y].map(f64::from),
+            0.0,
+        );
+        #[allow(clippy::cast_possible_truncation)]
+        let corner = self
+            .context
+            .unwrap_or_else(|| egui::pos2(x as f32, y as f32));
+        let area = egui::Rect::from_min_size(corner, egui::vec2(size.0, size.1));
+        let mut asked = false;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+            toolbar_frame(ui).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    asked = crate::format::icon_button(
+                        ui,
+                        crate::icons::Icon::Delete,
+                        &Message::DeleteBlockHelp.say(lang),
+                        false,
+                        true,
+                    )
+                    .clicked();
+                });
+            });
+        });
+        if asked {
+            self.delete_the_object();
+        }
+    }
+
+    pub(crate) fn offer_on(&self, page: usize) -> Offer {
+        let members = if self.chosen.page == page {
+            self.chosen.count()
+        } else {
+            0
+        };
+        offer_for(members, self.pointing.object_on(page).is_some())
+    }
+
+    fn group_bounds(&self, page: usize) -> Option<[f64; 4]> {
+        let overlay = self.overlay(page)?;
+        let quads = self
+            .chosen
+            .blocks
+            .iter()
+            .filter_map(|at| overlay.blocks.get(*at).map(|block| block.quad))
+            .chain(
+                self.chosen
+                    .objects
+                    .iter()
+                    .filter_map(|at| overlay.objects.get(*at).map(|object| object.quad)),
+            );
+        let mut bounds: Option<[f64; 4]> = None;
+        for quad in quads {
+            let box_ = Quad::from_pixels(quad).bounds();
+            bounds = Some(bounds.map_or(box_, |had: [f64; 4]| {
+                [
+                    had[0].min(box_[0]),
+                    had[1].min(box_[1]),
+                    had[2].max(box_[2]),
+                    had[3].max(box_[3]),
+                ]
+            }));
+        }
+        bounds
+    }
+
     fn drawn_frame_toolbar(&mut self, ui: &mut egui::Ui) {
         let Some(draft) = self.text_draft.clone() else {
             return;
@@ -681,6 +813,7 @@ impl Window {
             .map(f64::from),
             (f64::from(size.0), f64::from(size.1)),
             [view.min.x, view.min.y, view.max.x, view.max.y].map(f64::from),
+            0.0,
         );
         #[allow(clippy::cast_possible_truncation)]
         let corner = self
@@ -839,4 +972,72 @@ pub(crate) fn toolbar_frame(ui: &mut egui::Ui) -> egui::Frame {
     egui::Frame::popup(ui.style())
         .inner_margin(egui::Margin::symmetric(6, 6))
         .corner_radius(8.0)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Offer {
+    Block,
+    Object,
+    Group,
+}
+
+pub(crate) const fn offer_for(members: usize, on_an_object: bool) -> Offer {
+    if members > 1 {
+        Offer::Group
+    } else if on_an_object {
+        Offer::Object
+    } else {
+        Offer::Block
+    }
+}
+
+pub(crate) const fn controls_in(offer: Offer) -> usize {
+    match offer {
+        Offer::Group | Offer::Object => 1,
+        Offer::Block => BLOCK_CONTROLS,
+    }
+}
+
+const BLOCK_CONTROLS: usize = 16;
+
+const ONE_CONTROL: f32 = 52.0;
+
+fn stem_on_screen(placed: pdf_app::view::Placement) -> f64 {
+    let rise = box_on_screen(placed, [0.0, 0.0, 0.0, ROTATE_REACH_OUT + HANDLE_REACH]);
+    f64::from((rise.max.y - rise.min.y).abs())
+}
+
+#[cfg(test)]
+mod offer_tests {
+    use super::{BLOCK_CONTROLS, Offer, controls_in, offer_for};
+
+    #[test]
+    fn several_things_chosen_are_offered_one_control() {
+        for members in [2, 3, 6, 49] {
+            assert_eq!(offer_for(members, false), Offer::Group, "{members} chosen");
+            assert_eq!(
+                offer_for(members, true),
+                Offer::Group,
+                "a picture among them changes nothing"
+            );
+            assert_eq!(
+                controls_in(offer_for(members, false)),
+                1,
+                "{members} chosen were offered more than Delete"
+            );
+        }
+    }
+
+    #[test]
+    fn one_thing_chosen_is_still_offered_everything() {
+        assert_eq!(offer_for(1, false), Offer::Block);
+        assert_eq!(controls_in(offer_for(1, false)), BLOCK_CONTROLS);
+        assert_eq!(offer_for(1, true), Offer::Object);
+        assert_eq!(controls_in(offer_for(1, true)), 1);
+        assert_ne!(
+            controls_in(offer_for(1, false)),
+            controls_in(offer_for(6, false)),
+            "one thing and six were offered the same toolbar"
+        );
+    }
 }

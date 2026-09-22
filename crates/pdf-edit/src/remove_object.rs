@@ -63,7 +63,7 @@ pub(crate) fn plan_remove_object(
     ))
 }
 
-fn only_draws(
+pub(crate) fn only_draws(
     source: &pdf_bytes::ByteStore,
     operations: &[pdf_content::Operation],
     range: std::ops::Range<usize>,

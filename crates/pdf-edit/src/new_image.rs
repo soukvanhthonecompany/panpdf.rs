@@ -169,7 +169,7 @@ fn image_writes(image: &ImageFile<'_>, first: u32) -> Vec<PlannedWrite> {
     }
 }
 
-fn candidate(decoded: &[u8], name: &str, into: Option<Matrix>) -> Vec<u8> {
+pub(crate) fn candidate(decoded: &[u8], name: &str, into: Option<Matrix>) -> Vec<u8> {
     let mut out = Vec::with_capacity(decoded.len() + 96);
     out.extend_from_slice(decoded);
     out.extend_from_slice(b"\nq ");

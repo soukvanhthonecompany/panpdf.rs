@@ -624,6 +624,243 @@ const DIRECTION_BUCKET: f64 = 1e-4;
 
 const ANGLE_BUCKETS: i64 = 62_832;
 
+const WINDOW_SLACK: f64 = 1e-3;
+
+struct AcrossBaselines {
+    sorted: Vec<(f64, usize)>,
+    widest_em: f64,
+    direction: Point,
+}
+
+impl AcrossBaselines {
+    fn of(clusters: &[Cluster], members: &[usize]) -> Option<Self> {
+        let first = clusters.get(*members.first()?)?;
+        let direction = first.direction;
+        if !direction.x.is_finite() || !direction.y.is_finite() {
+            return None;
+        }
+        let mut sorted: Vec<(f64, usize)> = Vec::with_capacity(members.len());
+        let mut widest_em = 0.0_f64;
+        for member in members {
+            let cluster = clusters.get(*member)?;
+            if cluster.direction != direction
+                || !cluster.baseline.x.is_finite()
+                || !cluster.baseline.y.is_finite()
+                || !cluster.em.is_finite()
+            {
+                return None;
+            }
+            widest_em = widest_em.max(cluster.em.abs());
+            sorted.push((
+                cluster
+                    .baseline
+                    .y
+                    .mul_add(direction.x, -(cluster.baseline.x * direction.y)),
+                *member,
+            ));
+        }
+        sorted.sort_by(|one, other| one.0.total_cmp(&other.0));
+        Some(Self {
+            sorted,
+            widest_em,
+            direction,
+        })
+    }
+
+    fn near(&self, seed: &Cluster, ems: f64) -> impl Iterator<Item = usize> + '_ {
+        let at = seed
+            .baseline
+            .y
+            .mul_add(self.direction.x, -(seed.baseline.x * self.direction.y));
+        let window = ems.mul_add(self.widest_em.max(seed.em.abs()), WINDOW_SLACK);
+        let from = self
+            .sorted
+            .partition_point(|(across, _)| *across < at - window);
+        let to = self
+            .sorted
+            .partition_point(|(across, _)| *across <= at + window);
+        self.sorted[from..to].iter().map(|(_, member)| *member)
+    }
+}
+
+struct AcrossRows {
+    from: usize,
+    sorted: Vec<(f64, usize)>,
+    by_band: Vec<(f64, f64, usize)>,
+    band: Vec<(f64, f64)>,
+    widest_band: f64,
+    widest_em: f64,
+    direction: Point,
+}
+
+impl AcrossRows {
+    fn of(index: &SemanticIndex, from: usize) -> Option<Self> {
+        let direction = index.line_seed(from)?.direction;
+        if !direction.x.is_finite() || !direction.y.is_finite() {
+            return None;
+        }
+        let across = |point: Point| point.y.mul_add(direction.x, -(point.x * direction.y));
+        let count = index.lines.len().checked_sub(from)?;
+        let mut sorted = Vec::with_capacity(count);
+        let mut band = Vec::with_capacity(count);
+        let mut widest_band = 0.0_f64;
+        let mut widest_em = 0.0_f64;
+        for line in from..index.lines.len() {
+            let seed = index.line_seed(line)?;
+            if seed.direction != direction
+                || !seed.baseline.x.is_finite()
+                || !seed.baseline.y.is_finite()
+                || !seed.em.is_finite()
+            {
+                return None;
+            }
+            widest_em = widest_em.max(seed.em.abs());
+            sorted.push((across(seed.baseline), line));
+            let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
+            for cluster in &index.lines[line].clusters {
+                let cluster = index.clusters.get(*cluster)?;
+                if !cluster.baseline.x.is_finite()
+                    || !cluster.baseline.y.is_finite()
+                    || !cluster.em.is_finite()
+                {
+                    return None;
+                }
+                let reach = 0.7 * cluster.em.abs();
+                let at = across(cluster.baseline);
+                low = low.min(at - reach);
+                high = high.max(at + reach);
+                if let Some(bounds) = cluster.bounds {
+                    if !bounds.iter().all(|edge| edge.is_finite()) {
+                        return None;
+                    }
+                    for corner in [
+                        Point {
+                            x: bounds[0],
+                            y: bounds[1],
+                        },
+                        Point {
+                            x: bounds[0],
+                            y: bounds[3],
+                        },
+                        Point {
+                            x: bounds[2],
+                            y: bounds[1],
+                        },
+                        Point {
+                            x: bounds[2],
+                            y: bounds[3],
+                        },
+                    ] {
+                        let at = across(corner);
+                        low = low.min(at);
+                        high = high.max(at);
+                    }
+                }
+            }
+            if !low.is_finite() || !high.is_finite() {
+                return None;
+            }
+            widest_band = widest_band.max(high - low);
+            band.push((low, high));
+        }
+        sorted.sort_by(|one, other| one.0.total_cmp(&other.0));
+        let mut by_band: Vec<(f64, f64, usize)> = band
+            .iter()
+            .enumerate()
+            .map(|(offset, (low, high))| (*low, *high, from + offset))
+            .collect();
+        by_band.sort_by(|one, other| one.0.total_cmp(&other.0));
+        Some(Self {
+            from,
+            sorted,
+            by_band,
+            band,
+            widest_band,
+            widest_em,
+            direction,
+        })
+    }
+
+    fn near(&self, seed: &Cluster, ems: f64) -> impl Iterator<Item = usize> + '_ {
+        let at = seed
+            .baseline
+            .y
+            .mul_add(self.direction.x, -(seed.baseline.x * self.direction.y));
+        let window = ems.mul_add(self.widest_em.max(seed.em.abs()), WINDOW_SLACK);
+        let from = self
+            .sorted
+            .partition_point(|(across, _)| *across < at - window);
+        let to = self
+            .sorted
+            .partition_point(|(across, _)| *across <= at + window);
+        self.sorted[from..to].iter().map(|(_, line)| *line)
+    }
+
+    fn overlapping(&self, line: usize) -> impl Iterator<Item = usize> + '_ {
+        let (low, high) = self
+            .band
+            .get(line.wrapping_sub(self.from))
+            .copied()
+            .unwrap_or((f64::NEG_INFINITY, f64::INFINITY));
+        let start = self
+            .by_band
+            .partition_point(|(at, _, _)| *at < low - self.widest_band - WINDOW_SLACK);
+        let end = self
+            .by_band
+            .partition_point(|(at, _, _)| *at <= high + WINDOW_SLACK);
+        self.by_band[start..end]
+            .iter()
+            .filter(move |(_, reaches, _)| *reaches >= low - WINDOW_SLACK)
+            .map(|(_, _, line)| *line)
+    }
+}
+
+struct EdgeRun {
+    em: f64,
+    unmeasured: bool,
+    spread: [(f64, f64); 3],
+}
+
+impl Default for EdgeRun {
+    fn default() -> Self {
+        Self {
+            em: 0.0,
+            unmeasured: false,
+            spread: [(f64::INFINITY, f64::NEG_INFINITY); 3],
+        }
+    }
+}
+
+impl EdgeRun {
+    fn take(&mut self, index: &SemanticIndex, line: usize) {
+        if let Some(seed) = index.line_seed(line) {
+            self.em = self.em.max(seed.em);
+        }
+        let Some((start, end)) = index.line_reach(line) else {
+            self.unmeasured = true;
+            return;
+        };
+        for (slot, at) in [start, end, f64::midpoint(start, end)]
+            .into_iter()
+            .enumerate()
+        {
+            self.spread[slot].0 = self.spread[slot].0.min(at);
+            self.spread[slot].1 = self.spread[slot].1.max(at);
+        }
+    }
+
+    fn set_to_an_edge(&self) -> bool {
+        if self.em <= 0.0 || self.unmeasured {
+            return true;
+        }
+        self.spread
+            .iter()
+            .map(|(low, high)| high - low)
+            .fold(f64::INFINITY, f64::min)
+            <= BLOCK_EDGE_EM * self.em
+    }
+}
+
 impl SemanticIndex {
     #[must_use]
     pub fn of(graph: &PaintGraph) -> Self {
@@ -633,8 +870,51 @@ impl SemanticIndex {
         index.group_blocks_over(0);
         index.join_rows_on_one_baseline();
         index.split_blocks_not_set_to_an_edge();
+        let grouping = Grouping::of(&index);
+        let report = index.report.clone();
+        let evidence: Vec<BlockEvidence> =
+            index.blocks.iter().map(|block| block.evidence).collect();
+        index.lines.clear();
+        index.blocks.clear();
+        index.apply(&grouping);
+        index.join_rows_on_one_baseline();
+        for (block, found) in index.blocks.iter_mut().zip(evidence) {
+            block.evidence = found;
+        }
+        index.report = report;
+        index.renumber_lines_in_reading_order();
         index.index_objects(graph);
         index
+    }
+
+    fn renumber_lines_in_reading_order(&mut self) {
+        let mut order: Vec<usize> = (0..self.lines.len()).collect();
+        order.sort_by(
+            |one, other| match (self.line_seed(*one), self.line_seed(*other)) {
+                (Some(a), Some(b)) => reading_order(a, b),
+                (None, None) => one.cmp(other),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+            },
+        );
+        let mut position = vec![0; order.len()];
+        for (new, old) in order.iter().enumerate() {
+            position[*old] = new;
+        }
+        let mut taken: Vec<Option<Line>> = std::mem::take(&mut self.lines)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.lines = order
+            .iter()
+            .map(|old| taken[*old].take().expect("each row is placed once"))
+            .collect();
+        for block in &mut self.blocks {
+            for line in &mut block.lines {
+                *line = position[*line];
+            }
+            block.lines.sort_unstable();
+        }
     }
 
     #[must_use]
@@ -969,19 +1249,22 @@ impl SemanticIndex {
             }
         }
         let slots = self.row_slots();
+        let across = AcrossRows::of(self, from_line);
+        let mut held = vec![false; self.lines.len()];
         let mut open: Vec<usize> = Vec::new();
         for seed in order {
             if taken[seed] {
                 continue;
             }
             taken[seed] = true;
+            held[seed] = true;
             open.push(seed);
             let mut refused = std::collections::BTreeSet::new();
             loop {
                 let last = *open.last().expect("the block has its seed");
                 let mut candidates: Vec<(usize, f64)> = Vec::new();
-                for (line, claimed) in taken.iter().enumerate() {
-                    if *claimed || !self.lines_run_on(last, line) {
+                for line in self.rows_within_reach(last, &taken, across.as_ref()) {
+                    if !self.lines_run_on(last, line) {
                         continue;
                     }
                     if self.sets_off_a_heading(last, line) {
@@ -1000,7 +1283,7 @@ impl SemanticIndex {
                         self.report.lines_split_by_delimiters += 1;
                         continue;
                     }
-                    if open.iter().any(|held| self.rows_cover(*held, line)) {
+                    if self.a_row_of_the_block_covers(line, &open, &held, across.as_ref()) {
                         self.report.lines_refused_as_covering += 1;
                         continue;
                     }
@@ -1021,16 +1304,55 @@ impl SemanticIndex {
                 let Some((next, _)) = best else { break };
                 refused.remove(&next);
                 taken[next] = true;
+                held[next] = true;
                 open.push(next);
             }
             self.report.lines_refused_by_paint_order += refused.len();
             let last = *open.last().expect("the block has its seed");
-            for (line, claimed) in taken.iter().enumerate() {
-                if !*claimed && self.only_the_columns_disagree(last, line) {
+            for line in self.rows_within_reach(last, &taken, across.as_ref()) {
+                if self.only_the_columns_disagree(last, line) {
                     self.report.lines_split_by_column += 1;
                 }
             }
+            for line in &open {
+                held[*line] = false;
+            }
             self.close_block(&mut open);
+        }
+    }
+
+    fn rows_within_reach(
+        &self,
+        last: usize,
+        taken: &[bool],
+        across: Option<&AcrossRows>,
+    ) -> Vec<usize> {
+        let Some(across) = across else {
+            return (0..taken.len()).filter(|line| !taken[*line]).collect();
+        };
+        let Some(seed) = self.line_seed(last) else {
+            return Vec::new();
+        };
+        let mut near: Vec<usize> = across
+            .near(seed, BLOCK_LEADING_EM)
+            .filter(|line| !taken[*line])
+            .collect();
+        near.sort_unstable();
+        near
+    }
+
+    fn a_row_of_the_block_covers(
+        &self,
+        line: usize,
+        open: &[usize],
+        held: &[bool],
+        across: Option<&AcrossRows>,
+    ) -> bool {
+        match across {
+            Some(across) => across
+                .overlapping(line)
+                .any(|other| held[other] && self.rows_cover(other, line)),
+            None => open.iter().any(|other| self.rows_cover(*other, line)),
         }
     }
 
@@ -1394,13 +1716,17 @@ impl SemanticIndex {
             }
             let mut run: Vec<usize> = Vec::new();
             let mut runs: Vec<Vec<usize>> = Vec::new();
+            let mut edges = EdgeRun::default();
             for line in block.lines {
                 run.push(line);
-                if run.len() >= 2 && !self.set_to_an_edge(&run) {
+                edges.take(self, line);
+                if run.len() >= 2 && !edges.set_to_an_edge() {
                     let last = run.pop().expect("the row just pushed");
                     self.report.lines_split_by_edge += 1;
                     runs.push(std::mem::take(&mut run));
                     run.push(last);
+                    edges = EdgeRun::default();
+                    edges.take(self, last);
                 }
             }
             if !run.is_empty() {
@@ -1430,37 +1756,6 @@ impl SemanticIndex {
             }
         }
         self.blocks = split;
-    }
-
-    fn set_to_an_edge(&self, rows: &[usize]) -> bool {
-        let em = rows
-            .iter()
-            .filter_map(|line| self.line_seed(*line))
-            .map(|seed| seed.em)
-            .fold(0.0_f64, f64::max);
-        if em <= 0.0 {
-            return true;
-        }
-        let mut reaches = Vec::with_capacity(rows.len());
-        for line in rows {
-            match self.line_reach(*line) {
-                Some(reach) => reaches.push(reach),
-                None => return true,
-            }
-        }
-        let spread = |edge: fn(&(f64, f64)) -> f64| {
-            let (low, high) = reaches
-                .iter()
-                .map(edge)
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), at| {
-                    (low.min(at), high.max(at))
-                });
-            high - low
-        };
-        let left = spread(|(start, _)| *start);
-        let right = spread(|(_, end)| *end);
-        let centre = spread(|(start, end)| (start + end) / 2.0);
-        left.min(centre).min(right) <= BLOCK_EDGE_EM * em
     }
 
     fn rows_share_a_baseline(&self, one: usize, other: usize) -> bool {
@@ -1725,6 +2020,7 @@ impl SemanticIndex {
 
     fn group_lines_over(&mut self, members: &[usize]) {
         let mut remaining: Vec<usize> = members.to_vec();
+        let across = AcrossBaselines::of(&self.clusters, members);
         let reading_order = |this: &Self, left: usize, right: usize| {
             reading_order(&this.clusters[left], &this.clusters[right])
         };
@@ -1745,10 +2041,19 @@ impl SemanticIndex {
             if taken[seed] {
                 continue;
             }
-            let on_baseline: Vec<usize> = (0..self.clusters.len())
-                .filter(|candidate| !taken[*candidate])
-                .filter(|candidate| self.shares_baseline(seed, *candidate))
-                .collect();
+            let mut on_baseline: Vec<usize> = match &across {
+                Some(across) => across
+                    .near(&self.clusters[seed], BASELINE_TOLERANCE_EM)
+                    .filter(|candidate| !taken[*candidate])
+                    .filter(|candidate| self.shares_baseline(seed, *candidate))
+                    .collect(),
+                None => (0..self.clusters.len())
+                    .filter(|candidate| !taken[*candidate])
+                    .filter(|candidate| self.shares_baseline(seed, *candidate))
+                    .collect(),
+            };
+            on_baseline.sort_unstable();
+            let on_baseline = on_baseline;
             let others = on_baseline.len();
             let on_baseline: Vec<usize> = on_baseline
                 .into_iter()
@@ -1761,7 +2066,7 @@ impl SemanticIndex {
             if layers > 1 {
                 self.report.lines_layered_apart += 1;
             }
-            let mut lifted = self.marks_lifted_off(seed, &members, &taken);
+            let mut lifted = self.marks_lifted_off(seed, &members, &taken, across.as_ref());
             lifted.retain(|mark| self.same_scope(seed, *mark));
             self.report.marks_lifted_onto_their_row += lifted.len();
             members.extend(lifted);
@@ -1943,10 +2248,26 @@ impl SemanticIndex {
             && a.atom.abs_diff(b.atom) <= FAKE_BOLD_ATOM_WINDOW
     }
 
-    fn marks_lifted_off(&self, seed: usize, members: &[usize], taken: &[bool]) -> Vec<usize> {
+    fn marks_lifted_off(
+        &self,
+        seed: usize,
+        members: &[usize],
+        taken: &[bool],
+        across: Option<&AcrossBaselines>,
+    ) -> Vec<usize> {
         let is_mark = |cluster: usize| self.clusters[cluster].advance <= 0.0;
         let em = self.clusters[seed].em;
-        (0..self.clusters.len())
+        let candidates: Vec<usize> = match across {
+            Some(across) => {
+                let mut near: Vec<usize> =
+                    across.near(&self.clusters[seed], MARK_LIFT_EM).collect();
+                near.sort_unstable();
+                near
+            }
+            None => (0..self.clusters.len()).collect(),
+        };
+        candidates
+            .into_iter()
             .filter(|mark| !taken[*mark] && is_mark(*mark) && !members.contains(mark))
             .filter(|mark| {
                 let (a, b) = (&self.clusters[seed], &self.clusters[*mark]);
@@ -2360,9 +2681,9 @@ fn advanced(previous: Point, current: Point, direction: Point) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ADVANCE_EPSILON, BlockEvidence, Caret, Cluster, ClusterEvidence, MarkEvidence, Member,
-        MembershipAudit, ObjectKind, Quad, QuadEvidence, SelectionError, SemanticIndex, advanced,
-        overlap,
+        ADVANCE_EPSILON, AcrossBaselines, AcrossRows, BlockEvidence, Caret, Cluster,
+        ClusterEvidence, MarkEvidence, Member, MembershipAudit, ObjectKind, Quad, QuadEvidence,
+        SelectionError, SemanticIndex, advanced, overlap,
     };
     use pdf_bytes::{SourceId, SourceSpan};
     use pdf_font::SourceCode;
@@ -2535,6 +2856,152 @@ mod tests {
             "paint order is not reading order when the pen actually advanced"
         );
         assert_eq!(index.report.marks_reordered_by_paint, 0);
+    }
+
+    #[test]
+    fn the_shortlist_and_the_scan_group_the_same_rows() {
+        let upright = || -> Vec<Cell> {
+            (0..6)
+                .flat_map(|row| {
+                    (0..5).map(move |column| {
+                        at(f64::from(column) * 8.0, 200.0 - f64::from(row) * 16.0)
+                    })
+                })
+                .collect()
+        };
+        let shortlisted = SemanticIndex::of(&page(&upright()));
+        assert!(
+            AcrossBaselines::of(
+                &shortlisted.clusters,
+                &(0..shortlisted.clusters.len()).collect::<Vec<usize>>()
+            )
+            .is_some(),
+            "a control: every cluster of this fixture travels one way"
+        );
+
+        let mut mixed = upright();
+        mixed.push(Cell {
+            origins: vec![(400.0, 400.0)],
+            widths: vec![600.0],
+            matrix: Matrix {
+                a: 0.0,
+                b: EM,
+                c: -EM,
+                d: 0.0,
+                e: 400.0,
+                f: 400.0,
+            },
+        });
+        let scanned = SemanticIndex::of(&page(&mixed));
+        assert!(
+            AcrossBaselines::of(
+                &scanned.clusters,
+                &(0..scanned.clusters.len()).collect::<Vec<usize>>()
+            )
+            .is_none(),
+            "the turned run is what sends this reading down the scan"
+        );
+
+        let shared = shortlisted.clusters.len();
+        let rows = |index: &SemanticIndex| -> Vec<Vec<usize>> {
+            index
+                .lines
+                .iter()
+                .map(|line| line.clusters.clone())
+                .filter(|clusters| clusters.iter().all(|cluster| *cluster < shared))
+                .collect()
+        };
+        assert_eq!(rows(&shortlisted), rows(&scanned));
+        assert_eq!(rows(&shortlisted).len(), 6, "six rows of five");
+    }
+
+    #[test]
+    fn the_shortlist_and_the_scan_group_the_same_blocks() {
+        let upright = || -> Vec<Cell> {
+            let mut cells = Vec::new();
+            for line in 0..3 {
+                let y = 300.0 - 1.5 * EM * f64::from(line);
+                cells.extend(row(0.0, y, 36));
+                cells.extend(row(40.0 * EM, y, 36));
+            }
+            for offset in [0.0, 0.4 * EM, 0.8 * EM] {
+                for line in 0..3 {
+                    cells.extend(row(0.0, 100.0 - offset - 1.2 * EM * f64::from(line), 5));
+                }
+            }
+            cells.extend(row(0.0, 40.0, 10));
+            cells.extend(row(0.0, 40.0 - 1.5 * EM, 50));
+            cells.extend(row(40.0 * EM, 40.0 - 3.0 * EM, 5));
+            cells
+        };
+        let shortlisted = SemanticIndex::of(&page(&upright()));
+        assert!(
+            AcrossRows::of(&shortlisted, 0).is_some(),
+            "a control: every row of this fixture travels one way"
+        );
+
+        let mut mixed = upright();
+        mixed.push(Cell {
+            origins: vec![(400.0, 400.0)],
+            widths: vec![600.0],
+            matrix: Matrix {
+                a: 0.0,
+                b: EM,
+                c: -EM,
+                d: 0.0,
+                e: 400.0,
+                f: 400.0,
+            },
+        });
+        let scanned = SemanticIndex::of(&page(&mixed));
+        assert!(
+            AcrossRows::of(&scanned, 0).is_none(),
+            "the turned run is what sends this reading down the scan"
+        );
+
+        let shared = shortlisted.clusters.len();
+        let blocks = |index: &SemanticIndex| -> Vec<Vec<Vec<usize>>> {
+            index
+                .blocks
+                .iter()
+                .map(|block| {
+                    block
+                        .lines
+                        .iter()
+                        .map(|line| index.lines[*line].clusters.clone())
+                        .collect::<Vec<Vec<usize>>>()
+                })
+                .filter(|rows| {
+                    rows.iter()
+                        .all(|clusters| clusters.iter().all(|cluster| *cluster < shared))
+                })
+                .collect()
+        };
+        assert_eq!(blocks(&shortlisted), blocks(&scanned));
+        assert_eq!(
+            blocks(&shortlisted).len(),
+            6,
+            "two columns, three paragraphs over each other, and a split run: {:?}",
+            blocks(&shortlisted)
+        );
+        assert_eq!(
+            shortlisted.report.lines_refused_as_covering,
+            scanned.report.lines_refused_as_covering
+        );
+        assert!(
+            shortlisted.report.lines_refused_as_covering > 0,
+            "the covering test has to decide something here"
+        );
+        assert_eq!(
+            shortlisted.report.lines_split_by_column,
+            scanned.report.lines_split_by_column
+        );
+        assert!(shortlisted.report.lines_split_by_column > 0);
+        assert_eq!(
+            shortlisted.report.lines_split_by_edge,
+            scanned.report.lines_split_by_edge
+        );
+        assert!(shortlisted.report.lines_split_by_edge > 0);
     }
 
     fn at_size(x: f64, y: f64, em: f64) -> Cell {
@@ -3095,6 +3562,53 @@ mod tests {
             "the three rows are one paragraph: {:?}",
             index.blocks
         );
+    }
+
+    #[test]
+    fn a_mark_far_above_its_row_does_not_put_the_rows_out_of_order() {
+        let pitch = 1.5 * EM;
+        let mut cells = row(0.0, 100.0, 5);
+        cells.extend(row(0.0, 100.0 - pitch, 5));
+        cells.extend(row(0.0, 100.0 - 2.0 * pitch, 5));
+        let raised = 100.0 - pitch + 1.8 * EM;
+        cells.push(Cell {
+            origins: vec![(EM, raised)],
+            widths: vec![0.0],
+            matrix: Matrix {
+                a: EM,
+                b: 0.0,
+                c: 0.0,
+                d: EM,
+                e: EM,
+                f: raised,
+            },
+        });
+        let index = SemanticIndex::of(&page(&cells));
+        assert_eq!(index.lines.len(), 4, "{:?}", index.lines);
+        for block in &index.blocks {
+            assert!(
+                block.lines.windows(2).all(|pair| pair[0] < pair[1]),
+                "a block's rows are listed top to bottom: {:?}",
+                index.blocks
+            );
+        }
+        assert_eq!(index.blocks[0].lines, vec![0, 1, 2], "{:?}", index.blocks);
+        assert_eq!(index.blocks[1].lines, vec![3], "{:?}", index.blocks);
+        let again = SemanticIndex::of_grouped(&page(&cells), &super::Grouping::of(&index));
+        let rows = |index: &SemanticIndex| -> Vec<Vec<Vec<usize>>> {
+            index
+                .blocks
+                .iter()
+                .map(|block| {
+                    block
+                        .lines
+                        .iter()
+                        .map(|line| index.lines[*line].clusters.clone())
+                        .collect()
+                })
+                .collect()
+        };
+        assert_eq!(rows(&index), rows(&again));
     }
 
     #[test]

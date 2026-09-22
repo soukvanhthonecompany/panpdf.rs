@@ -9,7 +9,7 @@ const NEW_TEXT_LINE: f64 = 12.0 * 1.2;
 use pdf_app::strip::{tile_box, tiles_over};
 use pdf_app::tiles::{Held, Slot, TileId};
 use pdf_app::view::{
-    Placement, Quad, ROTATE_HANDLE, dashes, frame_quad, handles, rotate_handle, selection_quad,
+    Placement, Quad, ROTATE_HANDLE, dashes, frame_quad, handles, rotate_stem, selection_quad,
     selection_rows, shown_caret, text_handles,
 };
 use pdf_app::wording::Message;
@@ -535,6 +535,9 @@ impl Window {
     fn selected_block(painter: &egui::Painter, laid: Laid, scene: &Scene) {
         if scene.chosen.is_a_group() && scene.chosen.page == laid.page {
             Self::group_outline(painter, laid, scene);
+            if !scene.pointing.editing() {
+                return;
+            }
         }
         let Some(block) = scene
             .pointing
@@ -546,7 +549,11 @@ impl Window {
         let blue = egui::Color32::from_rgb(0, 90, 200);
         let quad = Quad::from_pixels(block.quad);
         let frame = quad_on_screen(laid.placed, &frame_quad(&quad));
-        if let Some(bands) = scene.bands.as_ref().filter(|bands| !bands.is_empty()) {
+        if let Some(bands) = scene
+            .bands
+            .as_ref()
+            .filter(|bands| !bands.is_empty() && quad.upright())
+        {
             Self::free_frame(painter, laid, bands, scene.pointing.editing());
             if scene.pointing.editing() {
                 return;
@@ -566,7 +573,8 @@ impl Window {
         for (handle, (x, y)) in text_handles(&quad) {
             let at = box_on_screen(laid.placed, [x, y, x, y]).min;
             if handle == ROTATE_HANDLE {
-                let foot = frame[0] + (frame[1] - frame[0]) / 2.0;
+                let (leaves, _) = rotate_stem(&quad);
+                let foot = box_on_screen(laid.placed, [leaves.0, leaves.1, leaves.0, leaves.1]).min;
                 painter.line_segment([foot, at], egui::Stroke::new(1.0, blue));
                 painter.circle_filled(at, radius + 2.5, egui::Color32::WHITE);
                 painter.circle_stroke(at, radius + 1.0, egui::Stroke::new(1.5, blue));
@@ -659,7 +667,10 @@ impl Window {
         for (index, object) in overlay.objects.iter().enumerate() {
             let quad = Quad::from_pixels(object.quad);
             let frame = quad_on_screen(laid.placed, &frame_quad(&quad));
-            if selected == Some(index) {
+            let in_a_group = scene.chosen.is_a_group()
+                && scene.chosen.page == laid.page
+                && !scene.pointing.editing();
+            if selected == Some(index) && !in_a_group {
                 fill_quad(
                     painter,
                     frame,
@@ -667,9 +678,8 @@ impl Window {
                 );
                 stroke_quad(painter, frame, 1.5, green);
                 let radius = 3.5 * laid.placed.stretch.clamp(0.5, 2.0);
-                let stem = quad_on_screen(laid.placed, &frame_quad(&quad));
-                let foot = stem[0] + (stem[1] - stem[0]) / 2.0;
-                let turn = rotate_handle(&quad);
+                let (leaves, turn) = rotate_stem(&quad);
+                let foot = box_on_screen(laid.placed, [leaves.0, leaves.1, leaves.0, leaves.1]).min;
                 let turn_at = box_on_screen(laid.placed, [turn.0, turn.1, turn.0, turn.1]).min;
                 painter.line_segment([foot, turn_at], egui::Stroke::new(1.0, green));
                 for (x, y) in handles(&quad).into_iter().chain(std::iter::once(turn)) {

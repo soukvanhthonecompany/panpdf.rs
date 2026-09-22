@@ -180,6 +180,31 @@ pub(crate) fn sidebar_widest(window_width: f32) -> f32 {
 
 pub(crate) const PANEL_GONE: f32 = 1.0;
 
+pub(crate) const HANDLE_WIDE: f32 = 10.0;
+
+pub(crate) const HANDLE_TALLEST: f32 = 72.0;
+
+pub(crate) fn handle_tall(room: f32) -> f32 {
+    HANDLE_TALLEST.min(room / 3.0).max(0.0)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Pulled {
+    Folded,
+    Open(f32),
+}
+
+pub(crate) fn handle_pulled_to(x: f32, window_width: f32) -> Pulled {
+    if x < PANEL_FOLD_FLOOR {
+        return Pulled::Folded;
+    }
+    Pulled::Open(x.min(panel_widest(window_width)))
+}
+
+pub(crate) fn pictures_glide(edge_held: bool) -> bool {
+    !edge_held
+}
+
 pub(crate) const SAME_WIDTH: f32 = 0.5;
 
 pub(crate) fn panel_now(folded: bool, held: bool, remembered: f32, window_width: f32) -> f32 {
@@ -356,11 +381,11 @@ impl View {
 mod tests {
     use super::{
         ALL, Bar, DESKTOP_KEEPS, Dragged, FLOW, Flow, FoldPress, GRID_BEGINS, GRID_INNER,
-        LABEL_ROOM, MIN_HEIGHT, MIN_WIDTH, PANEL_CHROME, PANEL_FOLD_FLOOR, PANEL_NARROWEST,
-        PANEL_WIDEST, PANEL_WIDTH, PREFERRED, Piece, THUMBS_SPARE, View, dragged_to, elide_middle,
-        fold_press, labels_fit, opening_rect, panel_bounds, panel_layout, panel_now,
-        panel_starts_folded, panel_width, shed_above, sidebar_widest, thumbs_kept,
-        wholly_on_screen,
+        HANDLE_TALLEST, HANDLE_WIDE, LABEL_ROOM, MIN_HEIGHT, MIN_WIDTH, PANEL_CHROME,
+        PANEL_FOLD_FLOOR, PANEL_NARROWEST, PANEL_WIDEST, PANEL_WIDTH, PREFERRED, Piece, Pulled,
+        THUMBS_SPARE, View, dragged_to, elide_middle, fold_press, handle_pulled_to, handle_tall,
+        labels_fit, opening_rect, panel_bounds, panel_layout, panel_now, panel_starts_folded,
+        panel_width, pictures_glide, shed_above, sidebar_widest, thumbs_kept, wholly_on_screen,
     };
 
     #[track_caller]
@@ -638,6 +663,34 @@ mod tests {
         close(panel_now(false, false, 100.0, 1680.0), PANEL_NARROWEST);
         close(panel_now(false, false, 900.0, 1680.0), 900.0);
         close(panel_now(false, false, 260.0, 960.0), 240.0);
+    }
+
+    #[test]
+    fn the_folded_handle_opens_by_a_click_and_follows_a_drag() {
+        close(handle_tall(900.0), HANDLE_TALLEST);
+        close(handle_tall(216.0), HANDLE_TALLEST);
+        close(handle_tall(72.0), 24.0);
+        close(handle_tall(0.0), 0.0);
+        close(handle_tall(-10.0), 0.0);
+        assert_eq!(handle_pulled_to(0.0, 1280.0), Pulled::Folded);
+        assert_eq!(handle_pulled_to(-40.0, 1280.0), Pulled::Folded);
+        assert_eq!(handle_pulled_to(95.9, 1280.0), Pulled::Folded);
+        assert_eq!(
+            handle_pulled_to(PANEL_FOLD_FLOOR, 1280.0),
+            Pulled::Open(PANEL_FOLD_FLOOR)
+        );
+        assert_eq!(handle_pulled_to(300.0, 1280.0), Pulled::Open(300.0));
+        assert_eq!(handle_pulled_to(4000.0, 1280.0), Pulled::Open(1280.0));
+        close(panel_width(1280.0, PANEL_WIDTH), PANEL_WIDTH);
+        close(panel_width(1280.0, 640.0), 640.0);
+        close(panel_width(400.0, 640.0), 400.0);
+        const { assert!(HANDLE_WIDE < PANEL_NARROWEST) };
+    }
+
+    #[test]
+    fn a_held_edge_is_followed_and_not_animated_towards() {
+        assert!(!pictures_glide(true), "a held edge is followed exactly");
+        assert!(pictures_glide(false), "a let-go edge may be caught up with");
     }
 
     #[test]

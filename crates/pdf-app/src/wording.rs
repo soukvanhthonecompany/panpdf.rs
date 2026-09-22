@@ -503,7 +503,6 @@ pub enum Message {
     RangeCannotBeCopied,
     Copied(usize),
 
-    GroupDeleteIsTextOnly,
     SelectionOf {
         shown: String,
         clusters: usize,
@@ -572,6 +571,7 @@ pub enum Message {
     CaretGoneBeforeTyping,
     CaretGoneBeforeDeleting,
     BlockTextNotFound,
+    GroupLetGoAfterTheEdit,
 
     DraftBarTitle,
     DraftRetry,
@@ -647,6 +647,7 @@ pub enum Message {
     Home(Home),
     Control(Control),
     Quiet,
+    DrawingSpeed(crate::speed::Summary),
 
     Plain(String),
 
@@ -659,6 +660,10 @@ pub enum Command {
     Save,
     Undo,
     Redo,
+    Copy,
+    Cut,
+    Paste,
+    PasteInPlace,
     Select,
     Text,
     Find,
@@ -676,6 +681,10 @@ pub enum Command {
     Contents,
     Picture,
     Delete,
+    BringToFront,
+    BringForward,
+    SendBackward,
+    SendToBack,
     PreviousPage,
     NextPage,
     ZoomIn,
@@ -693,7 +702,11 @@ pub enum Command {
     FramesOfPictures,
     FramesOfDrawings,
     DarkMode,
+    ShowDrawingSpeed,
     Language,
+    Help,
+    ReportAProblem,
+    ShowTheLog,
     Pages,
     HidePages,
     BackToReading,
@@ -1376,6 +1389,10 @@ impl Message {
                 Command::Save => "Save",
                 Command::Undo => "Undo",
                 Command::Redo => "Redo",
+                Command::Copy => "Copy",
+                Command::Cut => "Cut",
+                Command::Paste => "Paste",
+                Command::PasteInPlace => "Paste in place",
                 Command::Select => "Select",
                 Command::Text => "Text",
                 Command::Find => "Find in document",
@@ -1393,6 +1410,10 @@ impl Message {
                 Command::Contents => "Contents",
                 Command::Picture => "Picture",
                 Command::Delete => "Delete",
+                Command::BringToFront => "Bring to front",
+                Command::BringForward => "Bring forward",
+                Command::SendBackward => "Send backward",
+                Command::SendToBack => "Send to back",
                 Command::PreviousPage => "Previous page",
                 Command::NextPage => "Next page",
                 Command::ZoomIn => "Zoom in",
@@ -1410,7 +1431,11 @@ impl Message {
                 Command::FramesOfPictures => "Around pictures",
                 Command::FramesOfDrawings => "Around drawings (lines and shapes)",
                 Command::DarkMode => "Dark mode",
+                Command::ShowDrawingSpeed => "Show drawing speed",
                 Command::Language => "Language",
+                Command::Help => "Help",
+                Command::ReportAProblem => "Report a problem...",
+                Command::ShowTheLog => "Show the log",
                 Command::Pages => "Pages",
                 Command::HidePages => "Hide the pages",
                 Command::BackToReading => "Back to the document",
@@ -1518,10 +1543,6 @@ impl Message {
                 format!("This range cannot be copied{SEP}the paragraph's text does not read")
             }
             Self::Copied(count) => format!("{count} characters copied"),
-            Self::GroupDeleteIsTextOnly => {
-                "Deleting several things at once works on text only \u{2014} delete pictures one at a time"
-                    .to_owned()
-            }
             Self::SelectionOf {
                 shown,
                 clusters,
@@ -1583,7 +1604,7 @@ impl Message {
                     .to_owned()
             }
             Self::FlowRoundHelp => {
-                "Flow round pictures and drawings: the lines keep out of what stands in the frame\nThe frame keeps its width where it is free and gives up the rest"
+                "Flow round pictures and drawings: the lines keep out of what stands in the frame, round its upright box\nThe frame keeps its width where it is free and gives up the rest"
                     .to_owned()
             }
             Self::FlowsRoundNow => "The text now flows round what stands in it".to_owned(),
@@ -1592,7 +1613,10 @@ impl Message {
                 "The text could not be laid out again round what stands in it, and still flows round where that was"
                     .to_owned()
             }
-            Self::TextFlowsRoundThis => "Let the text flow round this".to_owned(),
+            Self::TextFlowsRoundThis => {
+                "Let the text flow round this\nThe text keeps clear of its upright box, turned or not"
+                    .to_owned()
+            }
             Self::TextMadeWay { blocks } if *blocks == 1 => {
                 "One block of text moved out of its way".to_owned()
             }
@@ -1645,6 +1669,9 @@ impl Message {
             }
             Self::BlockTextNotFound => {
                 format!("This block's text could not be found{SEP}click the paragraph again before styling")
+            }
+            Self::GroupLetGoAfterTheEdit => {
+                format!("Not everything that was chosen is still there{SEP}the group was let go, so drag a band round it again")
             }
             Self::DraftBarTitle => "Not in the document yet:".to_owned(),
             Self::DraftRetry => "Retry".to_owned(),
@@ -1766,6 +1793,15 @@ impl Message {
             Self::Control(control) => control.say(Lang::English),
             Self::Refused(refusal) => refusal.say(Lang::English),
             Self::Quiet => String::new(),
+            Self::DrawingSpeed(speed) => format!(
+                "median {:.1} ms  ·  95th {:.1} ms  ·  worst {:.1} ms  ·  {} of {} over {:.1} ms",
+                speed.median,
+                speed.ninety_fifth,
+                speed.worst,
+                speed.slow,
+                speed.frames,
+                crate::speed::A_FRAME_MS,
+            ),
             Self::Plain(said) => said.clone(),
         }
     }

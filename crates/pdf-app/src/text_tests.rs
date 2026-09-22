@@ -3332,6 +3332,180 @@ fn a_block_told_to_flow_round_a_drawing_keeps_its_lines_out_of_it() {
     assert!((bands[1][0] - 10.0).abs() < 1e-6, "{bands:?}");
 }
 
+#[test]
+fn the_bands_drawn_are_the_bands_the_lines_were_laid_in() {
+    let source = spaced_fixture_with(
+        b"BT /F1 10 Tf 1 0 0 1 10 150 Tm (AAAACAAAA) Tj ET 0 0 0 rg 10 134 30 1 re f",
+        "[600 600 600]",
+        "/Ascent 800 /Descent -200 ",
+    );
+    let mut editor = Editor::open(source).unwrap();
+    read(&mut editor);
+    let view = editor.leaf(0).unwrap().view.clone();
+    let block = top_block(&view);
+    let line = view.index.blocks[block].lines[0];
+    let frame = editor.frame_boxes(0)[block];
+    declare_frame(
+        &mut editor,
+        0,
+        block,
+        [frame[0], frame[1], frame[2] + 20.0, frame[3]],
+    );
+    editor.set_flow_round(0, block, true);
+    assert!(matches!(
+        editor.type_text(0, line, 9, 9, " AA AA AA AA AA AA AA AA AA AA"),
+        Applied::Changed { .. }
+    ));
+    read(&mut editor);
+    let starts = line_starts(&editor);
+    let xs: Vec<f64> = starts
+        .iter()
+        .map(|(x, _)| (x * 10.0).round() / 10.0)
+        .collect();
+    assert_eq!(&xs[..4], &[10.0, 10.0, 43.0, 10.0], "{starts:?}");
+    let block = top_block(&editor.leaf(0).unwrap().view);
+    let bands = editor
+        .free_bands(0, block)
+        .expect("the frame gives up bands");
+    let narrowed: Vec<[f64; 4]> = bands
+        .iter()
+        .copied()
+        .filter(|band| (band[0] - 43.0).abs() < 1e-6)
+        .collect();
+    assert_eq!(narrowed.len(), 1, "one band is narrowed: {bands:?}");
+    assert!(
+        (narrowed[0][1] - 60.0).abs() < 1e-6 && (narrowed[0][3] - 70.0).abs() < 1e-6,
+        "the third line's own band: {bands:?}"
+    );
+}
+
+#[test]
+fn text_beside_a_turned_picture_keeps_clear_of_its_upright_box() {
+    let mut editor = Editor::open(reflow_source()).unwrap();
+    read(&mut editor);
+    assert!(matches!(
+        editor.place_images(0, vec![([10.0, 40.0, 40.0, 70.0], Arc::from(TWO_PIXELS))]),
+        Applied::Changed { .. }
+    ));
+    read(&mut editor);
+    let anchor = editor.leaf(0).unwrap().overlay.objects[0].anchor.clone();
+    let angle = 45.0_f64.to_radians();
+    let turn = pdf_paint::Matrix {
+        a: angle.cos(),
+        b: angle.sin(),
+        c: -angle.sin(),
+        d: angle.cos(),
+        e: 0.0,
+        f: 0.0,
+    };
+    let job = editor
+        .begin_shape(0, &anchor, turn, (25.0, 55.0))
+        .expect("nothing else is running");
+    assert!(matches!(editor.adopt(job.run()), Applied::Changed { .. }));
+    read(&mut editor);
+    let leaf = editor.leaf(0).unwrap();
+    let quad = leaf.overlay.objects[0].quad;
+    assert!(
+        (quad[0][0] - quad[1][0]).abs() > 1.0 && (quad[0][1] - quad[1][1]).abs() > 1.0,
+        "the picture is turned: {quad:?}"
+    );
+    let picture = editor
+        .rect_in_user_space(0, leaf.overlay.objects[0].box_pixels)
+        .expect("the picture has a box");
+    let view = leaf.view.clone();
+    let block = top_block(&view);
+    let line = view.index.blocks[block].lines[0];
+    let frame = editor.frame_boxes(0)[block];
+    declare_frame(
+        &mut editor,
+        0,
+        block,
+        [frame[0], frame[1], frame[2] + 40.0, frame[3]],
+    );
+    editor.set_flow_round(0, block, true);
+    assert!(matches!(
+        editor.type_text(0, line, 9, 9, " AA AA AA AA AA AA AA AA AA AA"),
+        Applied::Changed { .. }
+    ));
+    read(&mut editor);
+    let starts = line_starts(&editor);
+    let beside: Vec<f64> = starts
+        .iter()
+        .filter(|(_, y)| {
+            *y + 10.0 > picture[1] - pdf_edit::KEEP_CLEAR && *y < picture[3] + pdf_edit::KEEP_CLEAR
+        })
+        .map(|(x, _)| *x)
+        .collect();
+    assert!(
+        beside.len() >= 3,
+        "several lines stand beside it: {starts:?}"
+    );
+    let wanted = picture[2] + pdf_edit::KEEP_CLEAR;
+    assert!(
+        beside.iter().all(|x| (x - wanted).abs() < 1e-3),
+        "every line beside the box starts at {wanted:.2}: {beside:?} (picture {picture:?})"
+    );
+    let below = starts
+        .iter()
+        .find(|(_, y)| *y + 10.0 <= picture[1] - pdf_edit::KEEP_CLEAR)
+        .expect("a line below the picture");
+    assert!(
+        (below.0 - 10.0).abs() < 1e-6,
+        "below it, the frame's own edge: {starts:?}"
+    );
+}
+
+#[test]
+fn a_letter_typed_after_a_spaced_out_space_lands_where_the_caret_stood() {
+    let source = spaced_fixture_with(
+        b"BT /F1 10 Tf 1 0 0 1 10 150 Tm (AA) Tj 80 Tc [(C) 8000] TJ ET",
+        "[600 600 600]",
+        "/Ascent 800 /Descent -200 ",
+    );
+    let mut editor = Editor::open(source).unwrap();
+    read(&mut editor);
+    let view = editor.leaf(0).unwrap().view.clone();
+    let block = top_block(&view);
+    let line = view.index.blocks[block].lines[0];
+    let frame = editor.frame_boxes(0)[block];
+    declare_frame(&mut editor, 0, block, [frame[0], frame[1], 190.0, frame[3]]);
+    assert!(matches!(
+        editor.type_text(0, line, 3, 3, "AA"),
+        Applied::Changed { .. }
+    ));
+    read(&mut editor);
+    assert_placed(
+        &placed(&editor, A),
+        &[(10.0, 150.0), (16.0, 150.0), (28.0, 150.0), (34.0, 150.0)],
+    );
+    assert_placed(&placed(&editor, SPACE), &[(22.0, 150.0)]);
+}
+
+#[test]
+fn a_letter_typed_into_a_tracked_run_keeps_its_tracking() {
+    let source = spaced_fixture_with(
+        b"BT /F1 10 Tf 2 Tc 1 0 0 1 10 150 Tm (AA) Tj ET",
+        "[600 600 600]",
+        "/Ascent 800 /Descent -200 ",
+    );
+    let mut editor = Editor::open(source).unwrap();
+    read(&mut editor);
+    let view = editor.leaf(0).unwrap().view.clone();
+    let block = top_block(&view);
+    let line = view.index.blocks[block].lines[0];
+    let frame = editor.frame_boxes(0)[block];
+    declare_frame(&mut editor, 0, block, [frame[0], frame[1], 190.0, frame[3]]);
+    assert!(matches!(
+        editor.type_text(0, line, 2, 2, "A"),
+        Applied::Changed { .. }
+    ));
+    read(&mut editor);
+    assert_placed(
+        &placed(&editor, A),
+        &[(10.0, 150.0), (18.0, 150.0), (26.0, 150.0)],
+    );
+}
+
 fn flowing_editor() -> Editor {
     let source = spaced_fixture_with(
         b"BT /F1 10 Tf 1 0 0 1 10 150 Tm (AAAACAAAA) Tj ET 0 0 0 rg 10 140 30 20 re f",
@@ -3451,6 +3625,46 @@ fn a_block_that_flows_round_is_laid_out_again_when_it_moves_away() {
         "moved clear of the drawing: {starts:?}"
     );
     assert_eq!(editor.leaf(0).unwrap().view.index.blocks.len(), 1);
+}
+
+#[test]
+fn a_move_that_makes_text_make_way_declares_the_whole_page() {
+    let mut editor = flowing_editor();
+    let anchor = the_drawing(&editor);
+    let moved = editor.place(0, &anchor, 0.0, 60.0);
+    assert_eq!(
+        *editor.status(),
+        crate::wording::Message::TextMadeWay { blocks: 1 }
+    );
+    assert!(
+        matches!(
+            moved,
+            Applied::Changed {
+                page: 0,
+                region: None
+            }
+        ),
+        "{moved:?}"
+    );
+    let source = spaced_fixture_with(
+        b"BT /F1 10 Tf 1 0 0 1 10 150 Tm (AAAACAAAA) Tj ET 0 0 0 rg 10 140 30 20 re f",
+        "[600 600 600]",
+        "/Ascent 800 /Descent -200 ",
+    );
+    let mut plain = Editor::open(source).unwrap();
+    read(&mut plain);
+    let anchor = the_drawing(&plain);
+    let moved = plain.place(0, &anchor, 0.0, 60.0);
+    assert!(
+        matches!(
+            moved,
+            Applied::Changed {
+                page: 0,
+                region: Some(_)
+            }
+        ),
+        "{moved:?}"
+    );
 }
 
 #[test]
@@ -4038,8 +4252,27 @@ fn text_and_the_rule_between_it_move_together_and_undo_together() {
         .collect();
     assert_eq!(objects.len(), 1, "the rule is a target the window serves");
 
+    let frames = editor.frame_boxes(0).to_vec();
+    assert_eq!(frames.len(), 2);
     let applied = editor.move_group(0, &anchors, &objects, (7.0, -5.0));
     assert!(matches!(applied, Applied::Changed { .. }), "{applied:?}");
+    read(&mut editor);
+    let shifted: Vec<[f64; 4]> = frames
+        .iter()
+        .map(|frame| crate::view::box_shifted(*frame, 7.0, -5.0))
+        .collect();
+    assert_eq!(editor.frame_boxes(0), shifted.as_slice());
+    let leaf = editor.leaf(0).unwrap();
+    for (block, frame) in shifted.iter().enumerate() {
+        let ink = leaf.overlay.blocks[block].layout_pixels;
+        assert!(
+            frame
+                .iter()
+                .zip(ink.iter())
+                .all(|(a, b)| (a - b).abs() < 1e-6),
+            "frame {frame:?} sits on its block {ink:?}"
+        );
+    }
     let moved = editor.source().unwrap().clone();
     let wanted: Vec<(u32, f64, f64)> = pens_before
         .iter()
@@ -4061,6 +4294,60 @@ fn text_and_the_rule_between_it_move_together_and_undo_together() {
     assert!(matches!(editor.undo(), Applied::Changed { .. }));
     assert_pens(&pens(editor.source().unwrap()), &pens_before);
     assert_eq!(drawings(editor.source().unwrap()), rules_before);
+    assert_eq!(editor.frame_boxes(0), frames.as_slice());
+}
+
+#[test]
+fn a_band_of_two_paragraphs_moved_together_carries_both_frames() {
+    let mut editor = editor();
+    let frames = editor.frame_boxes(0).to_vec();
+    let boxes: Vec<[f64; 4]> = editor
+        .leaf(0)
+        .unwrap()
+        .overlay
+        .blocks
+        .iter()
+        .map(|block| block.layout_pixels)
+        .collect();
+    assert_eq!(frames, boxes, "at rest a frame is its block's box");
+    let anchors: Vec<String> = editor
+        .leaf(0)
+        .unwrap()
+        .overlay
+        .blocks
+        .iter()
+        .flat_map(|block| block.anchors.iter().cloned())
+        .collect();
+    assert_eq!(anchors.len(), 2);
+    assert!(matches!(
+        editor.move_block(0, &anchors, 9.0, 11.0),
+        Applied::Changed { .. }
+    ));
+    read(&mut editor);
+    let moved: Vec<[f64; 4]> = editor
+        .leaf(0)
+        .unwrap()
+        .overlay
+        .blocks
+        .iter()
+        .map(|block| block.layout_pixels)
+        .collect();
+    for (was, now) in boxes.iter().zip(moved.iter()) {
+        assert!(
+            (now[0] - was[0] - 9.0).abs() < 1e-6 && (now[1] - was[1] - 11.0).abs() < 1e-6,
+            "the block moved: {was:?} -> {now:?}"
+        );
+    }
+    assert_eq!(
+        editor.frame_boxes(0).to_vec(),
+        frames
+            .iter()
+            .map(|frame| crate::view::box_shifted(*frame, 9.0, 11.0))
+            .collect::<Vec<_>>()
+    );
+    assert!(matches!(editor.undo(), Applied::Changed { .. }));
+    read(&mut editor);
+    assert_eq!(editor.frame_boxes(0), frames.as_slice());
 }
 
 #[test]
@@ -5694,4 +5981,175 @@ fn whole_block_spans_the_last_stop() {
         Some("AAAA")
     );
     assert_eq!(editor.whole_block(0, 99), None);
+}
+
+#[test]
+fn a_frame_drawn_taller_than_its_text_keeps_its_height_when_text_is_committed() {
+    let mut editor = Editor::open(reflow_source()).unwrap();
+    read(&mut editor);
+    let view = editor.leaf(0).unwrap().view.clone();
+    let block = top_block(&view);
+    let line = view.index.blocks[block].lines[0];
+    let inferred = editor.frame_boxes(0)[block];
+    let drawn = [inferred[0], inferred[1], inferred[2], inferred[3] + 30.0];
+    declare_frame(&mut editor, 0, block, drawn);
+    let typed = editor.type_text(0, line, 1, 1, "A");
+    assert!(
+        matches!(typed, Applied::Changed { .. }),
+        "{typed:?} \u{2014} {}",
+        editor.status()
+    );
+    read(&mut editor);
+    let after = editor.frame_boxes(0)[block];
+    assert_eq!(
+        after, drawn,
+        "the box the person drew is the box the block keeps: {drawn:?} -> {after:?}"
+    );
+
+    let mut plain = Editor::open(reflow_source()).unwrap();
+    read(&mut plain);
+    let line = plain.leaf(0).unwrap().view.index.blocks[block].lines[0];
+    plain.preview_frame(0, block, drawn);
+    assert_eq!(plain.frame_boxes(0)[block], drawn);
+    assert!(!plain.frame_is_declared(0, block));
+    assert!(matches!(
+        plain.type_text(0, line, 1, 1, "A"),
+        Applied::Changed { .. }
+    ));
+    read(&mut plain);
+    let after = plain.frame_boxes(0)[block];
+    assert!(
+        after[3] < drawn[3] - 1e-6,
+        "a frame nobody declared is still its text's: {drawn:?} -> {after:?}"
+    );
+}
+
+#[test]
+fn a_block_copied_and_pasted_stands_beside_itself() {
+    let mut editor = Editor::open(reflow_source()).unwrap();
+    read(&mut editor);
+    let block = top_block(&editor.leaf(0).unwrap().view);
+    let anchors = editor.leaf(0).unwrap().overlay.blocks[block]
+        .anchors
+        .clone();
+    let before = pens(editor.source().unwrap());
+    let fonts = |source: &ByteStore| {
+        source
+            .as_bytes()
+            .windows(b"/Type /Font".len())
+            .filter(|window| *window == b"/Type /Font")
+            .count()
+    };
+    let fonts_before = fonts(editor.source().unwrap());
+    let copied = editor
+        .copy_objects(0, &anchors)
+        .expect("the block is copied");
+    let applied = editor.paste_objects(0, copied, (12.0, 20.0));
+    assert!(matches!(applied, Applied::Changed { .. }), "{applied:?}");
+    let after = pens(editor.source().unwrap());
+    assert_eq!(
+        after.len(),
+        before.len() + 9,
+        "the nine glyphs of the block are painted again: {after:?}"
+    );
+    assert_eq!(
+        fonts(editor.source().unwrap()),
+        fonts_before,
+        "no second font"
+    );
+    let pasted = &after[before.len()..];
+    for (one, other) in before.iter().take(9).zip(pasted) {
+        assert_eq!(one.0, other.0, "the same code: {pasted:?}");
+        assert!(
+            (one.1 + 12.0 - other.1).abs() < 1e-6 && (one.2 - 20.0 - other.2).abs() < 1e-6,
+            "{pasted:?}"
+        );
+    }
+}
+
+#[test]
+fn a_paste_is_one_step_and_undoes_whole() {
+    let mut editor = Editor::open(reflow_source()).unwrap();
+    read(&mut editor);
+    let block = top_block(&editor.leaf(0).unwrap().view);
+    let anchors = editor.leaf(0).unwrap().overlay.blocks[block]
+        .anchors
+        .clone();
+    let before = pens(editor.source().unwrap());
+    let copied = editor
+        .copy_objects(0, &anchors)
+        .expect("the block is copied");
+    assert!(matches!(
+        editor.paste_objects(0, copied, (12.0, 20.0)),
+        Applied::Changed { .. }
+    ));
+    assert!(matches!(editor.undo(), Applied::Changed { .. }));
+    assert_pens(&pens(editor.source().unwrap()), &before);
+    assert!(!editor.can_undo(), "one step, and it is gone");
+}
+
+#[test]
+fn a_block_and_a_picture_paste_together_and_undo_together() {
+    let mut editor = Editor::open(reflow_source()).unwrap();
+    read(&mut editor);
+    let picture: Arc<[u8]> = include_bytes!("../../pdf-edit/tests/data/picture-rgb.jpg")
+        .as_slice()
+        .into();
+    assert!(matches!(
+        editor.place_images(0, vec![([100.0, 20.0, 140.0, 50.0], picture)]),
+        Applied::Changed { .. }
+    ));
+    read(&mut editor);
+    let leaf = editor.leaf(0).unwrap();
+    assert_eq!(leaf.overlay.objects.len(), 1, "the picture is on the page");
+    let block = top_block(&leaf.view);
+    let mut anchors = leaf.overlay.blocks[block].anchors.clone();
+    anchors.push(leaf.overlay.objects[0].anchor.clone());
+    let pens_before = pens(editor.source().unwrap());
+    let copied = editor
+        .copy_objects(0, &anchors)
+        .expect("the group is copied");
+    assert_eq!(copied.objects.len(), anchors.len());
+    assert!(matches!(
+        editor.paste_objects(0, copied, (12.0, 20.0)),
+        Applied::Changed { .. }
+    ));
+    let read_pasted = |editor: &mut Editor| {
+        let view = pdf_session::interpret_page_grouped(
+            editor.source().unwrap(),
+            0,
+            b"",
+            editor.grouping(0).as_deref(),
+        )
+        .unwrap();
+        editor.adopt_page(0, Arc::new(view));
+    };
+    read_pasted(&mut editor);
+    let leaf = editor.leaf(0).unwrap();
+    assert_eq!(leaf.overlay.objects.len(), 2, "the picture is pasted");
+    assert_eq!(
+        pens(editor.source().unwrap()).len(),
+        pens_before.len() + 9,
+        "so is the block"
+    );
+    let images = |source: &ByteStore| {
+        source
+            .as_bytes()
+            .windows(b"/Subtype /Image".len())
+            .filter(|window| *window == b"/Subtype /Image")
+            .count()
+    };
+    assert_eq!(
+        images(editor.source().unwrap()),
+        1,
+        "one image object, invoked twice"
+    );
+    assert!(matches!(editor.undo(), Applied::Changed { .. }));
+    read(&mut editor);
+    assert_eq!(
+        editor.leaf(0).unwrap().overlay.objects.len(),
+        1,
+        "one undo took the picture's copy"
+    );
+    assert_pens(&pens(editor.source().unwrap()), &pens_before);
 }

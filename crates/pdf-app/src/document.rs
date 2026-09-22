@@ -10,8 +10,8 @@ use pdf_content::PageGeometry;
 use pdf_edit::PageChange;
 use pdf_edit::spike_move_text::SpikeError;
 use pdf_edit::{
-    BlockOutcome, BlockRange, ClusterRef, Command, FixedPoint, ObjectSelection, PlannedCaret,
-    SourceAnchor, TextRunSelection,
+    BlockOutcome, BlockRange, ClusterRef, Command, Copied, FixedPoint, ObjectSelection,
+    PlannedCaret, SourceAnchor, TextRunSelection,
 };
 
 use crate::frames::{Breaks, Edges};
@@ -159,6 +159,7 @@ enum Step {
         page: usize,
         anchors: Vec<String>,
         block: Option<usize>,
+        group: bool,
         dx: f64,
         dy: f64,
     },
@@ -166,6 +167,12 @@ enum Step {
         page: usize,
         anchors: Vec<String>,
         objects: Vec<String>,
+        dx: f64,
+        dy: f64,
+    },
+    Paste {
+        page: usize,
+        copied: Copied,
         dx: f64,
         dy: f64,
     },
@@ -202,10 +209,20 @@ enum Step {
         page: usize,
         anchors: Vec<String>,
     },
+    DeleteGroup {
+        page: usize,
+        anchors: Vec<String>,
+        objects: Vec<String>,
+    },
     RemoveObject {
         page: usize,
         anchor: String,
         rubbing: bool,
+    },
+    ReorderObjects {
+        page: usize,
+        anchors: Vec<String>,
+        order: pdf_edit::Stacking,
     },
     AddField {
         page: usize,
@@ -345,13 +362,16 @@ impl Step {
             Self::Move { .. } => "Move",
             Self::MoveBlock { .. } => "MoveBlock",
             Self::MoveGroup { .. } => "MoveGroup",
+            Self::Paste { .. } => "Paste",
             Self::Place { .. } => "Place",
             Self::Shape { .. } => "Shape",
             Self::ShapeBlock { .. } => "ShapeBlock",
             Self::SetSize { .. } => "SetSize",
             Self::SetAngles { .. } => "SetAngles",
             Self::DeleteBlock { .. } => "DeleteBlock",
+            Self::DeleteGroup { .. } => "DeleteGroup",
             Self::RemoveObject { .. } => "RemoveObject",
+            Self::ReorderObjects { .. } => "ReorderObjects",
             Self::FillField { .. } => "FillField",
             Self::AddField { .. } => "AddField",
             Self::RemoveField { .. } => "RemoveField",
@@ -481,10 +501,15 @@ impl Step {
             Self::MoveBlock {
                 page,
                 anchors,
+                group,
                 dx,
                 dy,
                 ..
-            } => format!("page={page} anchors={} dx={dx} dy={dy}", anchors.len()),
+            } => format!(
+                "page={page} anchors={} dx={dx} dy={dy}{}",
+                anchors.len(),
+                if *group { " group" } else { "" }
+            ),
             Self::MoveGroup {
                 page,
                 anchors,
@@ -495,6 +520,15 @@ impl Step {
                 "page={page} anchors={} objects={} dx={dx} dy={dy}",
                 anchors.len(),
                 objects.len()
+            ),
+            Self::Paste {
+                page,
+                copied,
+                dx,
+                dy,
+            } => format!(
+                "page={page} objects={} dx={dx} dy={dy}",
+                copied.objects.len()
             ),
             Self::Shape { page, anchor, .. } => format!("page={page} anchor={anchor} handle"),
             Self::ShapeBlock { page, anchors, .. } => {
@@ -517,11 +551,25 @@ impl Step {
             Self::DeleteBlock { page, anchors } => {
                 format!("page={page} anchors={}", anchors.len())
             }
+            Self::DeleteGroup {
+                page,
+                anchors,
+                objects,
+            } => format!(
+                "page={page} anchors={} objects={}",
+                anchors.len(),
+                objects.len()
+            ),
             Self::RemoveObject {
                 page,
                 anchor,
                 rubbing,
             } => format!("page={page} anchor={anchor} rubbing={rubbing}"),
+            Self::ReorderObjects {
+                page,
+                anchors,
+                order,
+            } => format!("page={page} anchors={} order={order:?}", anchors.len()),
             Self::AddField {
                 page,
                 rect,
@@ -660,6 +708,7 @@ pub struct EditJob {
     paragraphs: Paragraphs,
     flowed: Flowed,
     move_frame: Option<(usize, f64, f64)>,
+    group_frames: Vec<(usize, f64, f64)>,
     resize_frame: Option<(usize, [f64; 4], Edges, Breaks)>,
     whole_block: Option<(usize, (usize, usize))>,
     wrote_text: Option<String>,
@@ -1729,6 +1778,7 @@ impl Editor {
             page,
             anchors: anchors.to_vec(),
             block: None,
+            group: false,
             dx,
             dy,
         })
@@ -1767,12 +1817,45 @@ impl Editor {
         })
     }
 
+    pub fn copy_objects(&self, page: usize, anchors: &[String]) -> Result<Copied, String> {
+        let named = decoded_anchors(anchors)?;
+        let Some(leaf) = self.read.get(&page) else {
+            return Err("that page has not been read".to_owned());
+        };
+        pdf_edit::copy_from(&leaf.view.graph, &named).map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub fn begin_paste(
+        &mut self,
+        page: usize,
+        copied: Copied,
+        (dx, dy): (f64, f64),
+    ) -> Option<EditJob> {
+        self.begin(Step::Paste {
+            page,
+            copied,
+            dx,
+            dy,
+        })
+    }
+
+    pub fn paste_objects(&mut self, page: usize, copied: Copied, (dx, dy): (f64, f64)) -> Applied {
+        self.here(Step::Paste {
+            page,
+            copied,
+            dx,
+            dy,
+        })
+    }
+
     pub fn move_text_block(&mut self, page: usize, block: usize, dx: f64, dy: f64) -> Applied {
         match self.block_anchors(page, block) {
             Some(anchors) => self.here(Step::MoveBlock {
                 page,
                 anchors,
                 block: Some(block),
+                group: false,
                 dx,
                 dy,
             }),
@@ -1793,6 +1876,7 @@ impl Editor {
             page,
             anchors,
             block: Some(block),
+            group: false,
             dx,
             dy,
         })
@@ -1810,6 +1894,7 @@ impl Editor {
             page,
             anchors: anchors.to_vec(),
             block,
+            group: false,
             dx,
             dy,
         })
@@ -2249,6 +2334,33 @@ impl Editor {
     }
 
     #[must_use]
+    pub fn begin_delete_group(
+        &mut self,
+        page: usize,
+        anchors: &[String],
+        objects: &[String],
+    ) -> Option<EditJob> {
+        self.begin(Step::DeleteGroup {
+            page,
+            anchors: anchors.to_vec(),
+            objects: objects.to_vec(),
+        })
+    }
+
+    pub fn delete_the_group(
+        &mut self,
+        page: usize,
+        anchors: &[String],
+        objects: &[String],
+    ) -> Applied {
+        self.here(Step::DeleteGroup {
+            page,
+            anchors: anchors.to_vec(),
+            objects: objects.to_vec(),
+        })
+    }
+
+    #[must_use]
     pub fn begin_describe(&mut self, edit: pdf_edit::info::InfoEdit) -> Option<EditJob> {
         self.begin(Step::Describe { edit })
     }
@@ -2586,6 +2698,33 @@ impl Editor {
         })
     }
 
+    #[must_use]
+    pub fn begin_reorder_objects(
+        &mut self,
+        page: usize,
+        anchors: &[String],
+        order: pdf_edit::Stacking,
+    ) -> Option<EditJob> {
+        self.begin(Step::ReorderObjects {
+            page,
+            anchors: anchors.to_vec(),
+            order,
+        })
+    }
+
+    pub fn reorder_objects(
+        &mut self,
+        page: usize,
+        anchors: &[String],
+        order: pdf_edit::Stacking,
+    ) -> Applied {
+        self.here(Step::ReorderObjects {
+            page,
+            anchors: anchors.to_vec(),
+            order,
+        })
+    }
+
     pub fn remove_object(&mut self, page: usize, anchor: &str) -> Applied {
         self.here(Step::RemoveObject {
             page,
@@ -2631,6 +2770,25 @@ impl Editor {
             page,
             anchors: anchors.to_vec(),
             block: None,
+            group: false,
+            dx,
+            dy,
+        })
+    }
+
+    #[must_use]
+    pub fn begin_move_block_as_group(
+        &mut self,
+        page: usize,
+        anchors: &[String],
+        dx: f64,
+        dy: f64,
+    ) -> Option<EditJob> {
+        self.begin(Step::MoveBlock {
+            page,
+            anchors: anchors.to_vec(),
+            block: None,
+            group: true,
             dx,
             dy,
         })
@@ -2737,6 +2895,7 @@ impl Editor {
                 block,
                 dx,
                 dy,
+                ..
             } => self.read.get(page).and_then(|leaf| {
                 let named = |index: &usize| {
                     leaf.overlay
@@ -2757,6 +2916,23 @@ impl Editor {
             }),
             _ => None,
         };
+        let group_frames = match &step {
+            Step::MoveBlock {
+                page,
+                anchors,
+                dx,
+                dy,
+                ..
+            } if move_frame.is_none() => self.frames_touching(*page, anchors, (*dx, *dy)),
+            Step::MoveGroup {
+                page,
+                anchors,
+                dx,
+                dy,
+                ..
+            } => self.frames_touching(*page, anchors, (*dx, *dy)),
+            _ => Vec::new(),
+        };
         let whole_block = match &step {
             Step::SetSize { page, anchors, .. } => self
                 .read
@@ -2772,10 +2948,35 @@ impl Editor {
             paragraphs: std::mem::take(&mut self.paragraphs),
             flowed: std::mem::take(&mut self.flowed),
             move_frame,
+            group_frames,
             resize_frame: None,
             whole_block,
             laid: None,
         })
+    }
+
+    fn frames_touching(
+        &self,
+        page: usize,
+        anchors: &[String],
+        (dx, dy): (f64, f64),
+    ) -> Vec<(usize, f64, f64)> {
+        let Some(leaf) = self.read.get(&page) else {
+            return Vec::new();
+        };
+        let device = overlay_device(&leaf.view);
+        leaf.overlay
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, owner)| owner.anchors.iter().any(|anchor| anchors.contains(anchor)))
+            .map(|(block, owner)| {
+                let (dx, dy) = device.map_or((dx, dy), |device| {
+                    into_turned_pixels(device, owner.turn, (dx, dy))
+                });
+                (block, dx, dy)
+            })
+            .collect()
     }
 
     fn here(&mut self, step: Step) -> Applied {
@@ -2997,7 +3198,7 @@ impl Editor {
         if !self.flows_round(page, block) {
             return None;
         }
-        let rows = self.blocked_in(page, block)?;
+        let (rows, grid) = self.rows_in_the_way(page, block)?;
         if rows.is_empty() {
             return None;
         }
@@ -3014,16 +3215,17 @@ impl Editor {
         if pitch <= 0.0 || !pitch.is_finite() {
             return None;
         }
+        let grid_top = grid;
         let mut bands: Vec<[f64; 4]> = Vec::new();
         let mut top = 0.0;
-        while top < height {
-            let bottom = (top + pitch).min(height);
+        while grid_top + top < height {
+            let bottom = (top + pitch).min(height - grid_top);
             if let Some((left, run)) = pdf_edit::widest_free_run(width, &rows, top, bottom - top) {
                 let band = [
                     pixels[0] + left * scale,
-                    pixels[1] + top * scale,
+                    pixels[1] + (grid_top + top).max(0.0) * scale,
                     pixels[0] + (left + run) * scale,
-                    pixels[1] + bottom * scale,
+                    pixels[1] + (grid_top + bottom) * scale,
                 ];
                 match bands.last_mut() {
                     Some(last)
@@ -3043,11 +3245,35 @@ impl Editor {
 
     #[must_use]
     pub fn blocked_in(&self, page: usize, block: usize) -> Option<Vec<pdf_edit::Blocked>> {
+        self.rows_in_the_way(page, block).map(|(rows, _)| rows)
+    }
+
+    fn rows_in_the_way(&self, page: usize, block: usize) -> Option<(Vec<pdf_edit::Blocked>, f64)> {
         let view = &self.read.get(&page)?.view;
         let frame = *self.frames.page(page).get(block)?;
         let user = frame_in_user_space(view, frame).ok()?;
-        let pitch = self.block_pitch(page, block).unwrap_or(pdf_edit::WRAP_ROW);
-        Some(pdf_edit::blocked_in_frame(&view.graph, user, pitch))
+        let reading = self.block_reading(page, block);
+        let first = reading.as_ref().and_then(|reading| {
+            reading
+                .lines
+                .first()
+                .map(|line| (line.origin.1, reading.pitch))
+        });
+        match first {
+            Some((baseline, pitch)) if pitch.is_finite() && pitch > 0.0 => {
+                let rows = pdf_edit::blocked_for_block(
+                    &view.graph,
+                    view.program.geometry.crop_box[1],
+                    (user[0], user[2]),
+                    (baseline, pitch),
+                );
+                Some((rows, user[3] - (baseline + pitch)))
+            }
+            _ => {
+                let pitch = self.block_pitch(page, block).unwrap_or(pdf_edit::WRAP_ROW);
+                Some((pdf_edit::blocked_in_frame(&view.graph, user, pitch), 0.0))
+            }
+        }
     }
 
     #[must_use]
@@ -3417,12 +3643,14 @@ impl EditJob {
             Step::MoveBlock {
                 page,
                 anchors,
+                group,
                 dx,
                 dy,
                 ..
             } => {
                 let (page, anchors, dx, dy) = (*page, anchors.clone(), *dx, *dy);
-                self.move_block(page, &anchors, dx, dy)
+                let group = *group;
+                self.move_block(page, &anchors, group, dx, dy)
             }
             Step::MoveGroup {
                 page,
@@ -3434,6 +3662,15 @@ impl EditJob {
                 let (page, anchors, objects) = (*page, anchors.clone(), objects.clone());
                 self.move_group(page, &anchors, &objects, (*dx, *dy))
             }
+            Step::Paste {
+                page,
+                copied,
+                dx,
+                dy,
+            } => {
+                let (page, copied) = (*page, copied.clone());
+                self.paste(page, copied, (*dx, *dy))
+            }
             Step::Place { .. }
             | Step::Shape { .. }
             | Step::ShapeBlock { .. }
@@ -3443,6 +3680,14 @@ impl EditJob {
                 let (page, anchors) = (*page, anchors.clone());
                 self.delete_block(page, &anchors)
             }
+            Step::DeleteGroup {
+                page,
+                anchors,
+                objects,
+            } => {
+                let (page, anchors, objects) = (*page, anchors.clone(), objects.clone());
+                self.delete_group(page, &anchors, &objects)
+            }
             Step::RemoveObject {
                 page,
                 anchor,
@@ -3450,6 +3695,14 @@ impl EditJob {
             } => {
                 let (page, anchor, rubbing) = (*page, anchor.clone(), *rubbing);
                 self.remove_object(page, &anchor, rubbing)
+            }
+            Step::ReorderObjects {
+                page,
+                anchors,
+                order,
+            } => {
+                let (page, anchors, order) = (*page, anchors.clone(), *order);
+                self.reorder_objects(page, &anchors, order)
             }
             Step::AddField {
                 page,
@@ -3636,7 +3889,14 @@ impl EditJob {
             Step::Undo | Step::Redo => self.walk(matches!(self.step, Step::Undo)),
         };
         self.keep_frames(&applied);
-        let status = self.keep_the_flow(&applied).unwrap_or(status);
+        let (applied, status) = match self.keep_the_flow(&applied) {
+            Some(kept @ Message::TextMadeWay { .. }) => match applied {
+                Applied::Changed { page, .. } => (Applied::Changed { page, region: None }, kept),
+                other => (other, kept),
+            },
+            Some(kept) => (applied, kept),
+            None => (applied, status),
+        };
         EditOutcome {
             paragraphs: std::mem::take(&mut self.paragraphs),
             flowed: std::mem::take(&mut self.flowed),
@@ -3722,7 +3982,13 @@ impl EditJob {
                     self.frames
                         .source_resized(page, block, frame, edges, breaks);
                 }
-                None => self.frames.source_changed(page, self.move_frame),
+                None if self.group_frames.is_empty() => {
+                    self.frames.source_changed(page, self.move_frame);
+                }
+                None => {
+                    let moved = std::mem::take(&mut self.group_frames);
+                    self.frames.source_moved(page, &moved);
+                }
             },
         }
     }
@@ -3821,6 +4087,7 @@ impl EditJob {
         &mut self,
         page: usize,
         anchors: &[String],
+        group: bool,
         dx: f64,
         dy: f64,
     ) -> (Applied, Message) {
@@ -3885,15 +4152,20 @@ impl EditJob {
         if let Err(error) = self.session.apply(plan) {
             return refused(error.to_string());
         }
-        (
-            self.landed(),
+        let done = if group {
+            Done::MovedTextGroup {
+                commands: moved,
+                capability,
+                hidden,
+            }
+        } else {
             Done::MovedBlock {
                 commands: moved,
                 capability,
                 hidden,
             }
-            .into(),
-        )
+        };
+        (self.landed(), done.into())
     }
 
     fn move_group(
@@ -4515,7 +4787,7 @@ impl EditJob {
             .get(block)
             .ok_or("the block lost its place when it was laid out again")?
             .layout_pixels;
-        let resized = Self::frame_after(frame, laid, &outcome);
+        let resized = Self::frame_after(frame, laid, &outcome, declared);
         let anchor = outcome
             .anchor
             .and_then(|planned| planned_in(&candidate, block, user, &outcome, planned));
@@ -4559,7 +4831,12 @@ impl EditJob {
         })
     }
 
-    fn frame_after(frame: [f64; 4], laid: [f64; 4], outcome: &BlockOutcome) -> [f64; 4] {
+    fn frame_after(
+        frame: [f64; 4],
+        laid: [f64; 4],
+        outcome: &BlockOutcome,
+        declared: bool,
+    ) -> [f64; 4] {
         if outcome.empty {
             return frame;
         }
@@ -4568,7 +4845,7 @@ impl EditJob {
             reason = "a count of empty lines in one block"
         )]
         let below = outcome.edges.1 as f64 * outcome.pitch * OVERLAY_SCALE;
-        grown_frame(frame, laid, below)
+        grown_frame(frame, laid, below, declared)
     }
 
     fn plan_delete(
@@ -4630,6 +4907,52 @@ impl EditJob {
         (
             self.landed(),
             Done::DeletedBlock { glyphs, capability }.into(),
+        )
+    }
+
+    fn delete_group(
+        &mut self,
+        page: usize,
+        anchors: &[String],
+        objects: &[String],
+    ) -> (Applied, Message) {
+        let runs = match decoded_anchors(anchors) {
+            Ok(runs) => runs,
+            Err(reason) => return refused(reason),
+        };
+        let targets = match decoded_anchors(objects) {
+            Ok(targets) => targets,
+            Err(reason) => return refused(reason),
+        };
+        let removals = if runs.is_empty() {
+            Ok(Vec::new())
+        } else {
+            match self.session.page(page) {
+                Ok(view) => pdf_cli::page_block_removal_view(&view, &runs),
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        let removals = match removals {
+            Ok(removals) => removals,
+            Err(reason) => return refused(reason),
+        };
+        let planned = self.session.plan(&Command::DeleteGroup {
+            page_index: page,
+            runs: removals,
+            objects: targets,
+        });
+        let plan = match planned {
+            Ok(plan) => plan,
+            Err(error) => return refused(why_a_block_will_not_move(&error)),
+        };
+        let capability = format!("{:?}", plan.capability());
+        let pieces = plan.effect().moved.len();
+        if let Err(error) = self.session.apply(plan) {
+            return refused(error.to_string());
+        }
+        (
+            self.landed(),
+            Done::DeletedGroup { pieces, capability }.into(),
         )
     }
 
@@ -5061,7 +5384,8 @@ impl EditJob {
                     .block_reading(page, *block)
                     .map_or(pdf_edit::WRAP_ROW, |reading| reading.pitch)
                 * OVERLAY_SCALE;
-            grown.push((*block, grown_frame(frame, laid, below)));
+            let declared = self.frames.is_declared(page, *block);
+            grown.push((*block, grown_frame(frame, laid, below, declared)));
         }
         grown
     }
@@ -5163,6 +5487,73 @@ impl EditJob {
             Drew::Line => Done::DrewLine,
         };
         (self.landed(), said.into())
+    }
+
+    fn reorder_objects(
+        &mut self,
+        page: usize,
+        anchors: &[String],
+        order: pdf_edit::Stacking,
+    ) -> (Applied, Message) {
+        let mut targets = Vec::with_capacity(anchors.len());
+        for anchor in anchors {
+            let Some(decoded) = SourceAnchor::decode(anchor) else {
+                return refused("malformed anchor");
+            };
+            targets.push(decoded);
+        }
+        let count = targets.len();
+        let planned = self.session.plan(&Command::ReorderObjects {
+            page_index: page,
+            targets,
+            order,
+        });
+        let plan = match planned {
+            Ok(plan) => plan,
+            Err(error) => return refused(error.to_string()),
+        };
+        let capability = format!("{:?}", plan.capability());
+        if let Err(error) = self.session.apply(plan) {
+            return refused(error.to_string());
+        }
+        (
+            self.landed(),
+            Done::Reordered {
+                order,
+                count,
+                capability,
+            }
+            .into(),
+        )
+    }
+
+    fn paste(&mut self, page: usize, copied: Copied, (dx, dy): (f64, f64)) -> (Applied, Message) {
+        let objects = copied.objects.len();
+        if objects == 0 {
+            return (Applied::Unchanged, Done::NothingToPaste.into());
+        }
+        let offset = match self.session.page(page) {
+            Ok(view) => page_offset_view(&view, OVERLAY_SCALE, dx, dy),
+            Err(error) => Err(error.to_string()),
+        };
+        let (dx, dy) = match offset {
+            Ok(offset) => offset,
+            Err(reason) => return refused(reason),
+        };
+        let planned = self.session.plan(&Command::PasteObjects {
+            page_index: page,
+            copied,
+            dx,
+            dy,
+        });
+        let plan = match planned {
+            Ok(plan) => plan,
+            Err(error) => return refused(why_a_paste_is_refused(&error)),
+        };
+        if let Err(error) = self.session.apply(plan) {
+            return refused(error.to_string());
+        }
+        (self.landed(), Done::Pasted { objects }.into())
     }
 
     fn remove_object(&mut self, page: usize, anchor: &str, rubbing: bool) -> (Applied, Message) {
@@ -5285,6 +5676,18 @@ const fn how_hidden(showing: pdf_edit::Showing) -> Hidden {
         pdf_edit::Showing::Whole => Hidden::Nothing,
         pdf_edit::Showing::PartlyHidden => Hidden::Part,
         pdf_edit::Showing::OutOfSight => Hidden::All,
+    }
+}
+
+fn why_a_paste_is_refused(error: &pdf_session::PlanError) -> Refusal {
+    match error {
+        pdf_session::PlanError::Plan(SpikeError::RetypeUnsupported(reason)) => {
+            Refusal::Engine(format!("cannot paste: {reason}"))
+        }
+        pdf_session::PlanError::Plan(error @ SpikeError::PasteNotIsolated) => {
+            Refusal::Engine(format!("cannot paste: {error}"))
+        }
+        other => why_a_block_will_not_move(other),
     }
 }
 
@@ -5600,12 +6003,17 @@ fn expected_reading(
     ))
 }
 
-fn grown_frame(frame: [f64; 4], laid: [f64; 4], below: f64) -> [f64; 4] {
+fn grown_frame(frame: [f64; 4], laid: [f64; 4], below: f64, declared: bool) -> [f64; 4] {
+    let bottom = (laid[3] + below).max(frame[1] + 1.0);
     [
         frame[0],
         frame[1],
         frame[2],
-        (laid[3] + below).max(frame[1] + 1.0),
+        if declared {
+            bottom.max(frame[3])
+        } else {
+            bottom
+        },
     ]
 }
 
@@ -6035,5 +6443,32 @@ mod geometry_tests {
         turned.rotate = 90;
         assert!(!laid_out_the_same(&[turned], &[a4(120)]));
         assert!(!laid_out_the_same(&[a4(120), a4(200)], &[a4(120)]));
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::Step;
+
+    fn a_move(group: bool) -> Step {
+        Step::MoveBlock {
+            page: 0,
+            anchors: vec!["4:0:49".to_owned(), "4:0:105".to_owned()],
+            block: None,
+            group,
+            dx: 9.0,
+            dy: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_group_move_says_so_in_the_trace() {
+        assert!(
+            a_move(true).arguments().ends_with(" group"),
+            "{}",
+            a_move(true).arguments()
+        );
+        assert!(!a_move(false).arguments().contains("group"));
+        assert_eq!(a_move(true).name(), a_move(false).name());
     }
 }

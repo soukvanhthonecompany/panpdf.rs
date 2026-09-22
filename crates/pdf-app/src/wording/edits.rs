@@ -45,6 +45,11 @@ pub enum Done {
     MovedGroup {
         pieces: usize,
     },
+    MovedTextGroup {
+        commands: usize,
+        capability: String,
+        hidden: Hidden,
+    },
     MovedPicture {
         capability: String,
         hidden: Hidden,
@@ -74,10 +79,26 @@ pub enum Done {
         glyphs: usize,
         capability: String,
     },
+    DeletedGroup {
+        pieces: usize,
+        capability: String,
+    },
     SetInReadableFace {
         family: String,
     },
     RemovedPicture {
+        capability: String,
+    },
+    Pasted {
+        objects: usize,
+    },
+    NothingToPaste,
+    Copied {
+        objects: usize,
+    },
+    Reordered {
+        order: pdf_edit::Stacking,
+        count: usize,
         capability: String,
     },
     AddedText {
@@ -193,6 +214,9 @@ pub enum Refusal {
         why: Box<Refusal>,
     },
     EditingRestricted,
+    NothingToCopy {
+        why: String,
+    },
     BlockNotRead,
     RowNotRead,
     NeedsANewGlyph {
@@ -432,6 +456,15 @@ impl Done {
                 hidden.english()
             ),
             Self::MovedGroup { pieces } => format!("Moved the group: {}", count(*pieces, "piece")),
+            Self::MovedTextGroup {
+                commands,
+                capability,
+                hidden,
+            } => format!(
+                "Moved the group: {} ({capability}){}",
+                count(*commands, "command"),
+                hidden.english()
+            ),
             Self::MovedPicture {
                 capability,
                 hidden: Hidden::Part,
@@ -467,12 +500,39 @@ impl Done {
                     count(*glyphs, "character")
                 )
             }
+            Self::DeletedGroup { pieces, capability } => {
+                format!(
+                    "Deleted the group: {} ({capability})",
+                    count(*pieces, "piece")
+                )
+            }
             Self::SetInReadableFace { family } => format!(
                 "This block's font draws Lao at the codes of other letters. Read from its \
                  glyphs and set in {family}, so it can be edited; the rest of the document is \
                  untouched"
             ),
             Self::RemovedPicture { capability } => format!("Deleted the object ({capability})"),
+            Self::Pasted { objects } => format!("Pasted {}", count(*objects, "object")),
+            Self::NothingToPaste => "There is nothing to paste".to_owned(),
+            Self::Copied { objects } => format!("Copied {}", count(*objects, "object")),
+            Self::Reordered {
+                order,
+                count: n,
+                capability,
+            } => {
+                let did = match order {
+                    pdf_edit::Stacking::ToFront => "Brought it to the front",
+                    pdf_edit::Stacking::Forward => "Brought it forward",
+                    pdf_edit::Stacking::Backward => "Sent it backward",
+                    pdf_edit::Stacking::ToBack => "Sent it to the back",
+                };
+                let did = if *n > 1 {
+                    did.replace(" it ", &format!(" {n} things "))
+                } else {
+                    did.to_owned()
+                };
+                format!("{did} ({capability})")
+            }
             Self::AddedText { characters } => {
                 format!("Added text: {}", count(*characters, "character"))
             }
@@ -641,6 +701,7 @@ impl Refusal {
                  set in {family} to be edited \u{2014} {}",
                 why.say(lang)
             ),
+            Self::NothingToCopy { why } => format!("This cannot be copied yet \u{2014} {why}"),
             Self::EditingRestricted => "The author of this document restricted editing it. To \
                 edit it anyway, choose Edit > Allow editing"
                 .to_owned(),
@@ -877,9 +938,40 @@ mod tests {
     }
 
     #[test]
+    fn a_group_of_text_moved_is_not_said_to_be_a_block() {
+        let said = |done: &Done| done.say(Lang::English);
+        let block = Done::MovedBlock {
+            commands: 7,
+            capability: "Exact".to_owned(),
+            hidden: Hidden::Nothing,
+        };
+        let group = Done::MovedTextGroup {
+            commands: 7,
+            capability: "Exact".to_owned(),
+            hidden: Hidden::Nothing,
+        };
+        assert!(
+            said(&group).starts_with("Moved the group"),
+            "{}",
+            said(&group)
+        );
+        assert!(
+            said(&block).starts_with("Moved the block"),
+            "{}",
+            said(&block)
+        );
+        assert_ne!(said(&block), said(&group));
+    }
+
+    #[test]
     fn every_edit_answer_is_said_in_every_language_with_its_parts() {
         let done = [
             Done::MovedBlock {
+                commands: 7,
+                capability: "Exact".to_owned(),
+                hidden: Hidden::Nothing,
+            },
+            Done::MovedTextGroup {
                 commands: 7,
                 capability: "Exact".to_owned(),
                 hidden: Hidden::Nothing,

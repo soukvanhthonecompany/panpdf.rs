@@ -111,6 +111,12 @@ pub(crate) const fn desk(dark: bool) -> egui::Color32 {
     }
 }
 
+static FACES_FOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn packaged_faces_found() -> bool {
+    FACES_FOUND.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let mut added = Vec::new();
@@ -124,6 +130,7 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
         );
         added.push(name.to_owned());
     }
+    FACES_FOUND.store(!added.is_empty(), std::sync::atomic::Ordering::Relaxed);
     if added.is_empty() {
         return;
     }
@@ -351,6 +358,13 @@ pub(crate) enum LinkTab {
 pub(crate) struct ChosenFields {
     pub(crate) page: usize,
     pub(crate) widgets: Vec<pdf_syntax::Reference>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Clipboard {
+    pub(crate) copied: pdf_edit::Copied,
+    pub(crate) marker: String,
+    pub(crate) bounds: [f64; 4],
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -631,6 +645,13 @@ impl Chosen {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Regrouping {
+    pub(crate) page: usize,
+    pub(crate) blocks: Vec<Quad>,
+    pub(crate) objects: Vec<Quad>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Around {
     Word,
@@ -822,6 +843,29 @@ pub(crate) fn keep_bytes() -> usize {
 
 pub(crate) const KEEP_PAGES: usize = 12;
 
+impl Window {
+    pub(crate) fn spare_count(&self) -> usize {
+        self.spare.values().map(Vec::len).sum()
+    }
+
+    pub(crate) fn spare_bytes(&self) -> usize {
+        self.spare
+            .iter()
+            .map(|((width, height), kept)| width * height * 4 * kept.len())
+            .sum()
+    }
+
+    pub(crate) fn thumb_bytes(&self) -> usize {
+        self.thumbs
+            .values()
+            .map(|thumb| {
+                let [width, height] = thumb.texture.size();
+                width * height * 4
+            })
+            .sum()
+    }
+}
+
 pub(crate) type ReadingKey = (usize, usize, usize);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -937,6 +981,7 @@ pub(crate) struct Window {
     pub(crate) chosen_fields: Option<ChosenFields>,
     pub(crate) field_clipboard: Option<ChosenFields>,
     pub(crate) field_clipboard_text: Option<String>,
+    pub(crate) clipboard: Option<Clipboard>,
     pub(crate) pastes: usize,
     pub(crate) landing_fields: Option<(usize, Vec<[f64; 4]>)>,
     pub(crate) field_nudge: (f64, f64),
@@ -964,6 +1009,7 @@ pub(crate) struct Window {
     pub(crate) scenes: BTreeMap<usize, Scene>,
     pub(crate) reselect: Option<(usize, usize)>,
     pub(crate) reselect_object: Option<(usize, Quad)>,
+    pub(crate) regroup: Option<Regrouping>,
     pub(crate) resume: Option<(usize, usize, usize, usize)>,
     pub(crate) resume_anchor: Option<(usize, usize)>,
     pub(crate) typing: Typing,
@@ -982,6 +1028,8 @@ pub(crate) struct Window {
     pub(crate) painted_at: Option<crate::moment::Moment>,
     pub(crate) trace: Option<crate::trace::Trace>,
     pub(crate) meter: Option<crate::meter::Meter>,
+    pub(crate) speed: pdf_app::speed::Speed,
+    pub(crate) show_speed: bool,
     pub(crate) reveal_caret: bool,
     pub(crate) thumbs: BTreeMap<usize, crate::pages::Thumb>,
     pub(crate) thumbs_wanted: Vec<usize>,
@@ -1016,5 +1064,6 @@ pub(crate) enum TypedKey {
     Intent(Intent),
     Copy,
     Cut,
+    Paste(String),
     SelectAll,
 }

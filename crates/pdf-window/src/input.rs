@@ -4,7 +4,7 @@ use pdf_app::document::OVERLAY_SCALE;
 use pdf_app::draft::Intent;
 use pdf_app::view::{
     Proportions, Quad, ROTATE_HANDLE, block_at, caret_at_in, covering, handle_at, object_at,
-    resized, run_at, shaped, standing_block_at, text_handle_at,
+    resized, run_at, shaped, standing_block_at, text_handle_at, travel_along,
 };
 use pdf_app::view::{Step, frame_quad};
 use pdf_app::wording::Message;
@@ -41,7 +41,7 @@ impl Window {
     }
 
     fn handle_under(&self, page: usize, point: (f64, f64)) -> Option<(usize, usize, Quad)> {
-        if self.pointing.editing() {
+        if self.pointing.editing() || self.a_group_is_chosen(page) {
             return None;
         }
         let block = self.pointing.block_on(page)?;
@@ -51,6 +51,9 @@ impl Window {
     }
 
     fn object_handle_held(&self, page: usize, point: (f64, f64)) -> Option<(Carrying, Quad)> {
+        if self.a_group_is_chosen(page) {
+            return None;
+        }
         let object = self.pointing.object_on(page)?;
         let served = self.overlay(page)?.objects.get(object)?;
         let quad = Quad::from_pixels(served.quad);
@@ -62,6 +65,10 @@ impl Window {
             },
             quad,
         ))
+    }
+
+    pub(crate) fn a_group_is_chosen(&self, page: usize) -> bool {
+        !self.pointing.editing() && self.offer_on(page) == crate::text::Offer::Group
     }
 
     fn quad_of_block(&self, page: usize, block: usize) -> Option<Quad> {
@@ -81,9 +88,14 @@ impl Window {
         let Some(laid) = self.laid.iter().copied().find(|laid| laid.page == page) else {
             return;
         };
-        let (dx, dy) = (
-            f64::from(travel.x / laid.placed.stretch),
-            f64::from(travel.y / laid.placed.stretch),
+        let (dx, dy) = travel_along(
+            &self
+                .quad_of_block(page, frame)
+                .unwrap_or_else(|| Quad::of(started_at)),
+            (
+                f64::from(travel.x / laid.placed.stretch),
+                f64::from(travel.y / laid.placed.stretch),
+            ),
         );
         let held = self.layout_in(page, frame);
         let want = resized(started_at, handle, dx, dy);
@@ -295,6 +307,14 @@ impl Window {
         let Some(overlay) = self.overlay(page) else {
             return Pointing::Nothing;
         };
+        if self
+            .pointing
+            .object_on(page)
+            .and_then(|object| overlay.objects.get(object))
+            .is_some_and(|served| handle_at(&Quad::from_pixels(served.quad), point).is_some())
+        {
+            return self.pointing;
+        }
         let quads: Vec<Quad> = overlay
             .blocks
             .iter()
@@ -318,6 +338,11 @@ impl Window {
                     block: had,
                 },
             ) if block == had && page == was => self.enter(page, block, point, extend),
+            (Some(block), _)
+                if let Some(object) = picture_under_bare_frame(overlay, block, point) =>
+            {
+                Pointing::Object { page, object }
+            }
             (Some(block), _) => Pointing::Block { page, block },
             (None, _) => match object_at(&overlay.objects, point) {
                 Some(object) => Pointing::Object { page, object },
@@ -689,6 +714,17 @@ impl Window {
             });
             return;
         }
+        if let Some(taken) = self.object_handle_held(page, point) {
+            self.drag = Some(Drag {
+                what: taken.0,
+                page,
+                from: at,
+                to: at,
+                started_at: taken.1,
+                straight: false,
+            });
+            return;
+        }
         if self.take_hold_of_the_text(page, point, at) {
             return;
         }
@@ -705,7 +741,8 @@ impl Window {
             &quads,
             |index| self.pointing.block_stands(overlay, page, index),
             point,
-        ) {
+        ) && picture_under_bare_frame(overlay, index, point).is_none()
+        {
             let Some(block) = overlay.blocks.get(index) else {
                 return;
             };
@@ -1511,11 +1548,12 @@ fn typed_keys(events: &[egui::Event]) -> Vec<TypedKey> {
     events
         .iter()
         .filter_map(|event| match event {
-            egui::Event::Text(text)
-            | egui::Event::Paste(text)
-            | egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+            egui::Event::Text(text) | egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                (!text.is_empty()).then_some(TypedKey::Intent(Intent::Insert(text.clone())))
+            }
+            egui::Event::Paste(text) => {
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                (!text.is_empty()).then_some(TypedKey::Intent(Intent::Insert(text)))
+                (!text.is_empty()).then_some(TypedKey::Paste(text))
             }
             egui::Event::Copy => Some(TypedKey::Copy),
             egui::Event::Cut => Some(TypedKey::Cut),
@@ -1585,6 +1623,18 @@ pub(crate) fn history_keys(input: &mut egui::InputState) -> (bool, bool) {
     (back, forward)
 }
 
+fn picture_under_bare_frame(
+    overlay: &pdf_app::Overlay,
+    block: usize,
+    point: (f64, f64),
+) -> Option<usize> {
+    let lines = &overlay.blocks.get(block)?.lines;
+    if pdf_app::view::on_the_ink(&overlay.clusters, lines, point) {
+        return None;
+    }
+    object_at(&overlay.objects, point)
+}
+
 #[cfg(test)]
 mod shortcut_tests {
     use crate::window_state::{ArrowPress, TypedKey};
@@ -1636,7 +1686,7 @@ mod shortcut_tests {
                     extend: true
                 }),
                 TypedKey::Intent(Intent::Insert(pdf_edit::LINE_BREAK.to_string())),
-                TypedKey::Intent(Intent::Insert("x\ny".to_owned())),
+                TypedKey::Paste("x\ny".to_owned()),
             ]
         );
     }

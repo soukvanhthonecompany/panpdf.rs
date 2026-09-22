@@ -1,4 +1,4 @@
-use pdf_cli::{CaretStop, ObjectBox, TextClusterBox};
+use pdf_cli::{CaretStop, ObjectBox, TextBlockBox, TextClusterBox};
 
 use crate::document::RunBox;
 
@@ -162,6 +162,32 @@ impl Quad {
             let (x1, y1) = self.corners[(index + 1) % 4];
             (x0 - x1).abs() < 1e-6 || (y0 - y1).abs() < 1e-6
         })
+    }
+
+    #[must_use]
+    pub fn rectangular(&self) -> bool {
+        let (along, across) = (
+            (
+                self.corners[1].0 - self.corners[0].0,
+                self.corners[1].1 - self.corners[0].1,
+            ),
+            (
+                self.corners[3].0 - self.corners[0].0,
+                self.corners[3].1 - self.corners[0].1,
+            ),
+        );
+        let (long, tall) = (along.0.hypot(along.1), across.0.hypot(across.1));
+        if long <= 1e-6 || tall <= 1e-6 {
+            return false;
+        }
+        let far = (
+            self.corners[0].0 + along.0 + across.0,
+            self.corners[0].1 + along.1 + across.1,
+        );
+        let slack = 1e-6 * long.max(tall);
+        (far.0 - self.corners[2].0).abs() <= slack
+            && (far.1 - self.corners[2].1).abs() <= slack
+            && along.0.mul_add(across.0, along.1 * across.1).abs() <= slack * long.max(tall)
     }
 }
 
@@ -762,6 +788,15 @@ pub fn stands(holds_text: bool, block: usize, typing_in: Option<usize>) -> bool 
 }
 
 #[must_use]
+pub fn on_the_ink(clusters: &[TextClusterBox], lines: &[usize], point: (f64, f64)) -> bool {
+    clusters
+        .iter()
+        .filter(|cluster| lines.contains(&cluster.line))
+        .filter_map(|cluster| cluster.box_pixels)
+        .any(|ink| point.0 >= ink[0] && point.0 <= ink[2] && point.1 >= ink[1] && point.1 <= ink[3])
+}
+
+#[must_use]
 pub fn standing_block_at(
     blocks: &[Quad],
     standing: impl Fn(usize) -> bool,
@@ -926,15 +961,23 @@ pub fn handles(quad: &Quad) -> [(f64, f64); 8] {
 
 pub fn text_handles(quad: &Quad) -> impl Iterator<Item = (usize, (f64, f64))> {
     let places = handles(quad);
-    let upright = quad.upright()
-        && (quad.corners[0].1 - quad.corners[1].1).abs() < 1e-6
-        && quad.corners[1].0 > quad.corners[0].0
-        && quad.corners[2].1 > quad.corners[1].1;
+    let rectangular = quad.rectangular();
     [7, 5]
         .into_iter()
-        .filter(move |_| upright)
+        .filter(move |_| rectangular)
         .map(move |index| (index, places[index]))
         .chain(std::iter::once((ROTATE_HANDLE, rotate_handle(quad))))
+}
+
+#[must_use]
+pub fn travel_along(quad: &Quad, travel: (f64, f64)) -> (f64, f64) {
+    let Some((along, across)) = axes(quad) else {
+        return travel;
+    };
+    (
+        travel.0.mul_add(along.0, travel.1 * along.1),
+        travel.0.mul_add(across.0, travel.1 * across.1),
+    )
 }
 
 #[must_use]
@@ -960,23 +1003,40 @@ pub const ROTATE_REACH_OUT: f64 = 18.0;
 
 #[must_use]
 pub fn rotate_handle(quad: &Quad) -> (f64, f64) {
-    let frame = frame_quad(quad);
-    let foot = (
-        f64::midpoint(frame.corners[0].0, frame.corners[1].0),
-        f64::midpoint(frame.corners[0].1, frame.corners[1].1),
-    );
-    let head = (
-        f64::midpoint(frame.corners[3].0, frame.corners[2].0),
-        f64::midpoint(frame.corners[3].1, frame.corners[2].1),
-    );
+    rotate_stem(quad).1
+}
+
+#[must_use]
+pub fn rotate_stem(quad: &Quad) -> ((f64, f64), (f64, f64)) {
+    let frame = frame_quad(quad).corners;
+    let side = |one: usize, other: usize| {
+        (
+            f64::midpoint(frame[one].0, frame[other].0),
+            f64::midpoint(frame[one].1, frame[other].1),
+        )
+    };
+    let mut twice = 0.0;
+    for index in 0..4 {
+        let (x0, y0) = frame[index];
+        let (x1, y1) = frame[(index + 1) % 4];
+        twice += x0.mul_add(y1, -(x1 * y0));
+    }
+    let (foot, head) = if twice < 0.0 {
+        (side(2, 3), side(1, 0))
+    } else {
+        (side(0, 1), side(3, 2))
+    };
     let (dx, dy) = (foot.0 - head.0, foot.1 - head.1);
     let length = dx.hypot(dy);
     if length <= f64::EPSILON {
-        return foot;
+        return (foot, foot);
     }
     (
-        ROTATE_REACH_OUT.mul_add(dx / length, foot.0),
-        ROTATE_REACH_OUT.mul_add(dy / length, foot.1),
+        foot,
+        (
+            ROTATE_REACH_OUT.mul_add(dx / length, foot.0),
+            ROTATE_REACH_OUT.mul_add(dy / length, foot.1),
+        ),
     )
 }
 
@@ -1212,10 +1272,15 @@ pub fn grow(bounds: [f64; 4], by: f64) -> [f64; 4] {
 }
 
 #[must_use]
-pub fn toolbar_at(block: [f64; 4], size: (f64, f64), view: [f64; 4]) -> (f64, f64) {
+pub fn toolbar_at(
+    block: [f64; 4],
+    size: (f64, f64),
+    view: [f64; 4],
+    clear_above: f64,
+) -> (f64, f64) {
     let gap = FRAME_INSET * 3.0;
     let below = block[3] + gap;
-    let above = block[1] - gap - size.1;
+    let above = block[1] - gap - clear_above.max(0.0) - size.1;
     let y = if below + size.1 <= view[3] {
         below
     } else if above >= view[1] {
@@ -1276,19 +1341,53 @@ pub fn object_at(objects: &[ObjectBox], point: (f64, f64)) -> Option<usize> {
 
 #[must_use]
 pub fn object_put_at(objects: &[ObjectBox], wanted: &Quad) -> Option<usize> {
+    let centres = objects
+        .iter()
+        .map(|object| Quad::from_pixels(object.quad).center());
+    put_at(centres, wanted, &[])
+}
+
+fn put_at(
+    centres: impl Iterator<Item = (f64, f64)>,
+    wanted: &Quad,
+    taken: &[usize],
+) -> Option<usize> {
     let [x0, y0, x1, y1] = wanted.bounds();
     let reach = ((x1 - x0).hypot(y1 - y0) / 4.0).max(4.0);
     let (cx, cy) = wanted.center();
-    objects
-        .iter()
+    centres
         .enumerate()
-        .map(|(index, object)| {
-            let (x, y) = Quad::from_pixels(object.quad).center();
-            (index, (x - cx).hypot(y - cy))
-        })
+        .filter(|(index, _)| !taken.contains(index))
+        .map(|(index, (x, y))| (index, (x - cx).hypot(y - cy)))
         .filter(|(_, distance)| *distance <= reach)
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(index, _)| index)
+}
+
+#[must_use]
+pub fn group_put_at(
+    blocks: &[TextBlockBox],
+    objects: &[ObjectBox],
+    wanted_blocks: &[Quad],
+    wanted_objects: &[Quad],
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let mut found_blocks: Vec<usize> = Vec::with_capacity(wanted_blocks.len());
+    for wanted in wanted_blocks {
+        let centres = blocks
+            .iter()
+            .map(|block| Quad::from_pixels(block.quad).center());
+        found_blocks.push(put_at(centres, wanted, &found_blocks)?);
+    }
+    let mut found_objects: Vec<usize> = Vec::with_capacity(wanted_objects.len());
+    for wanted in wanted_objects {
+        let centres = objects
+            .iter()
+            .map(|object| Quad::from_pixels(object.quad).center());
+        found_objects.push(put_at(centres, wanted, &found_objects)?);
+    }
+    found_blocks.sort_unstable();
+    found_objects.sort_unstable();
+    Some((found_blocks, found_objects))
 }
 
 #[must_use]
@@ -1399,8 +1498,8 @@ mod tests {
     use super::{
         FRAME_INSET, HANDLE_REACH, MARGIN, Placement, Proportions, Quad, RunBox, SMALLEST_FRAME,
         Step, block_at, caret_at, caret_step, covering, covers, draw_window, frame_of, grow,
-        handle_at, handles, resized, run_at, selection_between, selection_quad, size_at,
-        standing_block_at, stands, texture_box, toolbar_at, visible_after, zoom_anchor,
+        handle_at, handles, on_the_ink, resized, run_at, selection_between, selection_quad,
+        size_at, standing_block_at, stands, texture_box, toolbar_at, visible_after, zoom_anchor,
     };
 
     const fn flat() -> Placement {
@@ -1544,6 +1643,83 @@ mod tests {
             [116.0, 600.0],
         ]);
         assert_eq!(super::object_put_at(&objects, &far), None);
+    }
+
+    fn a_page() -> (Vec<pdf_cli::TextBlockBox>, Vec<pdf_cli::ObjectBox>) {
+        let block = |x0: f64, y0: f64, x1: f64, y1: f64| pdf_cli::TextBlockBox {
+            box_pixels: [x0, y0, x1, y1],
+            layout_pixels: [x0, y0, x1, y1],
+            turn: 0.0,
+            quad: [[x0, y1], [x1, y1], [x1, y0], [x0, y0]],
+            lines: Vec::new(),
+            anchors: Vec::new(),
+            runs_on: false,
+            shape: None,
+            font: None,
+        };
+        let object = |x0: f64, y0: f64, x1: f64, y1: f64| pdf_cli::ObjectBox {
+            object: 0,
+            anchor: String::new(),
+            kind: pdf_semantics::ObjectKind::Path,
+            box_pixels: [x0, y0, x1, y1],
+            quad: [[x0, y1], [x1, y1], [x1, y0], [x0, y0]],
+        };
+        (
+            vec![
+                block(100.0, 100.0, 300.0, 140.0),
+                block(100.0, 200.0, 300.0, 240.0),
+                block(100.0, 300.0, 300.0, 340.0),
+            ],
+            vec![object(400.0, 100.0, 500.0, 200.0)],
+        )
+    }
+
+    fn quad_of(x0: f64, y0: f64, x1: f64, y1: f64) -> Quad {
+        Quad::from_pixels([[x0, y1], [x1, y1], [x1, y0], [x0, y0]])
+    }
+
+    #[test]
+    fn a_whole_group_is_found_again_where_the_move_put_it() {
+        let (blocks, objects) = a_page();
+        let wanted_blocks = [
+            quad_of(100.0, 200.0, 300.0, 240.0),
+            quad_of(100.0, 300.0, 300.0, 340.0),
+        ];
+        let wanted_objects = [quad_of(400.0, 100.0, 500.0, 200.0)];
+        assert_eq!(
+            super::group_put_at(&blocks, &objects, &wanted_blocks, &wanted_objects),
+            Some((vec![1, 2], vec![0]))
+        );
+    }
+
+    #[test]
+    fn a_group_missing_a_member_is_no_group_at_all() {
+        let (blocks, objects) = a_page();
+        let merged = blocks[..2].to_vec();
+        let wanted = [
+            quad_of(100.0, 100.0, 300.0, 140.0),
+            quad_of(100.0, 200.0, 300.0, 240.0),
+            quad_of(100.0, 300.0, 300.0, 340.0),
+        ];
+        assert_eq!(
+            super::group_put_at(&merged, &objects, &wanted, &[]),
+            None,
+            "a group kept a member that is not there"
+        );
+        assert_eq!(
+            super::group_put_at(&blocks, &objects, &wanted, &[]),
+            Some((vec![0, 1, 2], Vec::new()))
+        );
+        let one = blocks[1..2].to_vec();
+        let both = [
+            quad_of(100.0, 200.0, 300.0, 240.0),
+            quad_of(104.0, 204.0, 304.0, 244.0),
+        ];
+        assert_eq!(
+            super::group_put_at(&one, &objects, &both, &[]),
+            None,
+            "one block was handed back as two members"
+        );
     }
 
     #[test]
@@ -2152,9 +2328,77 @@ mod tests {
             super::text_handles(&turned)
                 .map(|(handle, _)| handle)
                 .collect::<Vec<_>>(),
-            [super::ROTATE_HANDLE]
+            [7, 5, super::ROTATE_HANDLE]
         );
         assert_eq!(super::text_handle_at(&turned, (98.0, 150.0)), None);
+        assert_eq!(super::text_handle_at(&turned, (-150.0, 98.0)), Some(7));
+        let sheared = Quad {
+            corners: [
+                (100.0, 100.0),
+                (300.0, 100.0),
+                (340.0, 200.0),
+                (100.0, 200.0),
+            ],
+        };
+        assert_eq!(
+            super::text_handles(&sheared)
+                .map(|(handle, _)| handle)
+                .collect::<Vec<_>>(),
+            [super::ROTATE_HANDLE]
+        );
+    }
+
+    #[test]
+    fn the_width_handles_of_a_turned_block_stand_on_its_own_turned_axis() {
+        let bounds = [100.0, 100.0, 300.0, 200.0];
+        let level = Quad::of(bounds);
+        let widths = |quad: &Quad| {
+            super::text_handles(quad)
+                .filter(|(handle, _)| *handle != super::ROTATE_HANDLE)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(widths(&level), [(7, (98.0, 150.0)), (5, (302.0, 150.0))]);
+
+        let angle: f64 = 30.0_f64.to_radians();
+        let turned = level.transformed(
+            pdf_paint::Matrix {
+                a: angle.cos(),
+                b: angle.sin(),
+                c: -angle.sin(),
+                d: angle.cos(),
+                e: 0.0,
+                f: 0.0,
+            },
+            (200.0, 150.0),
+        );
+        let turned_about = |(x, y): (f64, f64)| {
+            (
+                angle.cos().mul_add(x - 200.0, -(angle.sin() * (y - 150.0))) + 200.0,
+                angle.sin().mul_add(x - 200.0, angle.cos() * (y - 150.0)) + 150.0,
+            )
+        };
+        for ((handle, place), (was, level_place)) in widths(&turned).into_iter().zip(widths(&level))
+        {
+            assert_eq!(handle, was);
+            let want = turned_about(level_place);
+            assert!(
+                close(place.0, want.0) && close(place.1, want.1),
+                "handle {handle}: {place:?} wanted {want:?}"
+            );
+            assert_eq!(super::text_handle_at(&turned, place), Some(handle));
+        }
+
+        let along = (angle.cos() * 20.0, angle.sin() * 20.0);
+        let (dx, dy) = super::travel_along(&turned, along);
+        assert!(close(dx, 20.0) && close(dy, 0.0), "{dx} {dy}");
+        assert!(alike(
+            resized(bounds, 5, dx, dy),
+            [100.0, 100.0, 320.0, 200.0]
+        ));
+        let (dx, dy) = super::travel_along(&level, (20.0, -40.0));
+        assert!(close(dx, 20.0) && close(dy, -40.0), "{dx} {dy}");
+        let (dx, dy) = super::travel_along(&turned, (0.0, 10.0));
+        assert!(close(dx, 10.0 * angle.sin()) && close(dy, 10.0 * angle.cos()));
     }
 
     #[test]
@@ -2324,6 +2568,53 @@ mod tests {
     }
 
     #[test]
+    fn a_pictures_turning_handle_stands_off_the_same_side_as_a_blocks() {
+        let block = Quad::of([100.0, 100.0, 300.0, 200.0]);
+        let picture = Quad {
+            corners: [
+                (100.0, 200.0),
+                (300.0, 200.0),
+                (300.0, 100.0),
+                (100.0, 100.0),
+            ],
+        };
+        let (foot, handle) = super::rotate_stem(&picture);
+        assert!(close(handle.0, 200.0), "{handle:?}");
+        assert!(close(foot.1, 100.0 - FRAME_INSET), "{foot:?}");
+        assert!(
+            close(handle.1, 100.0 - FRAME_INSET - super::ROTATE_REACH_OUT),
+            "{handle:?}"
+        );
+        assert_eq!(super::rotate_handle(&block), handle);
+        assert_eq!(
+            super::handle_at(&picture, handle),
+            Some(super::ROTATE_HANDLE)
+        );
+        assert_eq!(super::nearest_handle(&handles(&picture), handle), None);
+        let centre = picture.center();
+        let turned = picture.transformed(
+            pdf_paint::Matrix {
+                a: 0.0,
+                b: 1.0,
+                c: -1.0,
+                d: 0.0,
+                e: 0.0,
+                f: 0.0,
+            },
+            centre,
+        );
+        let moved = super::rotate_handle(&turned);
+        let want = (
+            centre.0 - (handle.1 - centre.1),
+            centre.1 + (handle.0 - centre.0),
+        );
+        assert!(
+            close(moved.0, want.0) && close(moved.1, want.1),
+            "{moved:?}"
+        );
+    }
+
+    #[test]
     fn a_side_drag_on_a_turned_object_stretches_it_without_shearing_it() {
         let angle: f64 = 30.0_f64.to_radians();
         let (along, up) = (
@@ -2439,27 +2730,79 @@ mod tests {
     fn the_toolbar_goes_below_a_block_unless_there_is_no_room() {
         let view = [0.0, 0.0, 600.0, 800.0];
         let size = (60.0, 24.0);
-        let (x, y) = toolbar_at([100.0, 100.0, 300.0, 140.0], size, view);
+        let (x, y) = toolbar_at([100.0, 100.0, 300.0, 140.0], size, view, 0.0);
         assert!((x - 170.0).abs() < 1e-9, "centred: {x}");
         assert!(y > 140.0, "below the block: {y}");
 
-        let (_, y) = toolbar_at([100.0, 740.0, 300.0, 790.0], size, view);
+        let (_, y) = toolbar_at([100.0, 740.0, 300.0, 790.0], size, view, 0.0);
         assert!(y + size.1 <= 740.0, "above the block: {y}");
 
-        let (x, _) = toolbar_at([-50.0, 100.0, 20.0, 140.0], size, view);
+        let (x, _) = toolbar_at([-50.0, 100.0, 20.0, 140.0], size, view, 0.0);
         assert!(x >= 0.0, "{x}");
+    }
+
+    #[test]
+    fn a_point_is_on_a_blocks_ink_only_inside_one_of_its_clusters() {
+        let cluster = |line: usize, x: f64| TextClusterBox {
+            anchor: String::new(),
+            glyphs: 0..1,
+            box_pixels: Some([x, 10.0, x + 10.0, 20.0]),
+            stacked: false,
+            line,
+            index_in_line: 0,
+            text: None,
+        };
+        let clusters = [cluster(0, 10.0), cluster(0, 30.0), cluster(1, 10.0)];
+        assert!(on_the_ink(&clusters, &[0], (15.0, 15.0)));
+        assert!(on_the_ink(&clusters, &[0], (35.0, 15.0)));
+        assert!(
+            !on_the_ink(&clusters, &[0], (25.0, 15.0)),
+            "the gap between"
+        );
+        assert!(
+            !on_the_ink(&clusters, &[0], (45.0, 15.0)),
+            "paper past the row"
+        );
+        assert!(
+            !on_the_ink(&clusters, &[1], (35.0, 15.0)),
+            "another row's cluster"
+        );
+        let none: [TextClusterBox; 0] = [];
+        assert!(!on_the_ink(&none, &[0], (15.0, 15.0)));
+    }
+
+    #[test]
+    fn a_toolbar_above_a_block_keeps_off_the_turning_handles_stem() {
+        let view = [0.0, 0.0, 600.0, 800.0];
+        let size = (60.0, 24.0);
+        let block = [100.0, 740.0, 300.0, 790.0];
+        let (_, plain) = toolbar_at(block, size, view, 0.0);
+        assert!(
+            (plain + size.1 - (740.0 - FRAME_INSET * 3.0)).abs() < 1e-9,
+            "{plain}"
+        );
+        let (_, cleared) = toolbar_at(block, size, view, 24.0);
+        assert!(
+            (plain - cleared - 24.0).abs() < 1e-9,
+            "{plain} against {cleared}"
+        );
+        let low = [100.0, 100.0, 300.0, 140.0];
+        assert_eq!(
+            toolbar_at(low, size, view, 24.0),
+            toolbar_at(low, size, view, 0.0)
+        );
     }
 
     #[test]
     fn a_zoomed_block_keeps_its_toolbar_centred_under_it() {
         let view = [100.0, 60.0, 1100.0, 580.0];
         let block = [310.0, 210.0, 552.0, 260.0];
-        let (x, y) = toolbar_at(block, (500.0, 64.0), view);
+        let (x, y) = toolbar_at(block, (500.0, 64.0), view, 0.0);
         assert!((x - 181.0).abs() < 1e-9, "{x}");
         assert!(y > 260.0 && y + 64.0 <= 580.0, "{y}");
-        let (x, _) = toolbar_at([-300.0, 300.0, 200.0, 340.0], (500.0, 64.0), view);
+        let (x, _) = toolbar_at([-300.0, 300.0, 200.0, 340.0], (500.0, 64.0), view, 0.0);
         assert!((x - 100.0).abs() < 1e-9, "{x}");
-        let (_, y) = toolbar_at([300.0, 0.0, 500.0, 900.0], (500.0, 64.0), view);
+        let (_, y) = toolbar_at([300.0, 0.0, 500.0, 900.0], (500.0, 64.0), view, 0.0);
         assert!(y >= 60.0 && y + 64.0 <= 580.0, "{y}");
     }
 

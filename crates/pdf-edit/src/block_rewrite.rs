@@ -954,15 +954,12 @@ fn resolve_rows(
 ) -> Result<(Vec<Vec<Located>>, Outside), SpikeError> {
     let mut covered: BTreeMap<usize, Vec<Range<usize>>> = BTreeMap::new();
     let mut resolved = Vec::with_capacity(rows.len());
+    let text_atoms = crate::block_move::TextAtoms::of(graph);
     for row in rows {
         let mut out = Vec::with_capacity(row.len());
         for cluster in row {
-            let ordinal = graph
-                .atoms
-                .iter()
-                .position(|atom| {
-                    matches!(atom.kind, PaintAtomKind::Text(_)) && cluster.anchor.names(&atom.id)
-                })
+            let ordinal = text_atoms
+                .named_by(graph, &cluster.anchor)
                 .ok_or(SpikeError::AnchorNamesNothing)?;
             let PaintAtomKind::Text(text) = &graph.atoms[ordinal].kind else {
                 return Err(SpikeError::AnchorNamesNothing);
@@ -1587,6 +1584,11 @@ fn kern_between(style: &Style<'_>, piece: &Piece, next: Option<&Piece>) -> f64 {
         piece.adjust.last(),
     ) {
         (Some(was), Some(now), Some(value)) if was == now => kern_of(style, piece.style, *value),
+        (None, _, Some(value))
+            if next.is_some() && piece.kept.is_some() && piece.shaped.is_empty() =>
+        {
+            kern_of(style, piece.style, *value)
+        }
         _ => 0.0,
     }
 }
@@ -2503,15 +2505,22 @@ fn edited_tokens(
     }
     let (group, run, underline) = retyped.as_ref().map_or_else(
         || {
-            tokens[..from]
-                .iter()
-                .rev()
-                .chain(tokens[to..].iter())
-                .find_map(|token| match token {
-                    Token::Cluster(piece) => Some((piece.group, piece.style, piece.underline)),
-                    Token::Break { .. } | Token::LineBreak => None,
+            let beside = || {
+                tokens[..from]
+                    .iter()
+                    .rev()
+                    .chain(tokens[to..].iter())
+                    .filter_map(|token| match token {
+                        Token::Cluster(piece) => Some(piece),
+                        Token::Break { .. } | Token::LineBreak => None,
+                    })
+            };
+            beside()
+                .find(|piece| !piece.text.chars().all(char::is_whitespace))
+                .or_else(|| beside().next())
+                .map_or((0, 0, false), |piece| {
+                    (piece.group, piece.style, piece.underline)
                 })
-                .unwrap_or((0, 0, false))
         },
         |(_, group, run, underline)| (*group, *run, *underline),
     );

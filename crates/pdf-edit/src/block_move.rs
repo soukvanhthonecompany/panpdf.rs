@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use pdf_bytes::SourceSpan;
 use pdf_paint::{Matrix, PaintAtomKind, PaintGraph, Point, TextShowPaint};
@@ -269,18 +269,41 @@ pub(crate) fn named_runs(
     if runs.is_empty() {
         return Err(SpikeError::BlockNamesNoRun);
     }
+    let text = TextAtoms::of(graph);
     let mut named: BTreeSet<usize> = BTreeSet::new();
     for anchor in runs {
-        let found = graph
-            .atoms
-            .iter()
-            .enumerate()
-            .find(|(_, atom)| matches!(atom.kind, PaintAtomKind::Text(_)) && anchor.names(&atom.id))
-            .map(|(ordinal, _)| ordinal)
-            .ok_or(SpikeError::AnchorNamesNothing)?;
-        named.insert(found);
+        named.insert(
+            text.named_by(graph, anchor)
+                .ok_or(SpikeError::AnchorNamesNothing)?,
+        );
     }
     Ok(named)
+}
+
+pub(crate) struct TextAtoms {
+    at: HashMap<(pdf_syntax::Reference, usize), Vec<usize>>,
+}
+
+impl TextAtoms {
+    pub(crate) fn of(graph: &PaintGraph) -> Self {
+        let mut at: HashMap<(pdf_syntax::Reference, usize), Vec<usize>> = HashMap::new();
+        for (ordinal, atom) in graph.atoms.iter().enumerate() {
+            if matches!(atom.kind, PaintAtomKind::Text(_)) {
+                at.entry((atom.id.stream, atom.id.operator_span.start()))
+                    .or_default()
+                    .push(ordinal);
+            }
+        }
+        Self { at }
+    }
+
+    pub(crate) fn named_by(&self, graph: &PaintGraph, anchor: &SourceAnchor) -> Option<usize> {
+        self.at
+            .get(&(anchor.stream, anchor.operator_offset))?
+            .iter()
+            .copied()
+            .find(|ordinal| anchor.names(&graph.atoms[*ordinal].id))
+    }
 }
 
 pub(crate) fn resolve(
@@ -623,11 +646,11 @@ pub(crate) mod tests {
     use crate::plan::{Capability, Command, Plan, SourceAnchor};
     use crate::spike_move_text::{PlannerPage, SpikeError, plan_command_in};
 
-    const SQUARE_CFF: &str = "0100040100010101055465737400010101131d00000030111d000000540f1d0000\
+    pub(crate) const SQUARE_CFF: &str = "0100040100010101055465737400010101131d00000030111d000000540f1d0000\
         0059100001010106616c70686100000003010102101e0e8b8b15f8888b8bf888fc888b050e8b8b15f8888b8bf888fc\
         888b050e0000220187000141";
 
-    fn hex(text: &str) -> Vec<u8> {
+    pub(crate) fn hex(text: &str) -> Vec<u8> {
         text.bytes()
             .filter(u8::is_ascii_hexdigit)
             .collect::<Vec<u8>>()

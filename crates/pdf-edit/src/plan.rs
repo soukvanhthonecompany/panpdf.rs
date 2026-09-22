@@ -4,6 +4,7 @@ use pdf_bytes::ByteStore;
 use pdf_paint::Matrix;
 use pdf_syntax::Reference;
 
+use crate::copied::Copied;
 use crate::incremental::{
     ObjectBody, ObjectWrite, ProtectionPolicy, Restrictions, append_object_writes_bounded,
 };
@@ -70,7 +71,14 @@ impl SourceAnchor {
 
     #[must_use]
     pub fn names(&self, id: &pdf_paint::PaintId) -> bool {
-        *self == Self::of(id)
+        self.stream == id.stream
+            && self.operator_offset == id.operator_span.start()
+            && self.invocation_path.len() == id.invocation_path.len()
+            && self.invocation_path.iter().zip(&id.invocation_path).all(
+                |((form, offset), invocation)| {
+                    *form == invocation.form && *offset == invocation.operator_span.start()
+                },
+            )
     }
 }
 
@@ -134,6 +142,11 @@ pub enum Command {
         page_index: usize,
         runs: Vec<RunRewrite>,
     },
+    DeleteGroup {
+        page_index: usize,
+        runs: Vec<RunRewrite>,
+        objects: Vec<SourceAnchor>,
+    },
     MoveTextBlock {
         page_index: usize,
         runs: Vec<SourceAnchor>,
@@ -146,6 +159,11 @@ pub enum Command {
         objects: Vec<SourceAnchor>,
         dx: f64,
         dy: f64,
+    },
+    ReorderObjects {
+        page_index: usize,
+        targets: Vec<SourceAnchor>,
+        order: crate::stacking::Stacking,
     },
     SetDocumentInfo {
         edit: crate::info::InfoEdit,
@@ -362,6 +380,12 @@ pub enum Command {
         transform: Matrix,
         about: FixedPoint,
     },
+    PasteObjects {
+        page_index: usize,
+        copied: Copied,
+        dx: f64,
+        dy: f64,
+    },
 }
 
 impl Command {
@@ -372,9 +396,11 @@ impl Command {
             | Self::MoveTextCluster { page_index, .. }
             | Self::DeleteTextClusters { page_index, .. }
             | Self::RewriteText { page_index, .. }
+            | Self::DeleteGroup { page_index, .. }
             | Self::MoveTextBlock { page_index, .. }
             | Self::MoveGroup { page_index, .. }
             | Self::PlaceObject { page_index, .. }
+            | Self::PasteObjects { page_index, .. }
             | Self::PlaceNewText { page_index, .. }
             | Self::Stamp { page_index, .. }
             | Self::TextLayer { page_index, .. }
@@ -399,6 +425,7 @@ impl Command {
             | Self::RemoveLinks { page_index, .. }
             | Self::SetFieldSettings { page_index, .. }
             | Self::RemoveObject { page_index, .. }
+            | Self::ReorderObjects { page_index, .. }
             | Self::SetTextSize { page_index, .. }
             | Self::SetTextShape { page_index, .. }
             | Self::RewriteBlock { page_index, .. }
@@ -446,6 +473,7 @@ impl Command {
             | Self::Stamp { .. }
             | Self::TextLayer { .. }
             | Self::PlaceObject { .. }
+            | Self::PasteObjects { .. }
             | Self::MoveTextRun { .. }
             | Self::MoveTextBlock { .. }
             | Self::MoveGroup { .. }
@@ -457,7 +485,9 @@ impl Command {
             | Self::StyleBlock { .. }
             | Self::ShiftBlock { .. }
             | Self::RewriteText { .. }
-            | Self::RemoveObject { .. } => ClustersAfter::ThePlannerSays,
+            | Self::DeleteGroup { .. }
+            | Self::RemoveObject { .. }
+            | Self::ReorderObjects { .. } => ClustersAfter::ThePlannerSays,
             Self::AddBlankPage { .. }
             | Self::RemovePages { .. }
             | Self::MovePages { .. }

@@ -5,6 +5,7 @@ use std::fmt;
 mod block_move;
 mod block_rewrite;
 mod clip_region;
+pub mod copied;
 pub mod destination;
 mod field_group;
 mod field_look;
@@ -29,12 +30,14 @@ mod new_text;
 mod object_edit;
 pub mod outline;
 mod page_tree;
+mod paste;
 mod place_object;
 mod place_text;
 pub mod plan;
 pub mod png;
 mod previous;
 mod remove_object;
+mod reorder;
 pub mod reprotect;
 mod retype;
 pub mod signature;
@@ -42,6 +45,7 @@ mod size_text;
 pub use retype::{replacement_shift, substituted_family};
 pub mod spike_move_text;
 mod split;
+pub mod stacking;
 pub mod stamp;
 pub mod tab_order;
 pub mod text_layer;
@@ -53,6 +57,7 @@ pub use block_rewrite::{
     BlockReading, ClusterFace, LineEnd, LiveBlock, LiveLine, LivePiece, ReadLine,
     in_compatibility_form, insertion_after_marks, read_block, read_block_faces,
 };
+pub use copied::{Copied, CopiedGlyph, CopiedObject, CopiedRun, CopiedTextElement, copy_from};
 pub use history::History;
 pub use incremental::Restrictions;
 pub use layout::{
@@ -66,6 +71,7 @@ pub use plan::{
     TextRunSelection, TextStyle,
 };
 use spike_move_text::{SpikeError, plan_command};
+pub use stacking::{Stacking, StackingError};
 
 use pdf_bytes::ByteStore;
 use pdf_syntax::{

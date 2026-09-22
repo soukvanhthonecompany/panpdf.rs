@@ -31,12 +31,20 @@ fn made(
     library: Vec<PathBuf>,
     locked: Option<Locked>,
 ) -> Window {
+    #[cfg(not(target_arch = "wasm32"))]
+    let installing = std::time::Instant::now();
     install_fonts(&context.egui_ctx);
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::startup::stage("fonts", installing.elapsed());
     install_look(&context.egui_ctx);
     let mut window = Window::new(editor, opened, library);
     let repaint = context.egui_ctx.clone();
     window.painter.set_waker(move || repaint.request_repaint());
+    #[cfg(not(target_arch = "wasm32"))]
+    let reading = std::time::Instant::now();
     window.recent = crate::hub::load_recent();
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::startup::stage("recent", reading.elapsed());
     window.home = !window.has_document();
     if let Some(locked) = locked {
         window.unlocking = Some(crate::unlock::Unlock {
@@ -64,11 +72,20 @@ pub fn run(
     library: Vec<PathBuf>,
     locked: Option<Locked>,
 ) -> Result<(), String> {
+    crate::reporting::begin();
+    if !opened.as_os_str().is_empty() {
+        crate::reporting::say(
+            pdf_app::trouble::Kind::Document,
+            &format!("opening {} at start", opened.display()),
+        );
+    }
     let waiting = std::rc::Rc::new(std::cell::RefCell::new(Some((
         editor, opened, library, locked,
     ))));
     let mut refusals: Vec<String> = Vec::new();
+    crate::startup::reached("document");
     for renderer in RENDERERS {
+        let opening = std::time::Instant::now();
         let options = eframe::NativeOptions {
             renderer,
             viewport: egui::ViewportBuilder::default()
@@ -87,6 +104,8 @@ pub fn run(
                             "the window was already started",
                         )
                     })?;
+                crate::startup::stage("window", opening.elapsed());
+                crate::reporting::renderer_is(&renderer.to_string());
                 Ok(Box::new(made(context, editor, opened, library, locked)))
             }),
         );
@@ -127,13 +146,16 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<(), String> {
 }
 
 impl Window {
-    fn assistant_is_open(&self) -> bool {
+    fn assistant_is_typing(&self, ctx: &egui::Context) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.ai.open
+            self.ai.open && ctx.memory(|memory| memory.has_focus(crate::ai_panel::composer_id()))
         }
         #[cfg(target_arch = "wasm32")]
-        false
+        {
+            let _ = ctx;
+            false
+        }
     }
 
     #[expect(
@@ -142,7 +164,11 @@ impl Window {
     )]
     pub(crate) fn new(editor: Editor, opened: PathBuf, library: Vec<PathBuf>) -> Self {
         let destination = crate::save_file::unused_copy(&opened);
+        #[cfg(not(target_arch = "wasm32"))]
+        let reading = std::time::Instant::now();
         let remembered = crate::pages::remembered_view();
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::startup::stage("view", reading.elapsed());
         Self {
             saved_epoch: editor.epoch(),
             saved_digest: None,
@@ -206,6 +232,7 @@ impl Window {
             chosen_fields: None,
             field_clipboard: None,
             field_clipboard_text: None,
+            clipboard: None,
             pastes: 0,
             landing_fields: None,
             field_nudge: (0.0, 0.0),
@@ -232,6 +259,7 @@ impl Window {
             scenes: BTreeMap::new(),
             reselect: None,
             reselect_object: None,
+            regroup: None,
             typing: Typing::default(),
             colours: crate::palette::Colours::default(),
             spacing: None,
@@ -250,6 +278,8 @@ impl Window {
             painted_at: None,
             trace: None,
             meter: None,
+            speed: pdf_app::speed::Speed::default(),
+            show_speed: false,
             reveal_caret: false,
             thumbs: BTreeMap::new(),
             thumbs_wanted: Vec::new(),
@@ -303,6 +333,8 @@ impl Window {
         if ctx.current_pass_index() > 0 {
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::startup::a_frame_began();
         let now = crate::moment::Moment::now();
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(interval) = crate::window_state::frame_interval()
@@ -316,14 +348,37 @@ impl Window {
         self.painted_at = Some(now);
     }
 
-    fn close_the_frame(&mut self, began: crate::moment::Moment) {
+    fn close_the_frame(&mut self, ctx: &egui::Context, began: crate::moment::Moment) {
+        self.show_the_drawing_speed(ctx);
+        let took = began.elapsed();
+        self.take_in_the_frames_cost(took);
+        #[cfg(not(target_arch = "wasm32"))]
+        if crate::startup::a_frame_was_built() {
+            crate::memory::sample();
+            ctx.request_repaint();
+        }
         let (frame, held, waiting) = (self.frame, self.tiles.len(), self.tiles.waiting_count());
         let held_mb = self.tiles.held_bytes() / (1 << 20);
+        let metering = self.meter.is_some();
+        let (spare, spare_mb) = if metering {
+            (self.spare_count(), self.spare_bytes() / (1 << 20))
+        } else {
+            (0, 0)
+        };
+        let (thumbs, thumb_mb) = if metering {
+            (self.thumbs.len(), self.thumb_bytes() / (1 << 20))
+        } else {
+            (0, 0)
+        };
         if let Some(meter) = self.meter.as_mut() {
             meter.count("held", held);
             meter.count("held_MB", held_mb);
             meter.count("waiting", waiting);
-            meter.end(frame, began.elapsed());
+            meter.count("spare", spare);
+            meter.count("spare_MB", spare_mb);
+            meter.count("thumbs", thumbs);
+            meter.count("thumb_MB", thumb_mb);
+            meter.end(frame, took);
         }
     }
 
@@ -418,6 +473,13 @@ impl Window {
     pub(crate) fn took_back(&mut self, outcome: pdf_app::EditOutcome) -> Applied {
         let applied = self.editor.adopt(outcome);
         #[cfg(not(target_arch = "wasm32"))]
+        if let Applied::Refused(refusal) = &applied {
+            crate::reporting::say(
+                pdf_app::trouble::Kind::Refused,
+                &Message::Refused(refusal.clone()).say(pdf_app::wording::Lang::English),
+            );
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         {
             self.ai.tools.note_applied(&applied);
             if self.editor.pages_redrawn() {
@@ -483,17 +545,14 @@ impl Window {
             if let Some(thumb) = self.thumbs.get_mut(&page) {
                 thumb.fresh = false;
             }
-            if let Some((target_page, _)) = self.reselect
-                && target_page != page
-            {
-                self.reselect = None;
-            }
+            self.keep_only_what_is_on(page);
             if self.editor.leaf(page).is_some() {
                 self.settle_on(page);
             }
         } else {
             self.reselect = None;
             self.reselect_object = None;
+            self.regroup = None;
             self.resume = None;
             let landing = match &applied {
                 Applied::Refused(reason) => TextLanding::Refused(Message::Refused(reason.clone())),
@@ -511,7 +570,23 @@ impl Window {
         applied
     }
 
+    fn keep_only_what_is_on(&mut self, page: usize) {
+        if let Some((wanted, _)) = self.reselect
+            && wanted != page
+        {
+            self.reselect = None;
+        }
+        if self
+            .regroup
+            .as_ref()
+            .is_some_and(|group| group.page != page)
+        {
+            self.regroup = None;
+        }
+    }
+
     fn settle_on(&mut self, page: usize) {
+        self.find_the_moved_group(page);
         self.find_the_moved_block(page);
         self.point_at_the_shaped_picture(page);
         self.enter_the_new_text(page);
@@ -532,6 +607,32 @@ impl Window {
         {
             self.point_at(Pointing::Object { page, object });
         }
+    }
+
+    fn find_the_moved_group(&mut self, page: usize) {
+        let wanted = match &self.regroup {
+            Some(group) if group.page == page => group.clone(),
+            _ => return,
+        };
+        self.regroup = None;
+        let found = self.overlay(page).and_then(|overlay| {
+            pdf_app::view::group_put_at(
+                &overlay.blocks,
+                &overlay.objects,
+                &wanted.blocks,
+                &wanted.objects,
+            )
+        });
+        let found = found
+            .filter(|(blocks, _)| blocks.iter().all(|block| self.block_is_there(page, *block)));
+        let Some((blocks, objects)) = found else {
+            self.point_at(Pointing::Nothing);
+            self.editor.say(Message::GroupLetGoAfterTheEdit);
+            return;
+        };
+        self.reselect = None;
+        self.reselect_object = None;
+        self.choose(page, blocks, objects);
     }
 
     fn find_the_moved_block(&mut self, page: usize) {
@@ -747,6 +848,18 @@ impl Window {
             Ok(()) => Message::Opened(uri),
             Err(error) => Message::CouldNotOpen {
                 uri,
+                why: error.to_string(),
+            },
+        };
+        self.editor.say(said);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn open_out(&mut self, what: &str) {
+        let said = match open_externally(what) {
+            Ok(()) => Message::Opened(what.to_owned()),
+            Err(error) => Message::CouldNotOpen {
+                uri: what.to_owned(),
                 why: error.to_string(),
             },
         };
@@ -986,16 +1099,19 @@ impl Window {
                     self.editor.say(reason);
                 }
             }
-            TypedKey::Copy if in_text => {
-                self.copy_selection(ctx);
-            }
-            TypedKey::Cut if in_text => {
-                if self.copy_selection(ctx) {
-                    self.delete_direction(true);
+            TypedKey::Copy => self.copy(ctx, in_text),
+            TypedKey::Cut => self.cut(ctx, in_text),
+            TypedKey::Paste(text) => {
+                let typed = in_text || self.input.collecting();
+                if !typed && self.clipboard_is_ours(&text) {
+                    let in_place = ctx.input(|input| input.modifiers.shift);
+                    self.paste_the_clipboard(ctx, in_place);
+                } else {
+                    self.take_key(ctx, TypedKey::Intent(Intent::Insert(text)), in_text);
                 }
             }
             TypedKey::SelectAll if self.pointing.editing() => self.select_the_block(),
-            TypedKey::Copy | TypedKey::Cut | TypedKey::SelectAll => {}
+            TypedKey::SelectAll => {}
         }
     }
 
@@ -1062,7 +1178,7 @@ impl Window {
         ))
     }
 
-    fn copy_selection(&mut self, ctx: &egui::Context) -> bool {
+    pub(crate) fn copy_selection(&mut self, ctx: &egui::Context) -> bool {
         let Some((page, block, at, anchor)) = self.text_positions() else {
             return false;
         };
@@ -1278,7 +1394,7 @@ impl eframe::App for Window {
             && self.splitting.is_none()
             && self.exporting.is_none()
             && self.chooser.is_none()
-            && !self.assistant_is_open()
+            && !self.assistant_is_typing(&ctx)
         {
             self.keys(&ctx);
             if ctx.input_mut(|input| {
@@ -1307,6 +1423,7 @@ impl eframe::App for Window {
             self.status_bar(ui);
             self.home_screen(ui);
             self.confirm_leaving(&ctx);
+            self.close_the_frame(&ctx, began);
             return;
         }
         self.keep_the_page_in_the_list();
@@ -1345,7 +1462,13 @@ impl eframe::App for Window {
         }
         self.warn_of_restrictions(&ctx);
         self.confirm_leaving(&ctx);
-        self.close_the_frame(began);
+        self.close_the_frame(&ctx, began);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.log_the_drawing_speed();
+        crate::memory::log_what_was_held();
     }
 }
 
@@ -1839,5 +1962,178 @@ mod persistence_tests {
         assert!(window.unsaved());
         assert!(!window.save(), "queued text must not be reported as saved");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+    use crate::text::Offer;
+
+    fn window() -> Window {
+        let editor = Editor::open(three_paragraphs()).expect("the test page opens");
+        let mut window = Window::new(editor, PathBuf::from("/missing/original.pdf"), Vec::new());
+        read_the_page(&mut window);
+        window
+    }
+
+    fn read_the_page(window: &mut Window) {
+        let view = pdf_session::interpret_page_fully(
+            window.editor.source().unwrap(),
+            0,
+            b"",
+            window.editor.grouping(0).as_deref(),
+            pdf_cli::font_provider(),
+        )
+        .unwrap();
+        window.editor.adopt_page(0, std::sync::Arc::new(view));
+    }
+
+    fn three_paragraphs() -> pdf_bytes::ByteStore {
+        let content = b"BT /F1 12 Tf 1 0 0 1 20 240 Tm (First paragraph) Tj ET\n\
+             BT /F1 12 Tf 1 0 0 1 20 160 Tm (Second paragraph) Tj ET\n\
+             BT /F1 12 Tf 1 0 0 1 20 80 Tm (Third paragraph) Tj ET\n"
+            .to_vec();
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        let mut object = |bytes: &mut Vec<u8>, body: &[u8]| {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(body);
+        };
+        object(
+            &mut bytes,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        object(
+            &mut bytes,
+            b"2 0 obj\n<< /Type /Pages /MediaBox [0 0 300 300] /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        object(
+            &mut bytes,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+        );
+        offsets.push(bytes.len());
+        bytes.extend_from_slice(
+            format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+        );
+        bytes.extend_from_slice(&content);
+        bytes.extend_from_slice(b"\nendstream\nendobj\n");
+        offsets.push(bytes.len());
+        bytes.extend_from_slice(
+            b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        );
+        let size = offsets.len() + 1;
+        let xref = bytes.len();
+        bytes.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
+        for offset in &offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n").as_bytes(),
+        );
+        bytes.extend_from_slice(xref.to_string().as_bytes());
+        bytes.extend_from_slice(b"\n%%EOF\n");
+        pdf_bytes::ByteStore::new(
+            pdf_bytes::SourceId::new(511),
+            std::sync::Arc::<[u8]>::from(bytes),
+        )
+    }
+
+    fn anchors_of_the_group(window: &Window) -> Vec<String> {
+        let (mut anchors, objects) = window.group_members().expect("a group with members");
+        assert!(objects.is_empty(), "this document has no objects to choose");
+        anchors.sort();
+        anchors
+    }
+
+    #[test]
+    fn a_group_survives_its_own_move() {
+        let mut window = window();
+        let blocks = window.overlay(0).expect("page 0 read").blocks.len();
+        assert_eq!(blocks, 3, "the test page is three paragraphs");
+        window.choose(0, vec![0, 1], Vec::new());
+        assert!(window.chosen.is_a_group());
+        let job = window
+            .begin_group_move(0, (9.0, 0.0))
+            .expect("a group of text moves");
+        let applied = window.took_back(job.run());
+        assert!(matches!(applied, Applied::Changed { .. }), "{applied:?}");
+        let said = window.editor.status().say(pdf_app::wording::Lang::English);
+        assert!(
+            said.starts_with("Moved the group"),
+            "a group's move said: {said}"
+        );
+        read_the_page(&mut window);
+        window.settle_on(0);
+        assert_eq!(
+            window.chosen.count(),
+            2,
+            "the group did not survive its own move: {} blocks, {} objects",
+            window.chosen.blocks.len(),
+            window.chosen.objects.len()
+        );
+        assert_eq!(
+            window.offer_on(0),
+            Offer::Group,
+            "the toolbar went back to one block's controls"
+        );
+        assert!(
+            window.chosen.holds(window.pointing),
+            "what is pointed at is not one of the group"
+        );
+        assert_eq!(
+            anchors_of_the_group(&window).len(),
+            2,
+            "Delete would not name both paragraphs"
+        );
+        window.delete_the_object();
+        let running = window.running.take().expect("a delete was sent");
+        let applied = window.took_back(running.handle.join().expect("the edit thread"));
+        assert!(matches!(applied, Applied::Changed { .. }), "{applied:?}");
+        read_the_page(&mut window);
+        let blocks = window.overlay(0).expect("page 0 read").blocks.len();
+        let standing = (0..blocks)
+            .filter(|at| window.block_is_there(0, *at))
+            .count();
+        assert_eq!(standing, 1, "Delete left a member of the group standing");
+    }
+
+    #[test]
+    fn one_block_moved_on_its_own_is_not_made_into_a_group() {
+        let mut window = window();
+        window.point_at(Pointing::Block { page: 0, block: 0 });
+        window.move_selection((9.0, 0.0));
+        let Some(running) = window.running.take() else {
+            panic!("a block move was sent");
+        };
+        let applied = window.took_back(running.handle.join().expect("the edit thread"));
+        assert!(matches!(applied, Applied::Changed { .. }), "{applied:?}");
+        read_the_page(&mut window);
+        window.settle_on(0);
+        assert_eq!(window.chosen.count(), 0, "one block became a group");
+        assert_eq!(window.offer_on(0), Offer::Block);
+    }
+
+    #[test]
+    fn a_group_missing_a_member_is_let_go_and_said_so() {
+        let mut window = window();
+        window.choose(0, vec![0, 1], Vec::new());
+        window.regroup = Some(crate::window_state::Regrouping {
+            page: 0,
+            blocks: vec![pdf_app::view::Quad::from_pixels([
+                [9000.0, 9000.0],
+                [9100.0, 9000.0],
+                [9100.0, 9100.0],
+                [9000.0, 9100.0],
+            ])],
+            objects: Vec::new(),
+        });
+        window.settle_on(0);
+        assert_eq!(window.chosen.count(), 0, "a group kept a missing member");
+        assert_eq!(
+            window.editor.status(),
+            &Message::GroupLetGoAfterTheEdit,
+            "the group went without a word"
+        );
     }
 }

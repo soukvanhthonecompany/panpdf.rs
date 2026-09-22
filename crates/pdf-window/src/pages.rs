@@ -77,7 +77,13 @@ impl Window {
             ui.ctx().request_repaint();
         }
         if width < room::PANEL_GONE {
+            self.folded_handle(ui, window, now);
             return;
+        }
+        if let Some(meter) = self.meter.as_mut() {
+            meter.note(&format!(
+                "panel width {width:.2} settled {settled:.2} held {held} flowing {flowing}"
+            ));
         }
         let stage = room::panel_layout(width, window);
         let working = !self.editor.is_busy() && self.loading.is_none() && self.has_document();
@@ -213,6 +219,80 @@ impl Window {
         }
     }
 
+    fn folded_handle(&mut self, ui: &egui::Ui, window: f32, now: f64) {
+        let space = ui.max_rect();
+        let tall = room::handle_tall(space.height());
+        if tall <= 0.0 {
+            return;
+        }
+        let strip = egui::Rect::from_min_size(
+            egui::pos2(space.left(), space.center().y - tall / 2.0),
+            egui::vec2(room::HANDLE_WIDE, tall),
+        );
+        let ctx = ui.ctx().clone();
+        egui::Area::new(egui::Id::new("pages-handle"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(strip.min)
+            .show(&ctx, |ui| {
+                let handle = ui.interact(
+                    strip,
+                    egui::Id::new(SPLITTER_ID),
+                    egui::Sense::click_and_drag(),
+                );
+                let live = handle.hovered() || handle.dragged();
+                if live {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+                let visuals = ui.visuals();
+                let ink = if live {
+                    visuals.selection.stroke.color
+                } else {
+                    visuals.weak_text_color()
+                };
+                let fill = if live {
+                    visuals.widgets.hovered.bg_fill
+                } else {
+                    visuals.widgets.inactive.bg_fill
+                };
+                let painter = ui.painter();
+                painter.rect_filled(strip, 4.0, fill);
+                painter.rect_stroke(
+                    strip,
+                    4.0,
+                    egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+                    egui::StrokeKind::Inside,
+                );
+                let middle = strip.center();
+                let arm = egui::Stroke::new(1.6, ink);
+                painter.line_segment(
+                    [
+                        egui::pos2(middle.x - 2.0, middle.y - 4.0),
+                        egui::pos2(middle.x + 2.0, middle.y),
+                    ],
+                    arm,
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(middle.x + 2.0, middle.y),
+                        egui::pos2(middle.x - 2.0, middle.y + 4.0),
+                    ],
+                    arm,
+                );
+                if handle.clicked() {
+                    self.fold_the_pages(false, now);
+                }
+                if handle.dragged()
+                    && let Some(at) = ui.ctx().pointer_interact_pos()
+                    && let room::Pulled::Open(width) =
+                        room::handle_pulled_to(at.x - space.left(), window)
+                {
+                    self.pages_width = width;
+                    self.pages_folded = false;
+                    self.page_motion.settle_panel();
+                }
+            });
+    }
+
     pub(crate) fn fold_the_pages(&mut self, folded: bool, now: f64) {
         if self.pages_folded == folded {
             return;
@@ -300,6 +380,7 @@ impl Window {
         let count = self.editor.page_count();
         let now = ui.input(|input| input.time);
         let grid = Grid::for_width(ui.available_width() - CARD_AIR);
+        let glide = room::pictures_glide(ui.ctx().is_being_dragged(egui::Id::new(SPLITTER_ID)));
         self.thumb_width = grid.thumb;
         let slots = self.slots(count);
         let hole_page = self
@@ -318,6 +399,13 @@ impl Window {
             })
             .collect();
         let (places, total) = page_motion::lay_out(&grid, &heights);
+        if let Some(meter) = self.meter.as_mut() {
+            let first = places.first().map_or(0.0, |place| place.min.x);
+            meter.note(&format!(
+                "grid columns {} cell {:.2} thumb {:.2} first {first:.2}",
+                grid.columns, grid.cell, grid.thumb
+            ));
+        }
         let (area, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), total + END_ROOM * 2.0),
             egui::Sense::hover(),
@@ -334,7 +422,13 @@ impl Window {
                 continue;
             };
             targets.push(target);
-            let (at, on_its_way) = self.page_motion.at(page, place.min.to_vec2(), now);
+            let (at, on_its_way) = if glide {
+                self.page_motion.at(page, place.min.to_vec2(), now)
+            } else {
+                self.page_motion
+                    .set_off_from(page, place.min.to_vec2(), now);
+                (place.min.to_vec2(), false)
+            };
             moving |= on_its_way;
             let shown = egui::Rect::from_min_size(origin + at, place.size());
             if !ui.is_rect_visible(shown.expand2(egui::vec2(4.0, page_motion::LABEL))) {
@@ -351,6 +445,21 @@ impl Window {
         }
         if moving {
             ui.ctx().request_repaint();
+        }
+        if let Some(meter) = self.meter.as_mut() {
+            let where_each = cards
+                .iter()
+                .map(|(page, shown, _)| {
+                    format!(
+                        "{page}:{:.2},{:.2},{:.2}",
+                        shown.min.x,
+                        shown.min.y,
+                        shown.width()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            meter.note(&format!("cards moving {moving} {where_each}"));
         }
         let laid = Laid {
             origin,

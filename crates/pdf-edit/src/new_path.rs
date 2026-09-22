@@ -104,7 +104,11 @@ pub(crate) fn plan_new_path(
 }
 
 fn state_entries(new: &NewPath<'_>) -> Option<String> {
-    let pen = new.stroke?;
+    gstate_entries(new.stroke)
+}
+
+pub(crate) fn gstate_entries(stroke: Option<PenStroke>) -> Option<String> {
+    let pen = stroke?;
     if pen.opacity >= 1.0 && pen.blend == PenBlend::Normal {
         return None;
     }
@@ -115,7 +119,7 @@ fn state_entries(new: &NewPath<'_>) -> Option<String> {
     ))
 }
 
-fn checked(new: &NewPath<'_>) -> Result<(), SpikeError> {
+pub(crate) fn checked(new: &NewPath<'_>) -> Result<(), SpikeError> {
     let Some(PenStep::Move(_)) = new.steps.first() else {
         return Err(refused("a drawing starts where the pen went down"));
     };
@@ -157,7 +161,7 @@ fn checked(new: &NewPath<'_>) -> Result<(), SpikeError> {
     Ok(())
 }
 
-fn candidate(
+pub(crate) fn candidate(
     decoded: &[u8],
     new: &NewPath<'_>,
     state: Option<&str>,
@@ -224,7 +228,10 @@ fn prove_drawn(
         return Err(SpikeError::MoveNotIsolated);
     }
     crate::new_text::prove_untouched(before, after)?;
-    let paint = drawn(before, after)?;
+    drawn_as(drawn(before, after)?, new)
+}
+
+pub(crate) fn drawn_as(paint: &pdf_paint::PathPaint, new: &NewPath<'_>) -> Result<(), SpikeError> {
     let wrong = || refused("the line drawn does not paint as it was drawn");
     if paint.stroke != new.stroke.is_some() || paint.fill.is_some() != new.fill.is_some() {
         return Err(wrong());
@@ -279,7 +286,7 @@ fn prove_drawn(
     }
 }
 
-fn paints(painted: &pdf_paint::Color, [red, green, blue]: [f64; 3]) -> bool {
+pub(crate) fn paints(painted: &pdf_paint::Color, [red, green, blue]: [f64; 3]) -> bool {
     match painted {
         pdf_paint::Color::DeviceRgb(r, g, b) => [(*r, red), (*g, green), (*b, blue)]
             .iter()

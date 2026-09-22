@@ -13,6 +13,7 @@ mod check;
 use pdf_window::app;
 
 fn main() -> ExitCode {
+    pdf_window::startup::began();
     let mut page = 0_usize;
     let mut path: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;

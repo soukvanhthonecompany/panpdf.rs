@@ -365,13 +365,18 @@ impl Frames {
     }
 
     pub fn source_changed(&mut self, page: usize, movement: Option<(usize, f64, f64)>) {
+        let moved: Vec<(usize, f64, f64)> = movement.into_iter().collect();
+        self.source_moved(page, &moved);
+    }
+
+    pub fn source_moved(&mut self, page: usize, movements: &[(usize, f64, f64)]) {
         let before = self.page(page).to_vec();
         let edges_before = self.edges_page(page);
         let breaks_before = self.breaks_page(page);
-        if let Some((block, dx, dy)) = movement
-            && let Some(bounds) = before.get(block)
-        {
-            self.preview(page, block, crate::view::box_shifted(*bounds, dx, dy));
+        for (block, dx, dy) in movements {
+            if let Some(bounds) = before.get(*block) {
+                self.preview(page, *block, crate::view::box_shifted(*bounds, *dx, *dy));
+            }
         }
         self.record_source(page, before, edges_before, breaks_before);
     }

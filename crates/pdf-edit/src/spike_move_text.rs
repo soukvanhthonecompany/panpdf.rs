@@ -309,8 +309,10 @@ fn intent_of(command: &Command) -> Intent<'_> {
         Command::MoveTextBlock { page_index, .. }
         | Command::MoveGroup { page_index, .. }
         | Command::RewriteText { page_index, .. }
+        | Command::DeleteGroup { page_index, .. }
         | Command::PlaceObject { page_index, .. }
         | Command::RemoveObject { page_index, .. }
+        | Command::ReorderObjects { page_index, .. }
         | Command::SetTextSize { page_index, .. }
         | Command::SetTextShape { page_index, .. }
         | Command::RewriteBlock { page_index, .. }
@@ -320,6 +322,7 @@ fn intent_of(command: &Command) -> Intent<'_> {
         | Command::Stamp { page_index, .. }
         | Command::TextLayer { page_index, .. }
         | Command::PlaceNewImage { page_index, .. }
+        | Command::PasteObjects { page_index, .. }
         | Command::DrawPath { page_index, .. }
         | Command::FillField { page_index, .. }
         | Command::AddField { page_index, .. }
@@ -855,6 +858,15 @@ fn plan_one_command_in_page(
             },
         );
     }
+    if let Command::PasteObjects {
+        page_index,
+        copied,
+        dx,
+        dy,
+    } = command
+    {
+        return crate::paste::plan_paste(source, page, *page_index, copied, (*dx, *dy));
+    }
     if let Command::DrawPath {
         page_index,
         steps,
@@ -1076,6 +1088,22 @@ fn plan_one_command_in_page(
             page.fonts,
         );
     }
+    if let Command::DeleteGroup {
+        page_index,
+        runs,
+        objects,
+    } = command
+    {
+        return crate::split::rewrite_group(
+            source,
+            page.program,
+            page.operations,
+            page.graph,
+            *page_index,
+            (runs, objects),
+            page.fonts,
+        );
+    }
     if let Command::MoveTextBlock {
         page_index,
         runs,
@@ -1147,6 +1175,22 @@ fn plan_one_command_in_page(
     }
     if let Command::RemoveObject { page_index, target } = command {
         return plan_removal_in(page, *page_index, target);
+    }
+    if let Command::ReorderObjects {
+        page_index,
+        targets,
+        order,
+    } = command
+    {
+        return crate::reorder::plan_reorder_objects(
+            page.program,
+            page.operations,
+            page.graph,
+            *page_index,
+            targets,
+            *order,
+            page.fonts,
+        );
     }
     if let Command::PlaceObject {
         page_index,
@@ -1826,8 +1870,12 @@ pub enum SpikeError {
     ObjectExtentUnknown,
     ObjectLeavesClip,
     ObjectIsCropped,
+    StackingUnsupported(&'static str),
+    StackingUnchanged,
     ClipIsCurved,
     ClipIsConcave,
+    CopyUnsupported(&'static str),
+    PasteNotIsolated,
 }
 
 impl From<crate::clip_region::ClipUnreadable> for SpikeError {
@@ -1889,6 +1937,10 @@ impl std::fmt::Display for SpikeError {
             }
             Self::ClipNotRectangular => {
                 formatter.write_str("a clip in effect encloses no area at all")
+            }
+            Self::StackingUnsupported(reason) => formatter.write_str(reason),
+            Self::StackingUnchanged => {
+                formatter.write_str("it is already where that would put it in the order")
             }
             Self::ClipIsCurved => formatter.write_str("a clip in effect has a curved edge"),
             Self::ClipIsConcave => formatter.write_str("a clip in effect is a concave shape"),
@@ -1992,6 +2044,10 @@ impl std::fmt::Display for SpikeError {
                  would change what shows",
             ),
             Self::Write(error) => write!(formatter, "incremental write: {error}"),
+            Self::CopyUnsupported(reason) => write!(formatter, "cannot copy this yet: {reason}"),
+            Self::PasteNotIsolated => formatter.write_str(
+                "the pasted page does not paint the copy, displaced by the offset, after everything the page already painted",
+            ),
         }
     }
 }

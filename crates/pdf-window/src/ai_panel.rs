@@ -767,6 +767,7 @@ impl AiState {
                 .max_height(ai_layout::composer_height(rows, row_height, 0.0))
                 .show(ui, |ui| {
                     egui::TextEdit::multiline(&mut self.composer)
+                        .id(composer_id())
                         .hint_text(say(Message::AiAskHint))
                         .frame(egui::Frame::NONE)
                         .desired_width(f32::INFINITY)
@@ -849,6 +850,10 @@ fn said_by(ui: &mut egui::Ui, turn: &Turn, (model, lang): (&str, Lang)) {
         });
         ui.add(egui::Label::new(turn.text()).selectable(true).wrap());
     });
+}
+
+pub(crate) fn composer_id() -> egui::Id {
+    egui::Id::new("ai-composer-text")
 }
 
 impl Window {

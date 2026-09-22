@@ -148,10 +148,54 @@ impl Window {
                         ui.close();
                     }
                     ui.separator();
+                    let copy = egui::Button::new(say(Command::Copy)).shortcut_text("Ctrl+C");
+                    if ui.add_enabled(working && self.selected(), copy).clicked() {
+                        let ctx = ui.ctx().clone();
+                        let in_text = self.pointing.editing();
+                        self.copy(&ctx, in_text);
+                        ui.close();
+                    }
+                    let cut = egui::Button::new(say(Command::Cut)).shortcut_text("Ctrl+X");
+                    if ui.add_enabled(working && self.selected(), cut).clicked() {
+                        let ctx = ui.ctx().clone();
+                        let in_text = self.pointing.editing();
+                        self.cut(&ctx, in_text);
+                        ui.close();
+                    }
+                    let holding = self.clipboard.is_some();
+                    let paste = egui::Button::new(say(Command::Paste)).shortcut_text("Ctrl+V");
+                    if ui.add_enabled(working && holding, paste).clicked() {
+                        let ctx = ui.ctx().clone();
+                        self.paste_the_clipboard(&ctx, false);
+                        ui.close();
+                    }
+                    let in_place =
+                        egui::Button::new(say(Command::PasteInPlace)).shortcut_text("Ctrl+Shift+V");
+                    if ui.add_enabled(working && holding, in_place).clicked() {
+                        let ctx = ui.ctx().clone();
+                        self.paste_the_clipboard(&ctx, true);
+                        ui.close();
+                    }
                     let delete = egui::Button::new(say(Command::Delete)).shortcut_text("Del");
                     if ui.add_enabled(working && self.selected(), delete).clicked() {
                         self.delete();
                         ui.close();
+                    }
+                    ui.separator();
+                    let ordering = working && self.can_order();
+                    for (command, order) in [
+                        (Command::BringToFront, pdf_edit::Stacking::ToFront),
+                        (Command::BringForward, pdf_edit::Stacking::Forward),
+                        (Command::SendBackward, pdf_edit::Stacking::Backward),
+                        (Command::SendToBack, pdf_edit::Stacking::ToBack),
+                    ] {
+                        if ui
+                            .add_enabled(ordering, egui::Button::new(say(command)))
+                            .clicked()
+                        {
+                            self.put_in_order(order);
+                            ui.close();
+                        }
                     }
                     ui.separator();
                     let find = egui::Button::new(say(Command::Find)).shortcut_text("Ctrl+F");
@@ -172,6 +216,8 @@ impl Window {
                 ui.menu_button(say(Command::Page), |ui| self.page_menu(ui, working));
                 ui.menu_button(say(Command::Tools), |ui| self.tools_menu(ui, working));
                 ui.menu_button(say(Command::View), |ui| self.view_menu(ui, working));
+                #[cfg(not(target_arch = "wasm32"))]
+                ui.menu_button(say(Command::Help), |ui| self.help_menu(ui));
             });
         });
     }
@@ -294,11 +340,30 @@ impl Window {
         {
             set_dark(ui.ctx(), self.dark);
         }
+        let _ = ui.checkbox(&mut self.show_speed, say(Command::ShowDrawingSpeed));
         ui.menu_button(say(Command::Language), |ui| {
             for (language, named) in language_rows() {
                 let _ = ui.radio_value(&mut self.lang, language, named);
             }
         });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn help_menu(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        let say = |command| Message::Command(command).say(lang);
+        if ui.button(say(Command::ReportAProblem)).clicked() {
+            self.open_out(&crate::reporting::report_link());
+            ui.close();
+        }
+        let folder = crate::reporting::log_folder();
+        let show = egui::Button::new(say(Command::ShowTheLog));
+        if ui.add_enabled(folder.is_some(), show).clicked() {
+            if let Some(folder) = folder {
+                self.open_out(&folder.to_string_lossy());
+            }
+            ui.close();
+        }
     }
 
     pub(crate) fn page_size_menu(&self, ui: &mut egui::Ui) -> Option<[f64; 2]> {
@@ -805,6 +870,11 @@ impl Window {
     }
 
     fn open_now(&mut self, path: &Path, page: usize) {
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::reporting::say(
+            pdf_app::trouble::Kind::Document,
+            &format!("opening {}", path.display()),
+        );
         self.remember_here();
         let wanted = path.to_path_buf();
         let reading = wanted.clone();
@@ -848,6 +918,7 @@ impl Window {
         };
         self.opened = path;
         self.resume = None;
+        self.clipboard = None;
         self.input = pdf_app::draft::Input::default();
         self.restriction_answered = false;
         self.point_at(Pointing::Nothing);
@@ -988,6 +1059,15 @@ impl Window {
                             ),
                         );
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    crate::reporting::say(
+                        pdf_app::trouble::Kind::Document,
+                        &format!(
+                            "saved {} ({} bytes)",
+                            self.destination.display(),
+                            export.bytes.len()
+                        ),
+                    );
                     let said = Message::SavedTo {
                         name: self.destination.display().to_string(),
                         bytes: export.bytes.len() as u64,
@@ -996,6 +1076,11 @@ impl Window {
                     true
                 }
                 Err(error) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    crate::reporting::say(
+                        pdf_app::trouble::Kind::Failed,
+                        &format!("could not save {}: {error}", self.destination.display()),
+                    );
                     let said = Message::CouldNotSave {
                         name: self.destination.display().to_string(),
                         why: error.to_string(),
