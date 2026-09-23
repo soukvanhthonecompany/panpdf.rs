@@ -6,6 +6,8 @@ pub mod app;
 mod ai_actions;
 #[cfg(not(target_arch = "wasm32"))]
 mod ai_panel;
+#[cfg(not(target_arch = "wasm32"))]
+mod ai_written;
 mod canvas;
 mod chooser;
 mod chrome;
@@ -14,6 +16,7 @@ mod contents;
 mod draw_pen;
 mod draw_shape;
 mod drawing_speed;
+mod drop_zone;
 mod field_properties;
 mod fields_panel;
 mod fill_form;
@@ -24,6 +27,7 @@ mod hub;
 pub use hub::pdfs_in;
 mod icons;
 mod input;
+mod interface_fonts;
 mod link_tool;
 mod live_typing;
 #[cfg(not(target_arch = "wasm32"))]
@@ -33,6 +37,7 @@ mod moment;
 mod naming;
 mod ocr_tool;
 mod order;
+mod own_folder;
 mod page_actions;
 mod page_motion;
 mod pages;

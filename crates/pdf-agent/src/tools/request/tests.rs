@@ -123,7 +123,52 @@ fn examples() -> Vec<(&'static str, &'static str, Request)> {
         ),
         ("undo", r#"{"document":"doc-1"}"#, Request::Undo),
         ("redo", r#"{"document":"doc-1"}"#, Request::Redo),
+        (
+            "ask_person",
+            r#"{"question":" Which theme? ","options":[{"label":"ocean (Recommended)","description":"Blue and calm"},{"label":"forest"}]}"#,
+            Request::AskPerson {
+                question: "Which theme?".to_owned(),
+                options: vec![
+                    ("ocean (Recommended)".to_owned(), "Blue and calm".to_owned()),
+                    ("forest".to_owned(), String::new()),
+                ],
+            },
+        ),
     ]
+}
+
+#[test]
+fn a_question_needs_two_to_four_answers() {
+    let with = |count: usize| {
+        let options: Vec<String> = (0..count)
+            .map(|at| format!(r#"{{"label":"answer {at}"}}"#))
+            .collect();
+        parse(
+            "ask_person",
+            &args(&format!(
+                r#"{{"question":"Which?","options":[{}]}}"#,
+                options.join(",")
+            )),
+        )
+    };
+    assert!(with(2).is_ok());
+    assert!(with(4).is_ok());
+    for count in [1, 5] {
+        let refused = with(count).expect_err("refused");
+        assert!(refused.contains("two to 4 options"), "{refused}");
+    }
+    assert_eq!(
+        parse(
+            "ask_person",
+            &args(r#"{"question":"Which?","options":[{"label":"a"},{"description":"b"}]}"#)
+        ),
+        Err("every option needs a `label`".to_owned())
+    );
+    assert!(
+        parse("ask_person", &args(r#"{"question":"Which?"}"#))
+            .expect_err("refused")
+            .starts_with("`options` is needed")
+    );
 }
 
 #[test]
@@ -143,7 +188,7 @@ fn what_is_offered_is_what_can_be_read() {
         .into_iter()
         .map(|tool| tool.name)
         .collect();
-    assert_eq!(offered.len(), 16);
+    assert_eq!(offered.len(), 18);
     for name in &offered {
         let read = parse(name, &args(r#"{"document":"doc-1"}"#));
         assert_ne!(

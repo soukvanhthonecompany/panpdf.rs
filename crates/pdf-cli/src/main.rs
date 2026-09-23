@@ -2,7 +2,6 @@
 
 use std::error::Error;
 use std::path::Path;
-use std::sync::Arc;
 
 use pdf_bytes::{ByteStore, SourceId};
 use pdf_cli::{
@@ -117,7 +116,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     } = parse_invocation()?;
 
     let bytes = std::fs::read(&path)?;
-    let source = ByteStore::new(SourceId::new(1), Arc::<[u8]>::from(bytes));
+    let source = ByteStore::owning(SourceId::new(1), bytes);
     if command == "inspect" {
         let report = if recover {
             inspect_recovering(&source, InspectLimits::default())?

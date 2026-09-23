@@ -16,7 +16,7 @@ use pdf_edit::{
 
 use crate::frames::{Breaks, Edges};
 use crate::wording::{
-    BlockMove, Done, Hidden, Layout, LayoutWhy, Message, PictureMove, Refusal, Side,
+    BlockMove, Done, Hidden, Lang, Layout, LayoutWhy, Message, PictureMove, Refusal, Side,
 };
 use pdf_paint::Matrix;
 use pdf_semantics::Grouping;
@@ -87,6 +87,11 @@ enum Step {
     FlowRound {
         page: usize,
         blocks: Vec<usize>,
+    },
+    ResizeFrame {
+        page: usize,
+        block: usize,
+        started: [f64; 4],
     },
     AddPage {
         beside: usize,
@@ -175,6 +180,7 @@ enum Step {
         copied: Copied,
         dx: f64,
         dy: f64,
+        elsewhere: Option<pdf_bytes::ByteStore>,
     },
     Place {
         page: usize,
@@ -310,6 +316,8 @@ enum Step {
     },
     Undo,
     Redo,
+    #[cfg(test)]
+    Panics,
 }
 
 #[derive(Clone, Debug)]
@@ -348,6 +356,7 @@ impl Step {
             Self::Type { .. } => "Type",
             Self::Style { .. } => "Style",
             Self::FlowRound { .. } => "FlowRound",
+            Self::ResizeFrame { .. } => "ResizeFrame",
             Self::PlaceText { .. } => "PlaceText",
             Self::PlaceImage { .. } => "PlaceImage",
             Self::DrawLine { .. } => "DrawLine",
@@ -392,6 +401,8 @@ impl Step {
             Self::SetFieldSettings { .. } => "SetFieldSettings",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
+            #[cfg(test)]
+            Self::Panics => "Panics",
         }
     }
 
@@ -440,6 +451,11 @@ impl Step {
                 style,
             } => format!("page={page} block={block} range={range:?} style={style:?}"),
             Self::FlowRound { page, blocks } => format!("page={page} blocks={blocks:?}"),
+            Self::ResizeFrame {
+                page,
+                block,
+                started,
+            } => format!("page={page} block={block} started={started:?}"),
             Self::PlaceText {
                 page,
                 frame,
@@ -526,9 +542,15 @@ impl Step {
                 copied,
                 dx,
                 dy,
+                elsewhere,
             } => format!(
-                "page={page} objects={} dx={dx} dy={dy}",
-                copied.objects.len()
+                "page={page} objects={} dx={dx} dy={dy} from={}",
+                copied.objects.len(),
+                if elsewhere.is_some() {
+                    "another document"
+                } else {
+                    "this document"
+                }
             ),
             Self::Shape { page, anchor, .. } => format!("page={page} anchor={anchor} handle"),
             Self::ShapeBlock { page, anchors, .. } => {
@@ -697,6 +719,8 @@ impl Step {
                 widget.generation()
             ),
             Self::Undo | Self::Redo => String::new(),
+            #[cfg(test)]
+            Self::Panics => String::new(),
         }
     }
 }
@@ -845,7 +869,7 @@ impl Editor {
 
     pub fn stand_in() -> Result<Self, String> {
         Self::open(ByteStore::new(
-            pdf_bytes::SourceId::new(0),
+            pdf_bytes::SourceId::next_document(),
             Arc::<[u8]>::from(blank_pdf()),
         ))
     }
@@ -853,7 +877,7 @@ impl Editor {
     pub fn blank(size: [f64; 2]) -> Result<Self, String> {
         let bytes = pdf_session::blank_document(size).map_err(|error| error.to_string())?;
         Self::open(ByteStore::new(
-            pdf_bytes::SourceId::new(0),
+            pdf_bytes::SourceId::next_document(),
             Arc::<[u8]>::from(bytes),
         ))
     }
@@ -1505,13 +1529,13 @@ impl Editor {
         );
     }
 
-    pub fn keep_pages(&mut self, wanted: &BTreeSet<usize>, keep: usize) {
+    pub fn keep_pages(&mut self, wanted: &BTreeSet<usize>, keep: usize, bytes: usize) {
         self.asks += 1;
         let asks = self.asks;
         for page in wanted {
             self.wanted_at.insert(*page, asks);
         }
-        if self.read.len() <= keep.max(wanted.len()) {
+        if self.read.len() <= keep.max(wanted.len()) && self.held_bytes() <= bytes {
             return;
         }
         let mut ages: Vec<(u64, usize)> = self
@@ -1523,10 +1547,23 @@ impl Editor {
         ages.sort_unstable();
         let room = keep.saturating_sub(wanted.len());
         let dropping = ages.len().saturating_sub(room);
-        for (_, page) in ages.into_iter().take(dropping) {
+        let mut ages = ages.into_iter();
+        for (_, page) in ages.by_ref().take(dropping) {
             self.read.remove(&page);
             self.wanted_at.remove(&page);
         }
+        for (_, page) in ages {
+            if self.held_bytes() <= bytes {
+                break;
+            }
+            self.read.remove(&page);
+            self.wanted_at.remove(&page);
+        }
+    }
+
+    #[must_use]
+    pub fn held_bytes(&self) -> usize {
+        self.read.values().map(|leaf| leaf.view.footprint()).sum()
     }
 
     #[must_use]
@@ -1822,7 +1859,13 @@ impl Editor {
         let Some(leaf) = self.read.get(&page) else {
             return Err("that page has not been read".to_owned());
         };
-        pdf_edit::copy_from(&leaf.view.graph, &named).map_err(|error| error.to_string())
+        let from = self
+            .session
+            .as_ref()
+            .ok_or_else(|| "an edit is running".to_owned())?
+            .source()
+            .id();
+        pdf_edit::copy_from(&leaf.view.graph, &named, from).map_err(|error| error.to_string())
     }
 
     #[must_use]
@@ -1831,21 +1874,30 @@ impl Editor {
         page: usize,
         copied: Copied,
         (dx, dy): (f64, f64),
+        elsewhere: Option<pdf_bytes::ByteStore>,
     ) -> Option<EditJob> {
         self.begin(Step::Paste {
             page,
             copied,
             dx,
             dy,
+            elsewhere,
         })
     }
 
-    pub fn paste_objects(&mut self, page: usize, copied: Copied, (dx, dy): (f64, f64)) -> Applied {
+    pub fn paste_objects(
+        &mut self,
+        page: usize,
+        copied: Copied,
+        (dx, dy): (f64, f64),
+        elsewhere: Option<pdf_bytes::ByteStore>,
+    ) -> Applied {
         self.here(Step::Paste {
             page,
             copied,
             dx,
             dy,
+            elsewhere,
         })
     }
 
@@ -2077,6 +2129,31 @@ impl Editor {
             return None;
         }
         self.begin(Step::FlowRound { page, blocks })
+    }
+
+    #[must_use]
+    pub fn begin_resize_frame(
+        &mut self,
+        page: usize,
+        block: usize,
+        started: [f64; 4],
+    ) -> Option<EditJob> {
+        let now = self.frame_boxes(page).get(block).copied()?;
+        if !crate::view::frame_width_changed(started, now) {
+            self.finish_frame_resize(page, block, started);
+            let at = self.frame_boxes(page).get(block).copied().unwrap_or(now);
+            self.status = Message::FrameDeclared {
+                wide: at[2] - at[0],
+                high: at[3] - at[1],
+                relaid: false,
+            };
+            return None;
+        }
+        self.begin(Step::ResizeFrame {
+            page,
+            block,
+            started,
+        })
     }
 
     #[must_use]
@@ -3551,10 +3628,41 @@ fn into_turned_pixels(device: Matrix, turn: f64, (dx, dy): (f64, f64)) -> (f64, 
     (placed.x, placed.y)
 }
 
+const PANICKED: &str = "this edit could not finish \u{2014} something in it panicked, so nothing it had not \
+     already committed was kept";
+
+type Dispatched = (
+    Applied,
+    Message,
+    Option<(usize, usize)>,
+    Option<(usize, usize)>,
+);
+
 impl EditJob {
     #[must_use]
-    #[expect(clippy::too_many_lines, reason = "a dispatch, one arm per step")]
     pub fn run(mut self) -> EditOutcome {
+        let dispatched =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_dispatch()));
+        let (applied, status, caret, anchor) = dispatched.unwrap_or_else(|_| {
+            let (applied, status) = refused(PANICKED);
+            (applied, status, None, None)
+        });
+        EditOutcome {
+            paragraphs: std::mem::take(&mut self.paragraphs),
+            flowed: std::mem::take(&mut self.flowed),
+            session: self.session,
+            applied,
+            status,
+            frames: self.frames,
+            caret,
+            anchor,
+            wrote_text: self.wrote_text,
+            laid: self.laid,
+        }
+    }
+
+    #[expect(clippy::too_many_lines, reason = "a dispatch, one arm per step")]
+    fn run_dispatch(&mut self) -> Dispatched {
         let mut caret = None;
         let mut anchor = None;
         let (applied, status) = match &self.step {
@@ -3589,6 +3697,14 @@ impl EditJob {
             Step::FlowRound { page, blocks } => {
                 let (page, blocks) = (*page, blocks.clone());
                 self.flow_round(page, &blocks)
+            }
+            Step::ResizeFrame {
+                page,
+                block,
+                started,
+            } => {
+                let (page, block, started) = (*page, *block, *started);
+                self.resize_and_relay(page, block, started)
             }
             Step::PlaceText { .. } => self.run_new_text(),
             Step::PlaceImage { page, pictures } => {
@@ -3667,9 +3783,10 @@ impl EditJob {
                 copied,
                 dx,
                 dy,
+                elsewhere,
             } => {
-                let (page, copied) = (*page, copied.clone());
-                self.paste(page, copied, (*dx, *dy))
+                let (page, copied, elsewhere) = (*page, copied.clone(), elsewhere.clone());
+                self.paste(page, copied, (*dx, *dy), elsewhere)
             }
             Step::Place { .. }
             | Step::Shape { .. }
@@ -3887,6 +4004,8 @@ impl EditJob {
                 self.fill_field(page, widget, value)
             }
             Step::Undo | Step::Redo => self.walk(matches!(self.step, Step::Undo)),
+            #[cfg(test)]
+            Step::Panics => panic!("test: this step always panics"),
         };
         self.keep_frames(&applied);
         let (applied, status) = match self.keep_the_flow(&applied) {
@@ -3897,18 +4016,7 @@ impl EditJob {
             Some(kept) => (applied, kept),
             None => (applied, status),
         };
-        EditOutcome {
-            paragraphs: std::mem::take(&mut self.paragraphs),
-            flowed: std::mem::take(&mut self.flowed),
-            session: self.session,
-            applied,
-            status,
-            frames: self.frames,
-            caret,
-            anchor,
-            wrote_text: self.wrote_text,
-            laid: self.laid,
-        }
+        (applied, status, caret, anchor)
     }
 
     #[expect(
@@ -3957,7 +4065,7 @@ impl EditJob {
             return;
         };
         match self.step {
-            Step::Undo | Step::Redo | Step::FlowRound { .. } => {}
+            Step::Undo | Step::Redo | Step::FlowRound { .. } | Step::ResizeFrame { .. } => {}
             Step::RotatePages { ref pages, .. } | Step::Stamp { ref pages, .. } => {
                 let pages = pages.clone();
                 self.frames.pages_forgotten(&pages);
@@ -5295,6 +5403,94 @@ impl EditJob {
         Ok(blocks.len())
     }
 
+    fn keep_dragged_frame(
+        &mut self,
+        page: usize,
+        block: usize,
+        started: [f64; 4],
+        why: String,
+    ) -> (Applied, Message) {
+        self.frames.finish_resize(page, block, started);
+        let at = self
+            .frames
+            .page(page)
+            .get(block)
+            .copied()
+            .unwrap_or(started);
+        (
+            Applied::Unchanged,
+            Message::FrameKeptNotRelaid {
+                wide: at[2] - at[0],
+                high: at[3] - at[1],
+                why,
+            },
+        )
+    }
+
+    fn resize_and_relay(
+        &mut self,
+        page: usize,
+        block: usize,
+        started: [f64; 4],
+    ) -> (Applied, Message) {
+        if paragraph_of(&self.paragraphs, page, block)
+            .alignment
+            .is_none()
+            && let Some(reading) = self.block_reading(page, block)
+        {
+            self.paragraphs.entry((page, block)).or_default().alignment = Some(reading.alignment);
+        }
+        let typed = self
+            .session
+            .page(page)
+            .map_err(|error| Edited::from(error.to_string()))
+            .and_then(|view| {
+                self.type_in_block(
+                    &view,
+                    page,
+                    block,
+                    BlockRange::Between {
+                        from: (0, 0),
+                        to: (0, 0),
+                    },
+                    ("", None),
+                    Some(&pdf_edit::TextStyle::default()),
+                )
+            });
+        let typed = match typed {
+            Ok(typed) => typed,
+            Err(Edited::Nothing) => {
+                return self.keep_dragged_frame(
+                    page,
+                    block,
+                    started,
+                    "the block is empty".to_owned(),
+                );
+            }
+            Err(Edited::Refused(reason)) => {
+                return self.keep_dragged_frame(page, block, started, reason.say(Lang::English));
+            }
+        };
+        let Some(frame) = typed.frame else {
+            return self.keep_dragged_frame(
+                page,
+                block,
+                started,
+                "the row was edited alone".to_owned(),
+            );
+        };
+        self.frames
+            .resized_and_relaid(page, block, started, frame, typed.edges, typed.breaks);
+        (
+            self.landed(),
+            Message::FrameDeclared {
+                wide: frame[2] - frame[0],
+                high: frame[3] - frame[1],
+                relaid: true,
+            },
+        )
+    }
+
     fn relay_out(&mut self, page: usize, block: usize) -> Result<Command, String> {
         let view = self.session.page(page).map_err(|error| error.to_string())?;
         let rows = block_rows(&view, block).ok_or("row has no block owner")?;
@@ -5527,7 +5723,13 @@ impl EditJob {
         )
     }
 
-    fn paste(&mut self, page: usize, copied: Copied, (dx, dy): (f64, f64)) -> (Applied, Message) {
+    fn paste(
+        &mut self,
+        page: usize,
+        copied: Copied,
+        (dx, dy): (f64, f64),
+        elsewhere: Option<pdf_bytes::ByteStore>,
+    ) -> (Applied, Message) {
         let objects = copied.objects.len();
         if objects == 0 {
             return (Applied::Unchanged, Done::NothingToPaste.into());
@@ -5545,6 +5747,7 @@ impl EditJob {
             copied,
             dx,
             dy,
+            elsewhere,
         });
         let plan = match planned {
             Ok(plan) => plan,
@@ -6470,5 +6673,28 @@ mod trace_tests {
         );
         assert!(!a_move(false).arguments().contains("group"));
         assert_eq!(a_move(true).name(), a_move(false).name());
+    }
+}
+
+#[cfg(test)]
+mod panic_recovery_tests {
+    use super::{Applied, Editor, Step};
+
+    #[test]
+    fn a_panicking_step_comes_back_as_a_refusal_and_frees_the_session() {
+        let mut editor = Editor::blank([595.28, 841.89]).expect("a blank document opens");
+        assert!(!editor.is_busy());
+
+        let applied = editor.here(Step::Panics);
+
+        assert!(
+            matches!(applied, Applied::Refused(_)),
+            "a panicking step must answer as a refusal, not {applied:?}"
+        );
+        assert!(
+            !editor.is_busy(),
+            "the session must come back even though the step panicked, or the \
+             document can never be saved, discarded or left"
+        );
     }
 }

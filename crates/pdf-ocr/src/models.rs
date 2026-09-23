@@ -23,7 +23,8 @@ impl Quality {
         Self::ALL.into_iter().find(|it| it.as_str() == word)
     }
 
-    const fn repository(self) -> (&'static str, &'static str) {
+    #[must_use]
+    pub const fn repository(self) -> (&'static str, &'static str) {
         match self {
             Self::Accurate => ("tessdata_best", "e12c65a915945e4c28e237a9b52bc4a8f39a0cec"),
             Self::Fast => ("tessdata_fast", "87416418657359cb625c412a48b6e1d6d41c29bd"),
@@ -37,7 +38,7 @@ pub struct Model {
     pub quality: Quality,
     pub bytes: u64,
     pub blob: &'static str,
-    pub cer: f32,
+    pub cer: Option<f32>,
 }
 
 impl Model {
@@ -59,58 +60,24 @@ impl Model {
     pub fn is_the_file(&self, data: &[u8]) -> bool {
         u64::try_from(data.len()) == Ok(self.bytes) && sha1::blob_id(data) == self.blob
     }
+
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub const fn licence(&self) -> &'static str {
+        "Apache-2.0"
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> (&'static str, &'static str) {
+        self.quality.repository()
+    }
 }
 
 pub const LANGUAGES: [&str; 3] = ["lao", "tha", "eng"];
 
-const CATALOGUE: [Model; 6] = [
-    Model {
-        code: "lao",
-        quality: Quality::Accurate,
-        bytes: 13_532_551,
-        blob: "bdd2715bd1f76852b9430997eef890495e8637ef",
-        cer: 9.0,
-    },
-    Model {
-        code: "tha",
-        quality: Quality::Accurate,
-        bytes: 7_614_571,
-        blob: "b975c85f60f82febe6f8c5a52a3eb74f3ceb01b9",
-        cer: 3.4,
-    },
-    Model {
-        code: "eng",
-        quality: Quality::Accurate,
-        bytes: 15_400_601,
-        blob: "176dc3220de7db34d3b3aecbfa42043a6038348b",
-        cer: 0.4,
-    },
-    Model {
-        code: "lao",
-        quality: Quality::Fast,
-        bytes: 6_386_744,
-        blob: "10bd41ae9352889f85a489eb3183eb0cbebc2516",
-        cer: 11.6,
-    },
-    Model {
-        code: "tha",
-        quality: Quality::Fast,
-        bytes: 1_072_600,
-        blob: "ea28de3985668cac00d261c5b91f023ea66e19cd",
-        cer: 3.3,
-    },
-    Model {
-        code: "eng",
-        quality: Quality::Fast,
-        bytes: 4_113_088,
-        blob: "bbef4675053b5b468cdb477053e28b1c698ba08e",
-        cer: 0.4,
-    },
-];
-
 #[must_use]
 pub fn model(code: &str, quality: Quality) -> Option<&'static Model> {
-    CATALOGUE
+    crate::catalogue::ROWS
         .iter()
         .find(|model| model.code == code && model.quality == quality)
 }
@@ -123,9 +90,21 @@ pub fn of_language(code: &str) -> Vec<&'static Model> {
         .collect()
 }
 
+#[must_use]
+pub fn every_language() -> Vec<&'static str> {
+    let mut codes: Vec<&'static str> = crate::catalogue::ROWS
+        .iter()
+        .map(|model| model.code)
+        .collect();
+    codes.sort_unstable();
+    codes.dedup();
+    codes
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CATALOGUE, LANGUAGES, Quality, model, of_language};
+    use super::{LANGUAGES, Quality, every_language, model, of_language};
+    use crate::catalogue::ROWS;
 
     #[test]
     fn the_catalogue_says_what_it_was_asked() {
@@ -136,23 +115,43 @@ mod tests {
                 assert_eq!(model.quality, quality);
                 assert!(model.bytes > 1_000_000, "{code} {quality:?}");
                 assert_eq!(model.blob.len(), 40);
-                assert!(model.cer > 0.0 && model.cer < 50.0);
                 assert!(model.url().ends_with(&format!("/{code}.traineddata")));
             }
         }
         let best = model("lao", Quality::Accurate).expect("Lao, accurate");
         assert!(best.url().contains("tessdata_best"));
-        assert!((best.cer - 9.0).abs() < f32::EPSILON);
         let fast = model("lao", Quality::Fast).expect("Lao, fast");
         assert!(fast.url().contains("tessdata_fast"));
-        assert!((fast.cer - 11.6).abs() < f32::EPSILON);
         assert!(fast.bytes < best.bytes);
-        assert!(fast.cer > best.cer);
-        assert_eq!(model("khm", Quality::Accurate), None);
+        assert_eq!(model("zzz", Quality::Accurate), None);
         assert_eq!(model("", Quality::Fast), None);
+        assert_eq!(model("", Quality::Accurate), None);
         assert_eq!(model("LAO", Quality::Accurate), None);
-        assert_eq!(of_language("khm"), Vec::<&super::Model>::new());
+        assert_eq!(model("Lao", Quality::Fast), None);
+        assert!(model("khm", Quality::Accurate).is_some());
+        assert_eq!(of_language("zzz"), Vec::<&super::Model>::new());
         assert_eq!(of_language("tha").len(), 2);
+    }
+
+    #[test]
+    fn only_the_measured_rows_carry_a_figure() {
+        let measured = [
+            ("lao", Quality::Accurate, 9.0_f32),
+            ("tha", Quality::Accurate, 3.4),
+            ("eng", Quality::Accurate, 0.4),
+            ("lao", Quality::Fast, 11.6),
+            ("tha", Quality::Fast, 3.3),
+            ("eng", Quality::Fast, 0.4),
+        ];
+        for (code, quality, cer) in measured {
+            let model = model(code, quality).expect("a measured row");
+            let got = model.cer.expect("a measured row carries a figure");
+            assert!((got - cer).abs() < f32::EPSILON, "{code} {quality:?}");
+        }
+        for quality in Quality::ALL {
+            let khm = model("khm", quality).expect("Khmer is offered");
+            assert_eq!(khm.cer, None, "nobody measured Khmer");
+        }
     }
 
     #[test]
@@ -168,17 +167,59 @@ mod tests {
 
     #[test]
     fn every_row_is_its_own() {
-        for (at, one) in CATALOGUE.iter().enumerate() {
-            for other in &CATALOGUE[at + 1..] {
+        for (at, one) in ROWS.iter().enumerate() {
+            for other in &ROWS[at + 1..] {
                 assert!(
                     one.code != other.code || one.quality != other.quality,
                     "{} {:?} is in the table twice",
                     one.code,
                     one.quality
                 );
-                assert_ne!(one.blob, other.blob, "two rows share a digest");
-                assert_ne!(one.url(), other.url());
+                if one.code != other.code {
+                    assert_ne!(
+                        one.blob, other.blob,
+                        "{} and {} share a digest",
+                        one.code, other.code
+                    );
+                }
+                assert_ne!(
+                    one.url(),
+                    other.url(),
+                    "{} and {} share a URL",
+                    one.code,
+                    other.code
+                );
             }
         }
+    }
+
+    #[test]
+    fn every_language_is_every_code_once_sorted() {
+        let all = every_language();
+        assert_eq!(all.len(), 125);
+        let mut sorted = all.clone();
+        sorted.sort_unstable();
+        assert_eq!(all, sorted, "not sorted");
+        let mut deduped = all.clone();
+        deduped.dedup();
+        assert_eq!(all.len(), deduped.len(), "a code appears twice");
+        assert!(all.contains(&"lao"));
+        assert!(all.contains(&"khm"));
+        assert!(!all.contains(&"frk"), "frk is a symlink, not a model");
+    }
+
+    #[test]
+    fn a_model_states_its_licence_and_source() {
+        for quality in Quality::ALL {
+            let model = model("eng", quality).expect("English is offered");
+            assert_eq!(model.licence(), "Apache-2.0");
+            let (repository, commit) = model.source();
+            assert_eq!((repository, commit), quality.repository());
+            assert_eq!(commit.len(), 40);
+        }
+        let best = model("eng", Quality::Accurate).unwrap();
+        assert_eq!(best.source().0, "tessdata_best");
+        let fast = model("eng", Quality::Fast).unwrap();
+        assert_eq!(fast.source().0, "tessdata_fast");
     }
 }

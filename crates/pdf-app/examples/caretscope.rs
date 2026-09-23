@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use pdf_app::view::{Step, caret_at, caret_at_in, caret_step, caret_step_in};
 use pdf_bytes::{ByteStore, SourceId};
-use pdf_cli::{PageOverlay, TextBlockBox};
+use pdf_cli::{CaretStop, PageOverlay, TextBlockBox};
 
 fn percent(part: usize, whole: usize) -> f64 {
     if whole == 0 {
@@ -17,6 +17,8 @@ fn percent(part: usize, whole: usize) -> f64 {
 }
 
 const ROW_APART: f64 = 0.5;
+
+const BLANK_MARGIN: f64 = 20.0;
 
 #[derive(Default)]
 struct Tally {
@@ -36,6 +38,9 @@ struct Tally {
     offered: usize,
     moved: usize,
     backwards: usize,
+    blank_cases: usize,
+    blank_old_wrong: usize,
+    blank_new_wrong: usize,
 }
 
 impl Tally {
@@ -56,6 +61,67 @@ impl Tally {
         self.offered += other.offered;
         self.moved += other.moved;
         self.backwards += other.backwards;
+        self.blank_cases += other.blank_cases;
+        self.blank_old_wrong += other.blank_old_wrong;
+        self.blank_new_wrong += other.blank_new_wrong;
+    }
+}
+
+fn old_nearest_middle_in(stops: &[CaretStop], rows: &[usize], point: (f64, f64)) -> Option<usize> {
+    let middle = |stop: &CaretStop| {
+        (
+            stop.up[0].mul_add(0.5, stop.at[0]),
+            stop.up[1].mul_add(0.5, stop.at[1]),
+        )
+    };
+    stops
+        .iter()
+        .enumerate()
+        .filter(|(_, stop)| rows.contains(&stop.line))
+        .min_by(|(_, a), (_, b)| {
+            let (ma, mb) = (middle(a), middle(b));
+            let (da, db) = (
+                (ma.0 - point.0).hypot(ma.1 - point.1),
+                (mb.0 - point.0).hypot(mb.1 - point.1),
+            );
+            da.total_cmp(&db)
+        })
+        .map(|(index, _)| index)
+}
+
+fn blank_space(overlay: &PageOverlay, block: &TextBlockBox, tally: &mut Tally) {
+    let widest = block
+        .lines
+        .iter()
+        .flat_map(|&line| overlay.carets.iter().filter(move |s| s.line == line))
+        .map(|s| s.at[0])
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !widest.is_finite() {
+        return;
+    }
+    for &line in &block.lines {
+        let on_row: Vec<&CaretStop> = overlay.carets.iter().filter(|s| s.line == line).collect();
+        let Some(last) = on_row.iter().max_by_key(|s| s.offset) else {
+            continue;
+        };
+        if last.up[0].abs() > last.up[1].abs() * 0.05 {
+            continue;
+        }
+        if widest - last.at[0] < BLANK_MARGIN {
+            continue;
+        }
+        let point = (widest - 1.0, last.at[1]);
+        tally.blank_cases += 1;
+        if let Some(old) = old_nearest_middle_in(&overlay.carets, &block.lines, point)
+            && overlay.carets[old].line != line
+        {
+            tally.blank_old_wrong += 1;
+        }
+        if let Some(new) = caret_at_in(&overlay.carets, &block.lines, point)
+            && overlay.carets[new].line != line
+        {
+            tally.blank_new_wrong += 1;
+        }
     }
 }
 
@@ -184,6 +250,7 @@ fn main() {
             };
             clicks(&overlay, block, &rows, &mut tally);
             steps(&overlay, block, &rows, &mut tally);
+            blank_space(&overlay, block, &mut tally);
             total.absorb(&tally);
         }
     }
@@ -232,5 +299,17 @@ fn main() {
     println!(
         "   steps that moved the wrong way down the page  : {}",
         total.backwards
+    );
+    println!("\nblank space beside a short row (DEFECT 1, 2026-09-22):");
+    println!("   clicks tried: {}", total.blank_cases);
+    println!(
+        "   old rule (nearest to any stop's middle)  landed on the wrong row: {} ({:.2}%)",
+        total.blank_old_wrong,
+        percent(total.blank_old_wrong, total.blank_cases)
+    );
+    println!(
+        "   new rule (nearest row, then nearest stop) landed on the wrong row: {} ({:.2}%)",
+        total.blank_new_wrong,
+        percent(total.blank_new_wrong, total.blank_cases)
     );
 }

@@ -15,6 +15,24 @@ you did not touch.
 > copy of anything you care about, and tell us what broke:
 > [open an issue](https://github.com/__REPO__/issues/new).
 
+## What's new
+
+- **Lighter and quicker.** One open document costs about half the memory it
+  did, closing a document gives its memory back, the undo history has a
+  budget, and on Linux the window opens in a fifth of the time.
+- **Crowded pages edit better.** Blocks, pictures and frames on top of one
+  another move, resize and take typing without ink escaping their frames.
+- **Copy and paste** of a block, a picture or a group lands under the pointer,
+  and a copy can go to another document.
+- **The assistant is a chat beside the document.** Each document keeps its own
+  chat; answers arrive as they are written; it takes attached files, can ask
+  you to choose, says what it is doing, and can write a whole new document
+  with tables, charts and mathematics.
+- **Printing** shows the sheet, and the page can be pushed around on it.
+- **Reading scanned pages** offers every language Tesseract publishes.
+- **Windows** draws non-Latin letters in the interface and remembers recent
+  files and settings between runs.
+
 ## Download
 
 | Architecture | Windows | Linux | macOS |

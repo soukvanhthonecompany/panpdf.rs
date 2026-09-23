@@ -1063,7 +1063,7 @@ impl Run {
                     )
                 };
                 self.turned.clear();
-                let applied = self.editor.paste_objects(page, copied, offset);
+                let applied = self.editor.paste_objects(page, copied, offset, None);
                 let copied_characters = block.and_then(|block| {
                     every_block(&self.editor, page)
                         .get(block)

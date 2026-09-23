@@ -139,7 +139,7 @@ pub fn packaged_provider(
 ) -> Option<Arc<pdf_content::SystemFontProvider>> {
     let root = match directory {
         Some(given) => given.to_path_buf(),
-        None => default_package_root()?,
+        None => package_root()?,
     };
     let manifest = std::fs::read_to_string(root.join("manifest.json")).ok()?;
     let faces = packaged_faces(&root.join("packaged"), &manifest);
@@ -178,7 +178,8 @@ pub fn font_families() -> &'static [String] {
     })
 }
 
-fn default_package_root() -> Option<std::path::PathBuf> {
+#[must_use]
+pub fn package_root() -> Option<std::path::PathBuf> {
     let mut candidates = vec![std::path::PathBuf::from("fonts")];
     if let Ok(executable) = std::env::current_exe()
         && let Some(directory) = executable.parent()

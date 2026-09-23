@@ -2,8 +2,12 @@
 
 pub mod addresses;
 pub mod ai_choice;
+pub mod ai_key;
 pub mod ai_layout;
 pub mod ai_permission;
+pub mod ai_recall;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ai_status;
 pub mod arrange;
 pub mod dates;
 pub mod document;
@@ -33,5 +37,7 @@ pub use document::{
 };
 pub use ledger::{CommandRecord, DocumentState, Ledger, Outcome};
 
+#[cfg(test)]
+mod cache_tests;
 #[cfg(test)]
 mod text_tests;

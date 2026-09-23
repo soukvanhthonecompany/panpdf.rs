@@ -5,6 +5,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use pdf_app::own_files::{self, Platform};
+
+use crate::own_folder::Places;
 use pdf_app::trouble::{self, Facts, Kind};
 
 pub(crate) const REPOSITORY: &str = "soukvanhthonecompany/panpdf.rs";
@@ -22,31 +24,6 @@ struct Open {
     path: PathBuf,
     started: Instant,
     home: Option<String>,
-}
-
-struct Places {
-    appdata: Option<PathBuf>,
-    home: Option<PathBuf>,
-    xdg_state: Option<PathBuf>,
-}
-
-impl Places {
-    fn read() -> Self {
-        let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
-        Self {
-            appdata: var("APPDATA"),
-            home: var("HOME").or_else(|| var("USERPROFILE")),
-            xdg_state: var("XDG_STATE_HOME"),
-        }
-    }
-
-    fn env(&self) -> own_files::Env<'_> {
-        own_files::Env {
-            appdata: self.appdata.as_deref(),
-            home: self.home.as_deref(),
-            xdg_state: self.xdg_state.as_deref(),
-        }
-    }
 }
 
 pub(crate) fn begin() {

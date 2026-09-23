@@ -15,7 +15,8 @@ use pdf_app::view::{
 use pdf_app::wording::Message;
 
 use crate::window_state::{
-    AHEAD, COARSE, KEEP_PAGES, Laid, Pointing, SPARE_TEXTURES, Scene, Tool, Window, ZOOMS,
+    AHEAD, COARSE, KEEP_PAGE_BYTES, KEEP_PAGES, Laid, Pointing, SPARE_TEXTURES, Scene, Tool,
+    Window, ZOOMS,
 };
 
 pub(crate) const DESK_MARGIN: f32 = 16.0;
@@ -480,7 +481,7 @@ impl Window {
             .map(|laid| laid.page)
             .chain(wanted.iter().map(|(_, id, _, _)| id.page))
             .collect();
-        self.editor.keep_pages(&needed, KEEP_PAGES);
+        self.editor.keep_pages(&needed, KEEP_PAGES, KEEP_PAGE_BYTES);
         wanted.sort_by(|one, other| other.0.total_cmp(&one.0));
         let keeping: std::collections::BTreeSet<TileId> =
             wanted.iter().map(|(_, id, _, _)| *id).collect();
@@ -781,14 +782,45 @@ impl Window {
         };
         let (top, bottom) = laid.placed.caret_line(&stop);
         let corner = egui::pos2(laid.placed.origin.0, laid.placed.origin.1);
-        painter.line_segment(
-            [
-                corner + egui::vec2(top[0], top[1]),
-                corner + egui::vec2(bottom[0], bottom[1]),
-            ],
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 90, 200)),
+        draw_caret(
+            painter,
+            corner + egui::vec2(top[0], top[1]),
+            corner + egui::vec2(bottom[0], bottom[1]),
         );
     }
+}
+
+const CARET_WIDTH: f32 = 1.0;
+
+const CARET_UPRIGHT: f32 = 0.01;
+
+fn draw_caret(painter: &egui::Painter, top: egui::Pos2, bottom: egui::Pos2) {
+    let color = egui::Color32::from_rgb(0, 90, 200);
+    let rise = bottom - top;
+    let height = rise.length();
+    if height <= f32::EPSILON {
+        return;
+    }
+    if rise.x.abs() <= rise.y.abs() * CARET_UPRIGHT {
+        let left = (top.x - CARET_WIDTH / 2.0).round();
+        let (y0, y1) = if top.y <= bottom.y {
+            (top.y, bottom.y)
+        } else {
+            (bottom.y, top.y)
+        };
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(left, y0), egui::pos2(left + CARET_WIDTH, y1)),
+            0.0,
+            color,
+        );
+        return;
+    }
+    let across = egui::vec2(-rise.y, rise.x) / height * (CARET_WIDTH / 2.0);
+    fill_quad(
+        painter,
+        [top - across, top + across, bottom + across, bottom - across],
+        color,
+    );
 }
 
 pub(crate) fn box_on_screen(placed: Placement, bounds: [f64; 4]) -> egui::Rect {

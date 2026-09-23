@@ -10,6 +10,7 @@ pub enum Home {
     OpenFile,
     PagesFromFile,
     PictureFromFile,
+    FilesForTheChat,
     OpenFileHelp,
     Recent,
     NothingRecent,
@@ -18,6 +19,8 @@ pub enum Home {
     Missing,
     RemoveFromList,
     BackToDocument,
+    LetGoOfDocument,
+    DocumentLetGo,
     UpOneFolder,
     HomeFolder,
     NoPdfHere,
@@ -56,6 +59,7 @@ impl Home {
             Self::OpenFile => "Open a PDF".to_owned(),
             Self::PagesFromFile => "Choose a PDF to insert its pages".to_owned(),
             Self::PictureFromFile => "Choose pictures to place".to_owned(),
+            Self::FilesForTheChat => "Choose files to send with the question".to_owned(),
             Self::OpenFileHelp => "Choose a file on this computer".to_owned(),
             Self::Recent => "Recent".to_owned(),
             Self::NothingRecent => "Documents you open will be listed here.".to_owned(),
@@ -73,6 +77,10 @@ impl Home {
             Self::Missing => "Moved or deleted".to_owned(),
             Self::RemoveFromList => "Remove from list".to_owned(),
             Self::BackToDocument => "Back to the document".to_owned(),
+            Self::LetGoOfDocument => {
+                "Close this document \u{2014} the file is not deleted".to_owned()
+            }
+            Self::DocumentLetGo => "Closed the document. The file is where it was".to_owned(),
             Self::UpOneFolder => "Up one folder".to_owned(),
             Self::HomeFolder => "Home folder".to_owned(),
             Self::NoPdfHere => "No folders or PDF files here".to_owned(),

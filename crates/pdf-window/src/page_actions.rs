@@ -28,6 +28,7 @@ pub(crate) enum Choosing {
         before: Option<bool>,
     },
     PdfOfPictures(Vec<std::sync::Arc<[u8]>>),
+    ChatAttachment,
 }
 
 impl Window {

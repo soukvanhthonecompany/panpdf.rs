@@ -28,10 +28,15 @@ impl Window {
             .text_of_the_pointed_block(page)
             .unwrap_or_else(|| format!("PanPDF: {objects}"));
         ctx.copy_text(marker.clone());
+        let Some(from) = self.editor.source().cloned() else {
+            self.editor.say(Message::AnotherEditIsRunning);
+            return false;
+        };
         self.clipboard = Some(Clipboard {
             copied,
             marker,
             bounds,
+            from,
         });
         self.editor.say(Message::Done(Done::Copied { objects }));
         true
@@ -76,7 +81,12 @@ impl Window {
             pdf_app::put_down::offset(at, clipboard.bounds)
         };
         let copied = clipboard.copied.clone();
-        let job = self.editor.begin_paste(page, copied, offset);
+        let elsewhere = self
+            .editor
+            .source()
+            .is_none_or(|into| into.id().get() != clipboard.from.id().get())
+            .then(|| clipboard.from.clone());
+        let job = self.editor.begin_paste(page, copied, offset, elsewhere);
         if job.is_none() {
             self.editor.say(Message::AnotherEditIsRunning);
         }

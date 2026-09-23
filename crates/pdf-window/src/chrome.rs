@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::Arc;
 
 use eframe::egui;
 
@@ -266,7 +265,8 @@ impl Window {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 if ui.button(say(Command::AiAssistant)).clicked() {
-                    self.open_ai_panel();
+                    let now = ui.input(|input| input.time);
+                    self.open_ai_panel(now);
                     ui.close();
                 }
                 if ui.button(say(Command::ConnectAgents)).clicked() {
@@ -886,13 +886,18 @@ impl Window {
             changed_protection: false,
             tried_a_password: false,
             handle: std::thread::spawn(move || match std::fs::read(&reading) {
-                Ok(bytes) => open_bytes(
-                    ByteStore::new(SourceId::new(0), Arc::<[u8]>::from(bytes)),
-                    b"",
-                ),
+                Ok(bytes) => open_bytes(ByteStore::owning(SourceId::next_document(), bytes), b""),
                 Err(error) => Opened::Refused(format!("{}: {error}", reading.display())),
             }),
         });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn title_for_the_chat(&self, path: &std::path::Path) -> String {
+        path.file_name().map_or_else(
+            || pdf_app::wording::Home::Untitled.say(self.lang),
+            |name| name.to_string_lossy().into_owned(),
+        )
     }
 
     fn take_the_document(
@@ -916,9 +921,11 @@ impl Window {
         } else {
             path.display().to_string()
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        self.ai
+            .document_arrived(self.title_for_the_chat(&path), place_of(&path));
         self.opened = path;
         self.resume = None;
-        self.clipboard = None;
         self.input = pdf_app::draft::Input::default();
         self.restriction_answered = false;
         self.point_at(Pointing::Nothing);
@@ -944,6 +951,18 @@ impl Window {
         }
         self.home = false;
         self.remember_here();
+        let returned = pdf_heap::give_back();
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::reporting::say(
+            pdf_app::trouble::Kind::Session,
+            if returned {
+                "memory: returned to the system after letting a document go"
+            } else {
+                "memory: nothing was returned after letting a document go"
+            },
+        );
+        #[cfg(target_arch = "wasm32")]
+        let _ = returned;
     }
 
     pub(crate) fn read_the_new_document_key(&mut self, ctx: &egui::Context) {
@@ -953,6 +972,31 @@ impl Window {
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::N))
         {
             self.new_document(A4);
+        }
+    }
+
+    pub(crate) fn let_the_document_go(&mut self) {
+        if self.editor.is_busy() || self.loading.is_some() {
+            return;
+        }
+        if self.unsaved() {
+            self.leaving = Some(Leaving::LetGo);
+            return;
+        }
+        self.drop_the_document();
+    }
+
+    fn drop_the_document(&mut self) {
+        match Editor::blank(A4) {
+            Ok(editor) => {
+                self.take_the_document(editor, std::path::PathBuf::new(), 0);
+                self.untitled = false;
+                self.title = String::new();
+                self.home = true;
+                self.editor
+                    .say(Message::Home(pdf_app::wording::Home::DocumentLetGo));
+            }
+            Err(reason) => self.editor.say(Message::Plain(reason)),
         }
     }
 
@@ -1073,6 +1117,8 @@ impl Window {
                         bytes: export.bytes.len() as u64,
                     };
                     self.editor.say(said);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.ai.saved_as(place_of(&self.destination));
                     true
                 }
                 Err(error) => {
@@ -1151,19 +1197,38 @@ impl Window {
         if self.leaving.is_none() {
             return;
         }
-        let idle = !self.editor.is_busy() && self.loading.is_none() && !self.input.pending();
+        let busy = self.editor.is_busy();
+        let loading = self.loading.is_some();
+        let pending = self.input.pending();
+        let draft = self.input.draft().is_some();
+        let offer = leaving_offer(StillHolding {
+            at_rest: !busy && !loading && !pending,
+            draft,
+        });
         let mut choice = None;
         egui::Modal::new(egui::Id::new("unsaved-document")).show(ctx, |ui| {
             ui.heading(Message::UnsavedChanges.say(self.lang));
             ui.label(Message::SaveBeforeLeaving.say(self.lang));
-            if self.input.draft().is_some() {
+            if draft {
                 ui.label(Message::ResolveDraftBeforeSaving.say(self.lang));
             }
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
-                        idle && self.input.draft().is_none(),
+                        offer.save,
                         egui::Button::new(Message::Command(Command::Save).say(self.lang)),
+                    )
+                    .on_disabled_hover_text(
+                        if busy {
+                            Message::SaveWaitsForTheRunningEdit
+                        } else if pending {
+                            Message::SaveWaitsForTypingToLand
+                        } else if draft {
+                            Message::SaveWaitsForTheDraft
+                        } else {
+                            Message::SaveWaitsForTheDocumentToOpen
+                        }
+                        .say(self.lang),
                     )
                     .clicked()
                 {
@@ -1171,7 +1236,7 @@ impl Window {
                 }
                 if ui
                     .add_enabled(
-                        idle,
+                        offer.discard,
                         egui::Button::new(Message::DiscardChanges.say(self.lang)),
                     )
                     .clicked()
@@ -1196,15 +1261,21 @@ impl Window {
                     self.leaving = None;
                 }
             }
-            LeaveChoice::Save | LeaveChoice::Discard => match self.leaving.take() {
-                Some(Leaving::Open(path, page)) => self.open_now(&path, page),
-                Some(Leaving::New(size)) => self.start_a_new_document(size),
-                Some(Leaving::Close) => {
-                    self.close_confirmed = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            LeaveChoice::Save | LeaveChoice::Discard => {
+                if matches!(choice, LeaveChoice::Discard) {
+                    self.input.abandon();
                 }
-                None => {}
-            },
+                match self.leaving.take() {
+                    Some(Leaving::Open(path, page)) => self.open_now(&path, page),
+                    Some(Leaving::New(size)) => self.start_a_new_document(size),
+                    Some(Leaving::Close) => {
+                        self.close_confirmed = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    Some(Leaving::LetGo) => self.drop_the_document(),
+                    None => {}
+                }
+            }
         }
     }
 
@@ -1290,6 +1361,24 @@ impl Window {
             let said = Message::DraftDiscarded;
             self.editor.say(said);
         }
+    }
+}
+
+pub(crate) struct LeavingOffer {
+    pub(crate) save: bool,
+    pub(crate) discard: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct StillHolding {
+    pub(crate) at_rest: bool,
+    pub(crate) draft: bool,
+}
+
+pub(crate) fn leaving_offer(holding: StillHolding) -> LeavingOffer {
+    LeavingOffer {
+        save: holding.at_rest && !holding.draft,
+        discard: true,
     }
 }
 
@@ -1391,9 +1480,21 @@ fn language_rows() -> Vec<(Lang, &'static str)> {
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn place_of(path: &std::path::Path) -> String {
+    if path.as_os_str().is_empty() {
+        return String::new();
+    }
+    std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Lang, language_rows};
+    use super::{Lang, StillHolding, language_rows, leaving_offer};
 
     #[test]
     fn the_picker_lists_exactly_the_languages_the_window_speaks() {
@@ -1410,5 +1511,59 @@ mod tests {
             .find(|(language, _)| *language == Lang::English)
             .expect("the window speaks English");
         assert_eq!(english.1, "English");
+    }
+
+    fn old_buggy_offer(holding: StillHolding) -> (bool, bool) {
+        (holding.at_rest && !holding.draft, holding.at_rest)
+    }
+
+    #[test]
+    fn the_old_rule_was_a_dead_end_which_is_the_control() {
+        let (save, discard) = old_buggy_offer(StillHolding::default());
+        assert!(
+            !save && !discard,
+            "known answer: a busy editor alone used to disable both ways out"
+        );
+    }
+
+    #[test]
+    fn the_leaving_dialogue_always_offers_a_way_out() {
+        let bools = [false, true];
+        let mut raised_the_dialogue_at_least_once = false;
+        for busy in bools {
+            for pending in bools {
+                for draft in bools {
+                    for loading in bools {
+                        for protection_changed in bools {
+                            for epoch_moved in bools {
+                                let unsaved =
+                                    busy || protection_changed || epoch_moved || pending || draft;
+                                if !(unsaved || loading) {
+                                    continue;
+                                }
+                                raised_the_dialogue_at_least_once = true;
+                                let offer = leaving_offer(StillHolding {
+                                    at_rest: !busy && !loading && !pending,
+                                    draft,
+                                });
+                                assert!(
+                                    offer.discard,
+                                    "Discard must never be disabled: busy={busy} \
+                                     pending={pending} draft={draft} loading={loading}"
+                                );
+                                assert!(
+                                    offer.save || offer.discard,
+                                    "no way out at all: busy={busy} pending={pending} \
+                                     draft={draft} loading={loading} \
+                                     protection_changed={protection_changed} \
+                                     epoch_moved={epoch_moved}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(raised_the_dialogue_at_least_once);
     }
 }

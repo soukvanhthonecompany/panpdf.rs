@@ -3,7 +3,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use pdf_app::Editor;
 use pdf_bytes::{ByteStore, SourceId};
@@ -64,7 +63,7 @@ fn main() -> ExitCode {
         Err(reason) => return fail(&reason),
     };
     let source = match std::fs::read(&path) {
-        Ok(bytes) => ByteStore::new(SourceId::new(0), Arc::<[u8]>::from(bytes)),
+        Ok(bytes) => ByteStore::owning(SourceId::next_document(), bytes),
         Err(error) => return fail(&format!("{}: {error}", path.display())),
     };
     if !check && pdf_edit::info::lock(&source, b"") == pdf_edit::info::Lock::Refused {

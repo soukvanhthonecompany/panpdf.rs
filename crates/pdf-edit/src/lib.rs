@@ -14,6 +14,7 @@ mod fill_field;
 pub mod form;
 mod form_edit;
 pub use form_edit::scope_resources;
+pub(crate) mod carry;
 mod group_move;
 pub mod history;
 pub mod image_file;
@@ -64,6 +65,7 @@ pub use layout::{
     Alignment, Blocked, KEEP_CLEAR, WRAP_ROW, blocked_for_block, blocked_in_frame, shapes_over,
     widest_free_run,
 };
+pub use new_text::{Room, room_for_new_text};
 pub use plan::{
     BlockOutcome, BlockRange, Capability, ClusterRef, ClustersAfter, Command, Effect, FixedPoint,
     GlyphChange, LINE_BREAK, ObjectSelection, PageChange, ParagraphLayout, PenBlend, PenStep,

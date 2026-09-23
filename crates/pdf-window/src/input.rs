@@ -3,14 +3,15 @@ use eframe::egui;
 use pdf_app::document::OVERLAY_SCALE;
 use pdf_app::draft::Intent;
 use pdf_app::view::{
-    Proportions, Quad, ROTATE_HANDLE, block_at, caret_at_in, covering, handle_at, object_at,
-    resized, run_at, shaped, standing_block_at, text_handle_at, travel_along,
+    Proportions, Quad, ROTATE_HANDLE, block_at, caret_at_in, handle_at, object_at, resized, run_at,
+    shaped, standing_block_at, text_handle_at, travel_along,
 };
 use pdf_app::view::{Step, frame_quad};
 use pdf_app::wording::Message;
 
 use crate::app::{FAR_STEP, NEAR_STEP, kind_name};
 use crate::canvas::{fill_quad, quad_on_screen, stroke_quad};
+use crate::text::toolbar_takes_the_pointer;
 use crate::window_state::{
     Around, ArrowPress, Caret, Carrying, Chosen, Drag, HOLD_FOR, Laid, Landing, Pointing,
     STILL_ENOUGH, TextDraft, Tool, TypedKey, Window, resize_cursor,
@@ -97,17 +98,8 @@ impl Window {
                 f64::from(travel.y / laid.placed.stretch),
             ),
         );
-        let held = self.layout_in(page, frame);
         let want = resized(started_at, handle, dx, dy);
-        let supported = held.map_or(want, |laid| covering(want, laid));
-        self.editor.preview_frame(page, frame, supported);
-        if supported
-            .iter()
-            .zip(want)
-            .any(|(one, other)| (one - other).abs() > 1e-8)
-        {
-            self.editor.say(Message::FrameStopsAtText);
-        }
+        self.editor.preview_frame(page, frame, want);
     }
 
     pub(crate) fn page_point(&self, at: egui::Pos2) -> Option<(usize, (f64, f64))> {
@@ -116,6 +108,10 @@ impl Window {
             .find_map(|laid| Some((laid.page, laid.placed.page_point((at.x, at.y))?)))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one press, read for every meaning it could have, in the order rfcs/0007 ranks them"
+    )]
     pub(crate) fn pointer(
         &mut self,
         ctx: &egui::Context,
@@ -123,6 +119,12 @@ impl Window {
         clip: egui::Rect,
     ) {
         if self.leaving.is_some() || self.loading.is_some() {
+            return;
+        }
+        let pressed_at = ctx
+            .input(|input| input.pointer.press_origin())
+            .or_else(|| response.interact_pointer_pos());
+        if toolbar_takes_the_pointer(self.toolbar_area, pressed_at, self.drag.is_some()) {
             return;
         }
         if self.resume.is_some() || self.input.has_queued() {
@@ -794,15 +796,10 @@ impl Window {
             return;
         }
         if let Carrying::Handle { frame, .. } = drag.what {
-            self.editor
-                .finish_frame_resize(drag.page, frame, drag.started_at.bounds());
-            if let Some(at) = self.frames_of(drag.page).get(frame).copied() {
-                let said = Message::FrameDeclared {
-                    wide: at[2] - at[0],
-                    high: at[3] - at[1],
-                };
-                self.editor.say(said);
-            }
+            let job = self
+                .editor
+                .begin_resize_frame(drag.page, frame, drag.started_at.bounds());
+            self.send(job);
             return;
         }
         if matches!(drag.what, Carrying::NewText) {

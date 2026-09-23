@@ -385,6 +385,7 @@ pub enum Command {
         copied: Copied,
         dx: f64,
         dy: f64,
+        elsewhere: Option<pdf_bytes::ByteStore>,
     },
 }
 
@@ -623,6 +624,21 @@ pub enum Capability {
 pub struct PlannedWrite {
     pub reference: Reference,
     pub body: PlannedBody,
+}
+
+impl PlannedWrite {
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        match &self.body {
+            PlannedBody::ReplacedStream { decoded } | PlannedBody::Direct { body: decoded } => {
+                decoded.len()
+            }
+            PlannedBody::NewStream {
+                dictionary,
+                decoded,
+            } => dictionary.len() + decoded.len(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -996,6 +1012,11 @@ impl Plan {
         &self.writes
     }
 
+    #[must_use]
+    pub fn planned_bytes(&self) -> usize {
+        self.writes.iter().map(PlannedWrite::bytes).sum()
+    }
+
     pub fn commit(&self, source: &ByteStore, credential: &[u8]) -> Result<ByteStore, SpikeError> {
         self.commit_bounded(
             source,
@@ -1040,7 +1061,7 @@ impl Plan {
             self.trailer,
             limits,
         )?;
-        Ok(ByteStore::new(
+        Ok(ByteStore::owning(
             pdf_bytes::SourceId::new(source.id().get().wrapping_add(1)),
             bytes,
         ))

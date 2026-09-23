@@ -64,12 +64,32 @@ pub fn split_row(available: f32, fixed: f32, gap: f32, parts: usize) -> f32 {
     ((available - fixed - gap * parts) / parts).max(LEAST_WIDTH)
 }
 
+#[must_use]
+pub fn fits_on_one_row(available: f32, widths: &[f32], gap: f32) -> bool {
+    let controls: f32 = widths.iter().sum();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a control count is small; no row has 2^24 controls in it"
+    )]
+    let gaps = widths.len().saturating_sub(1) as f32 * gap;
+    controls + gaps <= available
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        LEAST_ROWS, LEAST_WIDTH, composer_height, conversation_room, most_rows, rows_shown,
-        split_row,
+        LEAST_ROWS, LEAST_WIDTH, composer_height, conversation_room, fits_on_one_row, most_rows,
+        rows_shown, split_row,
     };
+
+    #[test]
+    fn a_row_fits_only_with_its_gaps() {
+        let widths = [30.0, 110.0, 150.0, 50.0];
+        assert!(fits_on_one_row(388.0, &widths, 16.0));
+        assert!(!fits_on_one_row(387.0, &widths, 16.0));
+        assert!(!fits_on_one_row(340.0, &widths, 16.0));
+        assert!(fits_on_one_row(0.0, &[], 16.0));
+    }
 
     #[test]
     fn the_box_shows_what_was_typed_within_its_bounds() {

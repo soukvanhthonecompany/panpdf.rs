@@ -694,6 +694,202 @@ fn a_frame_dragged_narrower_than_a_word_splits_it_and_keeps_its_width() {
 }
 
 #[test]
+fn a_width_drag_rewraps_narrower_or_wider_and_a_height_drag_touches_no_byte() {
+    let mut editor = Editor::open(reflow_source()).unwrap();
+    read(&mut editor);
+    let block = top_block(&editor.leaf(0).unwrap().view.clone());
+    let started = editor.frame_boxes(0)[block];
+    let bytes = editor.source().unwrap().as_bytes().to_vec();
+    assert_eq!(
+        editor.leaf(0).unwrap().view.index.blocks[block].lines.len(),
+        1,
+        "AAAA AAAA starts on one row"
+    );
+
+    let taller = [started[0], started[1], started[2], started[3] + 40.0];
+    assert!(matches!(
+        resize_frame(&mut editor, 0, block, taller),
+        Applied::Unchanged
+    ));
+    assert_eq!(
+        editor.source().unwrap().as_bytes(),
+        bytes.as_slice(),
+        "a height-only drag wrote no byte"
+    );
+    read(&mut editor);
+    assert_eq!(
+        editor.leaf(0).unwrap().view.index.blocks[block].lines.len(),
+        1
+    );
+    assert_eq!(editor.frame_boxes(0)[block], taller);
+
+    let narrow = [started[0], started[1], started[0] + 25.0, started[3]];
+    assert!(matches!(
+        resize_frame(&mut editor, 0, block, narrow),
+        Applied::Changed { .. }
+    ));
+    assert_ne!(
+        editor.source().unwrap().as_bytes(),
+        bytes.as_slice(),
+        "a width drag is what writes a byte"
+    );
+    read(&mut editor);
+    let block = top_block(&editor.leaf(0).unwrap().view.clone());
+    assert_eq!(
+        editor.leaf(0).unwrap().view.index.blocks[block].lines.len(),
+        2,
+        "AAAA AAAA at 25 pt: four glyphs a row"
+    );
+    assert_eq!(editor.frame_boxes(0)[block][..3], narrow[..3]);
+
+    let wide = [started[0], started[1], started[0] + 60.0, started[3]];
+    assert!(matches!(
+        resize_frame(&mut editor, 0, block, wide),
+        Applied::Changed { .. }
+    ));
+    read(&mut editor);
+    let block = top_block(&editor.leaf(0).unwrap().view.clone());
+    assert_eq!(
+        editor.leaf(0).unwrap().view.index.blocks[block].lines.len(),
+        1,
+        "wide enough for AAAA AAAA on one row again"
+    );
+}
+
+#[test]
+fn undoing_a_width_drag_takes_the_rectangle_and_the_layout_back_in_one_press() {
+    let mut editor = Editor::open(reflow_source()).unwrap();
+    read(&mut editor);
+    let block = top_block(&editor.leaf(0).unwrap().view.clone());
+    let started = editor.frame_boxes(0)[block];
+    let original = glyph_placement_signature(&editor.leaf(0).unwrap().view.graph);
+    let narrow = [started[0], started[1], started[0] + 25.0, started[3]];
+    assert!(matches!(
+        resize_frame(&mut editor, 0, block, narrow),
+        Applied::Changed { .. }
+    ));
+    read(&mut editor);
+    assert_eq!(
+        editor.leaf(0).unwrap().view.index.blocks[block].lines.len(),
+        2
+    );
+    assert!(editor.can_undo());
+    assert!(matches!(editor.undo(), Applied::Changed { .. }));
+    assert!(
+        !editor.can_undo(),
+        "one press took the whole drag, nothing is left half undone"
+    );
+    read(&mut editor);
+    assert_eq!(
+        editor.frame_boxes(0)[block],
+        started,
+        "the rectangle is back"
+    );
+    assert_eq!(
+        editor.leaf(0).unwrap().view.index.blocks[block].lines.len(),
+        1,
+        "the layout is back with it"
+    );
+    assert_eq!(
+        glyph_placement_signature(&editor.leaf(0).unwrap().view.graph),
+        original,
+        "every glyph reads back where it started"
+    );
+
+    assert!(editor.can_redo());
+    assert!(matches!(editor.redo(), Applied::Changed { .. }));
+    read(&mut editor);
+    let block = top_block(&editor.leaf(0).unwrap().view.clone());
+    assert_eq!(
+        editor.leaf(0).unwrap().view.index.blocks[block].lines.len(),
+        2
+    );
+    assert_eq!(editor.frame_boxes(0)[block][..3], narrow[..3]);
+}
+
+#[test]
+fn widening_from_the_left_starts_the_first_row_at_the_new_left_edge() {
+    let mut editor = Editor::open(reflow_source()).unwrap();
+    read(&mut editor);
+    let block = top_block(&editor.leaf(0).unwrap().view.clone());
+    let started = editor.frame_boxes(0)[block];
+    let narrow = [started[0], started[1], started[0] + 25.0, started[3]];
+    assert!(matches!(
+        resize_frame(&mut editor, 0, block, narrow),
+        Applied::Changed { .. }
+    ));
+    let first = pens(editor.source().unwrap())
+        .into_iter()
+        .find(|pen| pen.0 == A)
+        .expect("a first glyph");
+    assert!(
+        (first.1 - narrow[0]).abs() < 1e-6,
+        "narrowed, still flush with the left edge: {first:?}"
+    );
+
+    let block = top_block(&editor.leaf(0).unwrap().view.clone());
+    let widened = [narrow[0] - 40.0, narrow[1], narrow[2], narrow[3]];
+    assert!(matches!(
+        resize_frame(&mut editor, 0, block, widened),
+        Applied::Changed { .. }
+    ));
+    read(&mut editor);
+    let block = top_block(&editor.leaf(0).unwrap().view.clone());
+    assert_eq!(
+        editor.leaf(0).unwrap().view.index.blocks[block].lines.len(),
+        1,
+        "wide enough for one row again"
+    );
+    let first = pens(editor.source().unwrap())
+        .into_iter()
+        .find(|pen| pen.0 == A)
+        .expect("a first glyph");
+    assert!(
+        (first.1 - widened[0]).abs() < 1e-6,
+        "the row starts at the new left edge, not the old one: {first:?}"
+    );
+    assert!(
+        (first.1 - narrow[0]).abs() > 1e-6,
+        "control: the glyph actually moved from where it was"
+    );
+}
+
+#[test]
+fn a_refused_width_drag_keeps_the_frame_it_was_dragged_to_and_says_why() {
+    let mut editor = editor();
+    let anchors = editor.leaf(0).unwrap().overlay.blocks[0].anchors.clone();
+    assert!(matches!(
+        editor.delete_block(0, &anchors),
+        Applied::Changed { .. }
+    ));
+    read(&mut editor);
+    let bytes = editor.source().unwrap().as_bytes().to_vec();
+    let started = editor.frame_boxes(0)[0];
+    let narrow = [started[0], started[1], started[0] + 5.0, started[3]];
+    let applied = resize_frame(&mut editor, 0, 0, narrow);
+    assert!(matches!(applied, Applied::Unchanged), "{applied:?}");
+    assert_eq!(
+        editor.source().unwrap().as_bytes(),
+        bytes.as_slice(),
+        "the refusal wrote no byte"
+    );
+    assert_eq!(
+        editor.frame_boxes(0)[0],
+        narrow,
+        "the frame stays exactly where the drag left it, not back where it started"
+    );
+    assert!(editor.frame_is_declared(0, 0));
+    assert!(
+        matches!(
+            editor.status(),
+            crate::wording::Message::FrameKeptNotRelaid { .. }
+        ),
+        "{:?}",
+        editor.status()
+    );
+}
+
+#[test]
 fn enter_splits_the_paragraph_and_the_caret_starts_the_new_line() {
     let mut editor = Editor::open(reflow_source()).unwrap();
     read(&mut editor);
@@ -3887,6 +4083,15 @@ fn declare_frame(editor: &mut Editor, page: usize, block: usize, rect: [f64; 4])
     assert!(editor.frame_is_declared(page, block));
 }
 
+fn resize_frame(editor: &mut Editor, page: usize, block: usize, rect: [f64; 4]) -> Applied {
+    let started = editor.frame_boxes(page)[block];
+    editor.preview_frame(page, block, rect);
+    match editor.begin_resize_frame(page, block, started) {
+        Some(job) => editor.adopt(job.run()),
+        None => Applied::Unchanged,
+    }
+}
+
 fn widen_the_frame(editor: &mut Editor) {
     let frames = editor.frame_boxes(0).to_vec();
     let mut larger = frames[0];
@@ -6044,7 +6249,7 @@ fn a_block_copied_and_pasted_stands_beside_itself() {
     let copied = editor
         .copy_objects(0, &anchors)
         .expect("the block is copied");
-    let applied = editor.paste_objects(0, copied, (12.0, 20.0));
+    let applied = editor.paste_objects(0, copied, (12.0, 20.0), None);
     assert!(matches!(applied, Applied::Changed { .. }), "{applied:?}");
     let after = pens(editor.source().unwrap());
     assert_eq!(
@@ -6080,7 +6285,7 @@ fn a_paste_is_one_step_and_undoes_whole() {
         .copy_objects(0, &anchors)
         .expect("the block is copied");
     assert!(matches!(
-        editor.paste_objects(0, copied, (12.0, 20.0)),
+        editor.paste_objects(0, copied, (12.0, 20.0), None),
         Applied::Changed { .. }
     ));
     assert!(matches!(editor.undo(), Applied::Changed { .. }));
@@ -6111,7 +6316,7 @@ fn a_block_and_a_picture_paste_together_and_undo_together() {
         .expect("the group is copied");
     assert_eq!(copied.objects.len(), anchors.len());
     assert!(matches!(
-        editor.paste_objects(0, copied, (12.0, 20.0)),
+        editor.paste_objects(0, copied, (12.0, 20.0), None),
         Applied::Changed { .. }
     ));
     let read_pasted = |editor: &mut Editor| {

@@ -7,6 +7,7 @@ use pdf_app::document::OVERLAY_SCALE;
 use pdf_app::view::{Quad, SWEEP_ENOUGH};
 use pdf_app::wording::Message;
 
+use crate::drop_zone::{DropZone, zone_at};
 use crate::window_state::{ChosenPicture, Drag, Pointing, Tool, Window};
 
 const POINTS_A_PIXEL: f64 = 0.75;
@@ -304,7 +305,15 @@ impl Window {
                     .collect(),
             )
         });
-        let panel_gap = self.panel_gap_under(ctx);
+        let pointer = ctx.input(|input| input.pointer.latest_pos());
+        let page_panel = self.page_panel_rect();
+        let ai_panel = ai_zone_rect(self);
+        let panels = [(DropZone::Pages, page_panel), (DropZone::Ai, ai_panel)];
+        let zone = pointer.map(|at| zone_at(at, &panels));
+        let panel_gap = match (zone, &self.page_panel_shape, pointer) {
+            (Some(DropZone::Pages), Some(shape), Some(at)) => Some(gap_at_pointer(shape, at)),
+            _ => None,
+        };
         let takes = |paths: &[PathBuf]| {
             paths
                 .iter()
@@ -315,11 +324,16 @@ impl Window {
             if self.file_hover_gap.is_some() {
                 self.say_where_they_go(ctx);
             } else {
-                self.show_what_a_drop_does(ctx, &hovered);
+                self.show_what_a_drop_does(ctx, &hovered, zone, page_panel, ai_panel);
             }
         }
         let asking = self.chooser.is_some() || self.asks_for_a_password();
         if dropped.is_empty() || asking || self.loading.is_some() {
+            return;
+        }
+        if zone == Some(DropZone::Ai) {
+            self.attach_dropped_to_the_chat(&dropped);
+            self.file_hover_gap = None;
             return;
         }
         if let Some(gap) = panel_gap.filter(|_| takes(&dropped)) {
@@ -347,24 +361,27 @@ impl Window {
             .into_iter()
             .filter(|path| is_a_picture(path))
             .collect();
+        self.drop_pictures_on_the_canvas(&pictures, pointer);
+    }
+
+    fn drop_pictures_on_the_canvas(&mut self, pictures: &[PathBuf], pointer: Option<egui::Pos2>) {
         if pictures.is_empty() {
             return;
         }
         if self.home || !self.has_document() {
-            self.pictures_chosen(&pictures, None);
+            self.pictures_chosen(pictures, None);
             return;
         }
         if self.editor.is_busy() {
             self.editor.say(Message::AnotherEditIsRunning);
             return;
         }
-        let held = self.read_pictures(&pictures);
+        let held = self.read_pictures(pictures);
         if held.is_empty() {
             return;
         }
         self.point_at(Pointing::Nothing);
         self.drop_the_text_draft();
-        let pointer = ctx.input(|input| input.pointer.latest_pos());
         let under = pointer.and_then(|at| {
             self.laid.iter().find_map(|laid| {
                 let point = laid.placed.page_point((at.x, at.y))?;
@@ -388,17 +405,22 @@ impl Window {
         self.put_the_pictures_down(page, &boxes);
     }
 
-    fn panel_gap_under(&self, ctx: &egui::Context) -> Option<usize> {
-        if self.home || !self.has_document() {
+    fn page_panel_rect(&self) -> Option<egui::Rect> {
+        if self.home || !self.has_document() || self.pages_folded {
             return None;
         }
-        let shape = self.page_panel_shape.as_ref()?;
-        let pointer = ctx.input(|input| input.pointer.latest_pos())?;
-        shape
-            .rect
-            .contains(pointer)
-            .then(|| crate::page_motion::gap_at(shape.columns, &shape.pictures, pointer))
+        self.page_panel_shape.as_ref().map(|shape| shape.rect)
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn attach_dropped_to_the_chat(&mut self, dropped: &[PathBuf]) {
+        for path in dropped {
+            self.ai.attach_file(path);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn attach_dropped_to_the_chat(&mut self, _dropped: &[PathBuf]) {}
 
     fn say_where_they_go(&self, ctx: &egui::Context) {
         let Some(held_at) = ctx.input(|input| input.pointer.latest_pos()) else {
@@ -424,61 +446,124 @@ impl Window {
         );
     }
 
-    fn show_what_a_drop_does(&self, ctx: &egui::Context, hovered: &[PathBuf]) {
+    fn show_what_a_drop_does(
+        &self,
+        ctx: &egui::Context,
+        hovered: &[PathBuf],
+        zone: Option<DropZone>,
+        page_panel: Option<egui::Rect>,
+        ai_panel: Option<egui::Rect>,
+    ) {
         let pdf = hovered.iter().any(|path| is_a_pdf(path));
-        if !pdf && !hovered.iter().any(|path| is_a_picture(path)) {
-            return;
-        }
-        let open = !self.home && self.has_document();
-        let said = if pdf {
-            Message::DropToOpen
-        } else if open {
-            Message::DropToPlacePictures
-        } else {
-            Message::Command(pdf_app::wording::Command::PdfFromPictures)
-        };
+        let picture = hovered.iter().any(|path| is_a_picture(path));
+        let canvas_said = canvas_drop_message(pdf, picture, !self.home && self.has_document());
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("drop-veil"),
         ));
         let accent = ctx.global_style().visuals.selection.stroke.color;
-        let screen = ctx.content_rect();
-        let panel = self
-            .page_panel_shape
-            .as_ref()
-            .map(|shape| shape.rect)
-            .filter(|_| open);
-        let rest = panel.map_or(screen, |panel| {
-            egui::Rect::from_min_max(egui::pos2(panel.right(), screen.top()), screen.max)
-        });
-        let zone = |area: egui::Rect, text: String, size: f32| {
-            painter.rect_filled(area, 0.0, accent.gamma_multiply(0.12));
-            painter.rect_stroke(
-                area.shrink(6.0),
-                8.0,
-                egui::Stroke::new(3.0, accent),
-                egui::StrokeKind::Inside,
+        let for_this_zone = |zone_here: DropZone| zone.is_none_or(|z| z == zone_here);
+        if for_this_zone(DropZone::Canvas)
+            && let Some(said) = canvas_said
+        {
+            let canvas = canvas_rect(ctx.content_rect(), page_panel, ai_panel);
+            draw_drop_zone(&painter, canvas, &said.say(self.lang), 20.0, accent);
+        }
+        if for_this_zone(DropZone::Pages)
+            && (pdf || picture)
+            && let Some(rect) = page_panel
+        {
+            draw_drop_zone(
+                &painter,
+                rect,
+                &Message::DropToInsertPages.say(self.lang),
+                14.0,
+                accent,
             );
-            let galley = painter.layout(
-                text.trim_end_matches('\u{2026}').to_owned(),
-                egui::FontId::proportional(size),
-                egui::Color32::WHITE,
-                area.width() - 48.0,
+        }
+        if for_this_zone(DropZone::Ai)
+            && let Some(rect) = ai_panel
+        {
+            draw_drop_zone(
+                &painter,
+                rect,
+                &Message::DropToAttach.say(self.lang),
+                14.0,
+                accent,
             );
-            let plate = egui::Rect::from_center_size(area.center(), galley.size())
-                .expand2(egui::vec2(14.0, 8.0));
-            painter.rect_filled(plate, 8.0, accent);
-            painter.galley(
-                plate.min + egui::vec2(14.0, 8.0),
-                galley,
-                egui::Color32::WHITE,
-            );
-        };
-        zone(rest, said.say(self.lang), 20.0);
-        if let Some(panel) = panel {
-            zone(panel, Message::DropToInsertPages.say(self.lang), 14.0);
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ai_zone_rect(window: &Window) -> Option<egui::Rect> {
+    window.ai_panel_rect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn ai_zone_rect(_window: &Window) -> Option<egui::Rect> {
+    None
+}
+
+fn gap_at_pointer(shape: &crate::page_motion::PanelShape, pointer: egui::Pos2) -> usize {
+    crate::page_motion::gap_at(shape.columns, &shape.pictures, pointer)
+}
+
+fn canvas_drop_message(pdf: bool, picture: bool, open: bool) -> Option<Message> {
+    if pdf {
+        Some(Message::DropToOpen)
+    } else if picture {
+        Some(if open {
+            Message::DropToPlacePictures
+        } else {
+            Message::Command(pdf_app::wording::Command::PdfFromPictures)
+        })
+    } else {
+        None
+    }
+}
+
+fn canvas_rect(
+    screen: egui::Rect,
+    page_panel: Option<egui::Rect>,
+    ai_panel: Option<egui::Rect>,
+) -> egui::Rect {
+    let left = page_panel.map_or(screen.left(), |rect| rect.right());
+    let right = ai_panel.map_or(screen.right(), |rect| rect.left());
+    egui::Rect::from_min_max(
+        egui::pos2(left, screen.top()),
+        egui::pos2(right.max(left), screen.bottom()),
+    )
+}
+
+fn draw_drop_zone(
+    painter: &egui::Painter,
+    area: egui::Rect,
+    text: &str,
+    size: f32,
+    accent: egui::Color32,
+) {
+    painter.rect_filled(area, 0.0, accent.gamma_multiply(0.12));
+    painter.rect_stroke(
+        area.shrink(6.0),
+        8.0,
+        egui::Stroke::new(3.0, accent),
+        egui::StrokeKind::Inside,
+    );
+    let galley = painter.layout(
+        text.trim_end_matches('\u{2026}').to_owned(),
+        egui::FontId::proportional(size),
+        egui::Color32::WHITE,
+        area.width() - 48.0,
+    );
+    let plate =
+        egui::Rect::from_center_size(area.center(), galley.size()).expand2(egui::vec2(14.0, 8.0));
+    painter.rect_filled(plate, 8.0, accent);
+    painter.galley(
+        plate.min + egui::vec2(14.0, 8.0),
+        galley,
+        egui::Color32::WHITE,
+    );
 }
 
 fn picture_boxes(

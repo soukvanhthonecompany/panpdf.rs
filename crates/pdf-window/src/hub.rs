@@ -18,13 +18,7 @@ fn list_file() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("state"))
-        })?;
-    Some(state.join("panpdf").join("recent"))
+    crate::own_folder::own_file("recent")
 }
 
 pub(crate) fn load_recent() -> Vec<Recent> {
@@ -91,13 +85,13 @@ impl Window {
                 .has_document()
                 .then(|| self.opened.parent().map(Path::to_path_buf))
                 .flatten();
-            self.chooser = Some(
-                if self.choosing_for == crate::page_actions::Choosing::Picture {
-                    Chooser::several(start.as_deref())
-                } else {
-                    Chooser::at(start.as_deref(), crate::chooser::Offer::Pdfs)
-                },
-            );
+            self.chooser = Some(match self.choosing_for {
+                crate::page_actions::Choosing::Picture => Chooser::several(start.as_deref()),
+                crate::page_actions::Choosing::ChatAttachment => {
+                    Chooser::several_of(start.as_deref(), crate::chooser::Offer::ForTheChat)
+                }
+                _ => Chooser::at(start.as_deref(), crate::chooser::Offer::Pdfs),
+            });
         }
         self.asking_to_open = false;
         let Some(chooser) = self.chooser.as_mut() else {
@@ -125,6 +119,9 @@ impl Window {
             | crate::page_actions::Choosing::PdfOfPictures(_) => {
                 pdf_app::wording::Home::PicturesToPages
             }
+            crate::page_actions::Choosing::ChatAttachment => {
+                pdf_app::wording::Home::FilesForTheChat
+            }
         };
         match chooser.show(ctx, self.lang, title) {
             Chose::Nothing => {}
@@ -142,6 +139,12 @@ impl Window {
                     crate::page_actions::Choosing::Picture => {
                         self.pictures_chosen_to_place(&[path]);
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    crate::page_actions::Choosing::ChatAttachment => {
+                        self.ai.attach_file(&path);
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    crate::page_actions::Choosing::ChatAttachment => {}
                     crate::page_actions::Choosing::Copy
                     | crate::page_actions::Choosing::PagesOut(_)
                     | crate::page_actions::Choosing::Pieces(_)
@@ -158,6 +161,12 @@ impl Window {
                     }
                     crate::page_actions::Choosing::Picture => {
                         self.pictures_chosen_to_place(&paths);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    crate::page_actions::Choosing::ChatAttachment => {
+                        for path in &paths {
+                            self.ai.attach_file(path);
+                        }
                     }
                     _ => {}
                 }
@@ -211,6 +220,17 @@ impl Window {
                         .clicked()
                     {
                         self.home = false;
+                    }
+                    if crate::format::icon_button(
+                        ui,
+                        Icon::Delete,
+                        &say(Home::LetGoOfDocument),
+                        false,
+                        idle,
+                    )
+                    .clicked()
+                    {
+                        self.let_the_document_go();
                     }
                 });
             }

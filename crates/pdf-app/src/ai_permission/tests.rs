@@ -96,6 +96,17 @@ fn the_table_is_the_rule() {
                 may_allow_for_chat: false,
             },
         ),
+        (Mode::Free, "read_text", READS, false, Decision::Run),
+        (Mode::Free, "replace_text", CHANGES, false, Decision::Run),
+        (Mode::Free, "insert_pages", CHANGES, false, Decision::Run),
+        (Mode::Free, "delete_pages", TAKES_OUT, false, Decision::Run),
+        (
+            Mode::Free,
+            "format_the_disk",
+            None,
+            false,
+            Decision::Refuse(Why::UnknownTool),
+        ),
         (
             Mode::DoIt,
             "format_the_disk",
@@ -143,7 +154,12 @@ fn a_decision_that_ignores_the_mode_fails_the_chat_only_row() {
 
 #[test]
 fn a_mode_is_written_and_read_back_or_refused() {
-    for mode in [Mode::ChatOnly, Mode::AskBeforeChanges, Mode::DoIt] {
+    for mode in [
+        Mode::ChatOnly,
+        Mode::AskBeforeChanges,
+        Mode::DoIt,
+        Mode::Free,
+    ] {
         assert_eq!(Mode::parse(mode.as_str()), Some(mode));
     }
     assert_eq!(Mode::parse("yolo"), None);
@@ -225,6 +241,30 @@ mod cards {
                 "Replace \u{201c}Hi\u{201d} in block p2-b3 with: Hello",
             ),
             (
+                Request::ReplaceText {
+                    block: "p1-b1".to_owned(),
+                    find: None,
+                    text: String::new(),
+                },
+                "Delete all the text of block p1-b1",
+            ),
+            (
+                Request::ReplaceText {
+                    block: "p1-b1".to_owned(),
+                    find: None,
+                    text: "   \n ".to_owned(),
+                },
+                "Delete all the text of block p1-b1",
+            ),
+            (
+                Request::ReplaceText {
+                    block: "p1-b1".to_owned(),
+                    find: Some("Hi".to_owned()),
+                    text: String::new(),
+                },
+                "Delete \u{201c}Hi\u{201d} from block p1-b1",
+            ),
+            (
                 Request::AddText {
                     page: 1,
                     area: [10.0, 10.0, 110.0, 30.0],
@@ -238,6 +278,21 @@ mod cards {
                     },
                 },
                 "Write new text on page 2: Hello",
+            ),
+            (
+                Request::AddText {
+                    page: 1,
+                    area: [10.0, 10.0, 110.0, 30.0],
+                    text: String::new(),
+                    style: NewText {
+                        family: "Noto Sans".to_owned(),
+                        size: 12.0,
+                        bold: false,
+                        italic: false,
+                        fill: None,
+                    },
+                },
+                "Write nothing at all on page 2",
             ),
             (
                 Request::SetProperties(pdf_edit::info::InfoEdit {

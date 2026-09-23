@@ -1,3 +1,4 @@
+use pdf_bytes::SourceId;
 use pdf_paint::{Matrix, PaintAtomKind, PaintGraph, PathSegment, Point, TextShowElement};
 use pdf_syntax::Reference;
 
@@ -7,6 +8,7 @@ use crate::spike_move_text::SpikeError;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Copied {
     pub objects: Vec<CopiedObject>,
+    pub from: SourceId,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,12 +58,16 @@ fn refused(reason: &'static str) -> SpikeError {
     SpikeError::CopyUnsupported(reason)
 }
 
-pub fn copy_from(graph: &PaintGraph, anchors: &[SourceAnchor]) -> Result<Copied, SpikeError> {
+pub fn copy_from(
+    graph: &PaintGraph,
+    anchors: &[SourceAnchor],
+    from: SourceId,
+) -> Result<Copied, SpikeError> {
     let mut objects = Vec::with_capacity(anchors.len());
     for anchor in anchors {
         objects.push(copy_one(graph, anchor)?);
     }
-    Ok(Copied { objects })
+    Ok(Copied { objects, from })
 }
 
 pub(crate) fn plain(state: &pdf_paint::GraphicsState) -> bool {

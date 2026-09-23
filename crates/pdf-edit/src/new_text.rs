@@ -202,15 +202,22 @@ pub(crate) fn face_for(
     let fonts = page
         .fonts
         .ok_or_else(|| refused("no font provider was given, so no face can be chosen"))?;
+    face_in(fonts, new.text, (new.family, new.bold, new.italic))
+}
+
+fn face_in(
+    fonts: &std::sync::Arc<dyn pdf_content::FontProvider>,
+    text: &str,
+    (family, bold, italic): (&str, bool, bool),
+) -> Result<pdf_content::SubstitutedFace, SpikeError> {
     let request = pdf_content::FontRequest::for_family(
-        new.family,
+        family,
         FontStyle {
-            weight: if new.bold { 700 } else { 400 },
-            italic: new.italic,
+            weight: if bold { 700 } else { 400 },
+            italic,
         },
     );
-    let first = new
-        .text
+    let first = text
         .chars()
         .find(|letter| *letter != '\n')
         .ok_or_else(|| refused("there is no text to put on the page"))?;
@@ -220,7 +227,7 @@ pub(crate) fn face_for(
         .or_else(|| fonts.fallback_face(&request, first))
         .ok_or_else(|| refused("no face on this machine draws what was typed"))?;
     let found = face.identity.style;
-    if (found.is_bold() && !new.bold) || (found.italic && !new.italic) {
+    if (found.is_bold() && !bold) || (found.italic && !italic) {
         return Err(refused(
             "this family has no face in the weight or slope asked for on this machine",
         ));
@@ -311,34 +318,8 @@ pub(crate) fn place(
     size: f64,
     (alignment, blocked): (Alignment, &[Blocked]),
 ) -> Result<Vec<PlacedLine>, SpikeError> {
-    let pitch = size * LINE_EM;
-    let measured: Vec<Vec<Unit>> = paragraphs
-        .iter()
-        .map(|clusters| {
-            clusters
-                .iter()
-                .map(|cluster| Unit {
-                    advance: cluster.advance,
-                    pitch,
-                    break_before: cluster.breaks,
-                    hangs: cluster.text == " ",
-                    spacing_after: 0.0,
-                })
-                .collect()
-        })
-        .collect();
-    let laid: Vec<Paragraph<'_>> = measured
-        .iter()
-        .map(|units| Paragraph {
-            units,
-            empty_pitch: pitch,
-            first_indent: 0.0,
-            split_words: true,
-        })
-        .collect();
     let width = frame[2] - frame[0];
-    let layout = lay_out_around(&laid, width, blocked)
-        .map_err(|_| refused("the text cannot be laid out in the frame drawn"))?;
+    let (measured, layout) = laid_out(paragraphs, width, size, blocked)?;
     let mut lines = Vec::new();
     let last_of = |line: &crate::layout::LaidLine| {
         layout
@@ -398,6 +379,77 @@ pub(crate) fn place(
         return Err(refused("there is no text to put on the page"));
     }
     Ok(lines)
+}
+
+fn laid_out(
+    paragraphs: &[Vec<Cluster>],
+    width: f64,
+    size: f64,
+    blocked: &[Blocked],
+) -> Result<(Vec<Vec<Unit>>, crate::layout::Layout), SpikeError> {
+    let pitch = size * LINE_EM;
+    let measured: Vec<Vec<Unit>> = paragraphs
+        .iter()
+        .map(|clusters| {
+            clusters
+                .iter()
+                .map(|cluster| Unit {
+                    advance: cluster.advance,
+                    pitch,
+                    break_before: cluster.breaks,
+                    hangs: cluster.text == " ",
+                    spacing_after: 0.0,
+                })
+                .collect()
+        })
+        .collect();
+    let laid: Vec<Paragraph<'_>> = measured
+        .iter()
+        .map(|units| Paragraph {
+            units,
+            empty_pitch: pitch,
+            first_indent: 0.0,
+            split_words: true,
+        })
+        .collect();
+    let layout = lay_out_around(&laid, width, blocked)
+        .map_err(|_| refused("the text cannot be laid out in the frame drawn"))?;
+    Ok((measured, layout))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Room {
+    pub height: f64,
+    pub widest: f64,
+    pub lines: usize,
+}
+
+pub fn room_for_new_text(
+    fonts: &std::sync::Arc<dyn pdf_content::FontProvider>,
+    text: &str,
+    (family, size, bold, italic): (&str, f64, bool, bool),
+    width: f64,
+) -> Result<Room, SpikeError> {
+    if !(width.is_finite() && width > 0.0) {
+        return Err(refused("a frame with no width holds no line"));
+    }
+    if !(size.is_finite() && size > 0.0) {
+        return Err(refused("text needs a size above nothing"));
+    }
+    let face = face_in(fonts, text, (family, bold, italic))?;
+    let embeddable = Embeddable::of(&face.program)
+        .ok_or_else(|| refused("the face chosen cannot be embedded yet"))?;
+    let clusters = shape(text, &face, embeddable, size)?;
+    let (_, layout) = laid_out(&clusters, width, size, &[])?;
+    Ok(Room {
+        height: layout.height,
+        widest: layout
+            .lines
+            .iter()
+            .map(|line| line.width)
+            .fold(0.0, f64::max),
+        lines: layout.lines.len(),
+    })
 }
 
 pub(crate) fn meanings(
@@ -1043,6 +1095,43 @@ pub(crate) mod tests {
             italic: false,
             fill: None,
         }
+    }
+
+    #[test]
+    fn what_is_measured_is_what_is_written() {
+        let fonts = provider();
+        let text = vec!["AA"; 20].join(" ");
+        let room =
+            super::room_for_new_text(&fonts, &text, ("Test Face", 10.0, false, false), 100.0)
+                .expect("the text is measured");
+        assert_eq!(room.lines, 3);
+        assert!((room.height - 36.0).abs() < 1e-9, "{room:?}");
+        assert!((room.widest - 97.5).abs() < 1e-9, "{room:?}");
+
+        let source = document("");
+        let plan = plan_command_with_fonts(
+            &source,
+            &command(&text, [20.0, 20.0, 120.0, 180.0]),
+            b"",
+            Some(Arc::clone(&fonts)),
+        )
+        .expect("the text is planned");
+        let after = plan.commit(&source, b"").expect("the plan commits");
+        let mut baselines: Vec<i64> = pens(&after, &fonts)
+            .into_iter()
+            .map(|(_, y)| {
+                #[allow(clippy::cast_possible_truncation, reason = "a test's rounding")]
+                let y = (y * 1000.0).round() as i64;
+                y
+            })
+            .collect();
+        baselines.dedup();
+        assert_eq!(baselines.len(), room.lines);
+
+        let wide =
+            super::room_for_new_text(&fonts, &text, ("Test Face", 10.0, false, false), 1000.0)
+                .expect("the text is measured");
+        assert_eq!(wide.lines, 1, "the control: the width is what breaks it");
     }
 
     #[test]

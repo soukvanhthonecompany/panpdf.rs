@@ -145,14 +145,13 @@ impl Window {
         self.faces.as_ref().and_then(|(_, faces)| faces.clone())
     }
 
-    pub(crate) fn font_row(&mut self, ui: &mut egui::Ui, showing: &Showing<'_>) -> Option<Wanted> {
+    pub(crate) fn text_row(&mut self, ui: &mut egui::Ui, showing: &Showing<'_>) -> Option<Wanted> {
         let &Showing {
             font,
             size,
-            spacing,
             fill,
             pressed,
-            paragraph,
+            ..
         } = showing;
         let lang = self.lang;
         let mut wanted = None;
@@ -171,11 +170,35 @@ impl Window {
         if let Some(style) = colour_box(ui, lang, fill, &mut self.colours) {
             wanted = Some(Wanted::Style(style));
         }
+        wanted
+    }
+
+    pub(crate) fn paragraph_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        showing: &Showing<'_>,
+    ) -> Option<Wanted> {
+        let &Showing {
+            size,
+            spacing,
+            paragraph,
+            ..
+        } = showing;
+        let lang = self.lang;
+        let mut wanted = None;
         if let Some(style) = spacing_box(ui, lang, spacing, size) {
             wanted = Some(Wanted::Style(style));
         }
         rule(ui);
         if let Some(asked) = paragraph_buttons(ui, lang, paragraph) {
+            wanted = Some(asked);
+        }
+        wanted
+    }
+
+    pub(crate) fn font_row(&mut self, ui: &mut egui::Ui, showing: &Showing<'_>) -> Option<Wanted> {
+        let mut wanted = self.text_row(ui, showing);
+        if let Some(asked) = self.paragraph_row(ui, showing) {
             wanted = Some(asked);
         }
         wanted
@@ -287,6 +310,24 @@ pub(crate) fn icon_button(
             visuals.text_color()
         };
         icon.draw_tinted(ui.painter(), rect.shrink(5.0), colour, enabled);
+    }
+    response.on_hover_text(hover)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn quiet_icon_button(ui: &mut egui::Ui, icon: Icon, hover: &str) -> egui::Response {
+    const SIDE: f32 = 22.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(SIDE, SIDE), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let colour = if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
+            visuals.text_color()
+        } else {
+            visuals.weak_text_color()
+        };
+        icon.draw(ui.painter(), rect.shrink(4.0), colour);
     }
     response.on_hover_text(hover)
 }

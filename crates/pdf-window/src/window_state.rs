@@ -26,66 +26,6 @@ pub(crate) enum Opened {
     Refused(String),
 }
 
-const FALLBACK_FACES: [(&str, &str); 15] = [
-    (
-        "thai",
-        "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
-    ),
-    (
-        "lao",
-        "/usr/share/fonts/truetype/noto/NotoSansLao-Regular.ttf",
-    ),
-    (
-        "devanagari",
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-    ),
-    (
-        "bengali",
-        "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
-    ),
-    (
-        "tamil",
-        "/usr/share/fonts/truetype/noto/NotoSansTamil-Regular.ttf",
-    ),
-    (
-        "sinhala",
-        "/usr/share/fonts/truetype/noto/NotoSansSinhala-Regular.ttf",
-    ),
-    (
-        "khmer",
-        "/usr/share/fonts/truetype/noto/NotoSansKhmer-Regular.ttf",
-    ),
-    (
-        "myanmar",
-        "/usr/share/fonts/truetype/noto/NotoSansMyanmar-Regular.ttf",
-    ),
-    (
-        "arabic",
-        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-    ),
-    (
-        "hebrew",
-        "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
-    ),
-    (
-        "georgian",
-        "/usr/share/fonts/truetype/noto/NotoSansGeorgian-Regular.ttf",
-    ),
-    (
-        "armenian",
-        "/usr/share/fonts/truetype/noto/NotoSansArmenian-Regular.ttf",
-    ),
-    (
-        "ethiopic",
-        "/usr/share/fonts/truetype/noto/NotoSansEthiopic-Regular.ttf",
-    ),
-    ("dejavu", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-    (
-        "cjk",
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-    ),
-];
-
 pub(crate) fn install_look(ctx: &egui::Context) {
     set_dark(ctx, false);
     ctx.options_mut(|options| options.zoom_with_keyboard = false);
@@ -118,25 +58,30 @@ pub(crate) fn packaged_faces_found() -> bool {
 }
 
 pub(crate) fn install_fonts(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    let mut added = Vec::new();
-    for (name, path) in FALLBACK_FACES {
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        fonts.font_data.insert(
-            name.to_owned(),
-            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-        );
-        added.push(name.to_owned());
-    }
-    FACES_FOUND.store(!added.is_empty(), std::sync::atomic::Ordering::Relaxed);
-    if added.is_empty() {
+    use crate::interface_fonts::{Host, candidates, choose, windows_fonts};
+
+    let packaged = pdf_cli::package_root()
+        .map(|root| root.join("packaged"))
+        .filter(|directory| directory.is_dir());
+    FACES_FOUND.store(packaged.is_some(), std::sync::atomic::Ordering::Relaxed);
+    let chosen = choose(
+        candidates(Host::this(), packaged.as_deref(), &windows_fonts()),
+        |path| std::fs::read(path).ok(),
+    );
+    if chosen.is_empty() {
         return;
+    }
+    let names: Vec<String> = chosen.iter().map(|face| face.name.to_owned()).collect();
+    let mut fonts = egui::FontDefinitions::default();
+    for face in chosen {
+        fonts.font_data.insert(
+            face.name.to_owned(),
+            std::sync::Arc::new(egui::FontData::from_owned(face.bytes)),
+        );
     }
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         if let Some(list) = fonts.families.get_mut(&family) {
-            list.extend(added.iter().cloned());
+            list.extend(names.iter().cloned());
         }
     }
     ctx.set_fonts(fonts);
@@ -218,6 +163,7 @@ pub(crate) struct PrintChoices {
     pub(crate) borders: bool,
     pub(crate) auto_rotate: bool,
     pub(crate) margin: f64,
+    pub(crate) nudge: [f64; 2],
     pub(crate) printer: Option<String>,
     pub(crate) copies: u16,
     pub(crate) printing: Printing,
@@ -249,6 +195,7 @@ impl Default for PrintChoices {
             borders: false,
             auto_rotate: true,
             margin: 5.0,
+            nudge: [0.0, 0.0],
             printer: None,
             copies: 1,
             printing: Printing::InColour,
@@ -259,6 +206,10 @@ impl Default for PrintChoices {
 
 pub(crate) struct PrintDraft {
     pub(crate) sheet: usize,
+    pub(crate) dragging: Option<egui::Vec2>,
+    pub(crate) corner: bool,
+    pub(crate) landed: Option<(egui::Vec2, bool)>,
+    pub(crate) put_back: bool,
     pub(crate) allowance: Option<pdf_content::PrintAllowance>,
     pub(crate) shown: Option<(String, Result<egui::TextureHandle, String>)>,
     pub(crate) drawing: Option<(
@@ -365,6 +316,7 @@ pub(crate) struct Clipboard {
     pub(crate) copied: pdf_edit::Copied,
     pub(crate) marker: String,
     pub(crate) bounds: [f64; 4],
+    pub(crate) from: pdf_bytes::ByteStore,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -843,6 +795,8 @@ pub(crate) fn keep_bytes() -> usize {
 
 pub(crate) const KEEP_PAGES: usize = 12;
 
+pub(crate) const KEEP_PAGE_BYTES: usize = 128 * 1024 * 1024;
+
 impl Window {
     pub(crate) fn spare_count(&self) -> usize {
         self.spare.values().map(Vec::len).sum()
@@ -905,6 +859,7 @@ pub(crate) enum Leaving {
     Open(PathBuf, usize),
     New([f64; 2]),
     Close,
+    LetGo,
 }
 
 #[derive(Clone, Copy)]
@@ -954,6 +909,7 @@ pub(crate) struct Window {
     pub(crate) pointing: Pointing,
     pub(crate) chosen: Chosen,
     pub(crate) context: Option<egui::Pos2>,
+    pub(crate) toolbar_area: Option<egui::Rect>,
     pub(crate) held_still: Option<(egui::Pos2, f64)>,
     pub(crate) running: Option<Running>,
     pub(crate) title: String,
@@ -1043,6 +999,8 @@ pub(crate) struct Window {
     pub(crate) page_preview: Option<Vec<usize>>,
     pub(crate) renumber: Option<crate::page_motion::Renumber>,
     pub(crate) page_panel_shape: Option<crate::page_motion::PanelShape>,
+    pub(crate) ai_panel_shape: Option<egui::Rect>,
+    pub(crate) ai_flow: Option<crate::room::Flow>,
     pub(crate) file_hover_gap: Option<usize>,
     pub(crate) panel_menu: Option<(crate::pages::PanelMenu, egui::Pos2, u64)>,
     pub(crate) arriving: std::collections::VecDeque<(crate::page_motion::Arriving, usize)>,

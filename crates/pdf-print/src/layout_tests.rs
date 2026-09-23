@@ -359,3 +359,60 @@ fn each_papers_printer_name_says_its_size() {
     }
     assert_eq!(crate::layout::media_name("Papyrus"), None);
 }
+
+#[test]
+fn a_nudge_moves_the_page_by_what_it_says_and_nothing_else() {
+    let still = one(A4, &bare()).placements[0];
+    let moved = one(
+        A4,
+        &Settings {
+            nudge: [30.0, -12.0],
+            ..bare()
+        },
+    )
+    .placements[0];
+    assert!(near_all(&moved.matrix, &[1.0, 0.0, 0.0, 1.0, 30.0, -12.0]));
+    assert!(near(moved.scale, still.scale), "the size did not change");
+    assert_eq!(moved.turned, still.turned, "the turn did not change");
+    assert!(
+        near_all(&moved.clip, &still.clip),
+        "a moved page is still cut by the paper, not by where it was moved to"
+    );
+    assert!(
+        near_all(&still.matrix, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+        "the unnudged page is where it has always been"
+    );
+}
+
+#[test]
+fn a_custom_scale_and_a_nudge_do_not_interfere() {
+    let placed = one(
+        A4,
+        &Settings {
+            scaling: Scaling::Custom(50.0),
+            nudge: [10.0, 0.0],
+            ..bare()
+        },
+    )
+    .placements[0];
+    assert!(near(placed.scale, 0.5));
+    assert!(near(placed.matrix[4], A4[0] / 4.0 + 10.0));
+    assert!(near(placed.matrix[5], A4[1] / 4.0));
+}
+
+#[test]
+fn a_grid_is_not_moved_by_a_nudge() {
+    let settings = Settings {
+        per_sheet: PerSheet::Pages(4),
+        ..bare()
+    };
+    let still = one(A4, &settings);
+    let nudged = one(
+        A4,
+        &Settings {
+            nudge: [25.0, 25.0],
+            ..settings
+        },
+    );
+    assert_eq!(still, nudged, "a grid places its cells by the grid alone");
+}

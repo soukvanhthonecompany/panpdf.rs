@@ -4,6 +4,7 @@ pub enum Mode {
     #[default]
     AskBeforeChanges,
     DoIt,
+    Free,
 }
 
 impl Mode {
@@ -13,6 +14,7 @@ impl Mode {
             Self::ChatOnly => "chat_only",
             Self::AskBeforeChanges => "ask_before_changes",
             Self::DoIt => "do_it",
+            Self::Free => "free",
         }
     }
 
@@ -22,6 +24,7 @@ impl Mode {
             "chat_only" => Some(Self::ChatOnly),
             "ask_before_changes" => Some(Self::AskBeforeChanges),
             "do_it" => Some(Self::DoIt),
+            "free" => Some(Self::Free),
             _ => None,
         }
     }
@@ -91,6 +94,7 @@ pub fn decide(
                 Decision::Run
             }
         }
+        Mode::Free => Decision::Run,
     }
 }
 
@@ -144,6 +148,13 @@ mod words {
                 format!("Look at page {} as a picture", page + 1)
             }
             Request::ListFonts { .. } => "List the fonts new text can be set in".to_owned(),
+            Request::ReplaceText { block, find, text } if text.trim().is_empty() => match find {
+                Some(find) => {
+                    let find = clip(find);
+                    format!("Delete \u{201c}{find}\u{201d} from block {block}")
+                }
+                None => format!("Delete all the text of block {block}"),
+            },
             Request::ReplaceText { block, find, text } => {
                 let text = clip(text);
                 match find {
@@ -156,9 +167,35 @@ mod words {
                     }
                 }
             }
+            Request::AddText { page, text, .. } if text.trim().is_empty() => {
+                format!("Write nothing at all on page {}", page + 1)
+            }
             Request::AddText { page, text, .. } => {
                 let text = clip(text);
                 format!("Write new text on page {}: {text}", page + 1)
+            }
+            Request::WritePages {
+                from_page,
+                markdown,
+                replace,
+                ..
+            } => {
+                let words = markdown.split_whitespace().count();
+                let doing = if *replace {
+                    "Rewrite"
+                } else {
+                    "Write a document onto"
+                };
+                let first = clip(
+                    markdown
+                        .lines()
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or_default(),
+                );
+                format!(
+                    "{doing} the pages from page {}, {words} words, starting \u{201c}{first}\u{201d}",
+                    from_page + 1
+                )
             }
             Request::SetProperties(edit) => {
                 let named = properties(edit);
@@ -219,6 +256,7 @@ mod words {
             }
             Request::Undo => "Take back the last change".to_owned(),
             Request::Redo => "Put back the last change that was taken back".to_owned(),
+            Request::AskPerson { question, .. } => format!("Ask you: {question}"),
         }
     }
 

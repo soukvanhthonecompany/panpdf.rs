@@ -20,6 +20,12 @@ impl SourceId {
     }
 
     #[must_use]
+    pub fn next_document() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1 << 32);
+        Self::new(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+
+    #[must_use]
     pub const fn derived(parent: Self, derivation: u64) -> Self {
         Self {
             root: parent.root,
@@ -95,18 +101,62 @@ impl SourceSpan {
 }
 
 #[derive(Clone)]
+enum Held {
+    Shared(Arc<[u8]>),
+    Owned(Arc<Vec<u8>>),
+}
+
+impl Held {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Shared(bytes) => bytes,
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct ByteStore {
     id: SourceId,
-    bytes: Arc<[u8]>,
+    bytes: Held,
+    end: usize,
 }
+
+impl PartialEq for ByteStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.end == other.end
+    }
+}
+
+impl Eq for ByteStore {}
 
 impl ByteStore {
     #[must_use]
     pub fn new(id: SourceId, bytes: impl Into<Arc<[u8]>>) -> Self {
+        let bytes = bytes.into();
         Self {
+            end: bytes.len(),
+            bytes: Held::Shared(bytes),
             id,
-            bytes: bytes.into(),
         }
+    }
+
+    #[must_use]
+    pub fn owning(id: SourceId, bytes: Vec<u8>) -> Self {
+        Self {
+            end: bytes.len(),
+            bytes: Held::Owned(Arc::new(bytes)),
+            id,
+        }
+    }
+
+    #[must_use]
+    pub fn prefix(&self, id: SourceId, len: usize) -> Option<Self> {
+        (len <= self.end).then(|| Self {
+            id,
+            bytes: self.bytes.clone(),
+            end: len,
+        })
     }
 
     #[must_use]
@@ -115,18 +165,18 @@ impl ByteStore {
     }
 
     #[must_use]
-    pub fn len(&self) -> usize {
-        self.bytes.len()
+    pub const fn len(&self) -> usize {
+        self.end
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+    pub const fn is_empty(&self) -> bool {
+        self.end == 0
     }
 
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
+        &self.bytes.as_bytes()[..self.end]
     }
 
     pub fn span(&self, range: Range<usize>) -> Result<SourceSpan, SpanError> {
@@ -153,7 +203,7 @@ impl ByteStore {
                 source_len: self.len(),
             });
         }
-        Ok(&self.bytes[span.range()])
+        Ok(&self.as_bytes()[span.range()])
     }
 }
 
@@ -250,6 +300,63 @@ mod tests {
         );
         assert_eq!(
             store.span(0..4),
+            Err(SpanError::OutOfBounds {
+                end: 4,
+                source_len: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn an_owned_vector_is_moved_rather_than_copied() {
+        let bytes = vec![b'a'; 4096];
+        let at = bytes.as_ptr().addr();
+        let store = ByteStore::owning(SourceId::new(5), bytes);
+
+        assert_eq!(store.as_bytes().as_ptr().addr(), at);
+        assert_eq!(store.len(), 4096);
+        assert_eq!(store.as_bytes(), &[b'a'; 4096][..]);
+    }
+
+    #[test]
+    fn a_prefix_shares_one_allocation_and_stops_where_it_says() {
+        let store = ByteStore::owning(SourceId::new(1), b"%PDF-1.7\nbody\nappended".to_vec());
+        let prefix = store
+            .prefix(SourceId::new(2), 14)
+            .expect("a prefix no longer than its source");
+
+        assert_eq!(prefix.as_bytes(), &b"%PDF-1.7\nbody\n"[..]);
+        assert_eq!(prefix.len(), 14);
+        assert_eq!(
+            prefix.as_bytes().as_ptr().addr(),
+            store.as_bytes().as_ptr().addr(),
+            "a prefix must not copy the document"
+        );
+        assert!(store.as_bytes().starts_with(prefix.as_bytes()));
+    }
+
+    #[test]
+    fn a_prefix_longer_than_its_source_is_refused() {
+        let store = ByteStore::new(SourceId::new(1), &b"abc"[..]);
+
+        assert!(store.prefix(SourceId::new(2), 4).is_none());
+        assert!(store.prefix(SourceId::new(2), 3).is_some());
+    }
+
+    #[test]
+    fn a_prefix_is_a_revision_of_its_own() {
+        let store = ByteStore::owning(SourceId::new(1), b"abcdef".to_vec());
+        let prefix = store.prefix(SourceId::new(2), 3).expect("a prefix");
+        let span = store.span(0..6).expect("a span of the whole source");
+
+        assert!(matches!(
+            prefix.resolve(span),
+            Err(SpanError::WrongSource { .. })
+        ));
+        let own = prefix.span(0..3).expect("a span of the prefix");
+        assert_eq!(prefix.resolve(own), Ok(&b"abc"[..]));
+        assert_eq!(
+            prefix.span(0..4),
             Err(SpanError::OutOfBounds {
                 end: 4,
                 source_len: 3,

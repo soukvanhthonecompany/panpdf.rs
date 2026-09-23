@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -303,6 +304,33 @@ impl Turn {
     }
 }
 
+#[must_use]
+pub fn without_the_old_pictures(turns: &[Turn]) -> Vec<Turn> {
+    let newest = turns
+        .iter()
+        .enumerate()
+        .filter_map(|(at, turn)| match turn {
+            Turn::Results { results } => results
+                .iter()
+                .rposition(|result| result.picture.is_some())
+                .map(|which| (at, which)),
+            _ => None,
+        })
+        .next_back();
+    let mut out = turns.to_vec();
+    for (at, turn) in out.iter_mut().enumerate() {
+        let Turn::Results { results } = turn else {
+            continue;
+        };
+        for (which, result) in results.iter_mut().enumerate() {
+            if newest != Some((at, which)) {
+                result.picture = None;
+            }
+        }
+    }
+    out
+}
+
 const UNANSWERED: &str = "This action was not carried out, and the conversation went on without it. Do not retry it; \
 ask the person what they would like instead.";
 
@@ -339,6 +367,7 @@ pub fn settle_dangling_calls(turns: &mut Vec<Turn>) {
 pub enum Effort {
     #[default]
     Off,
+    None,
     Low,
     Medium,
     High,
@@ -349,6 +378,7 @@ impl Effort {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
+            Self::None => "none",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -359,6 +389,7 @@ impl Effort {
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "off" => Some(Self::Off),
+            "none" => Some(Self::None),
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
@@ -368,7 +399,7 @@ impl Effort {
 
     const fn budget_tokens(self) -> u32 {
         match self {
-            Self::Off => 0,
+            Self::Off | Self::None => 0,
             Self::Low => 1024,
             Self::Medium => 4096,
             Self::High => 16000,
@@ -405,6 +436,25 @@ pub fn reasoning_members(
     const ADAPTIVE_MAX_TOKENS: u32 = 16000;
     if effort == Effort::Off {
         return (Vec::new(), PLAIN_MAX_TOKENS);
+    }
+    if effort == Effort::None {
+        return match provider.wire() {
+            Wire::Chat => (
+                vec![("reasoning_effort", Json::text("none"))],
+                PLAIN_MAX_TOKENS,
+            ),
+            Wire::Messages => (
+                vec![("thinking", Json::object([("type", Json::text("disabled"))]))],
+                PLAIN_MAX_TOKENS,
+            ),
+            Wire::Responses => (
+                vec![(
+                    "reasoning",
+                    Json::object([("effort", Json::text("minimal"))]),
+                )],
+                PLAIN_MAX_TOKENS,
+            ),
+        };
     }
     let word = Json::text(effort.as_str());
     match provider.wire() {
@@ -577,7 +627,7 @@ impl Connection {
         tools: &[ToolOffer],
         system: Option<&str>,
         cancel: &AtomicBool,
-        on_partial: &mut dyn FnMut(&str),
+        on_partial: &mut dyn FnMut(Progress<'_>),
     ) -> Result<Reply, ConnectError> {
         if cancel.load(Ordering::Relaxed) {
             return Err(ConnectError::Cancelled);
@@ -597,7 +647,10 @@ impl Connection {
             (ASK_SECONDS, cancel),
             &mut |line| {
                 if gathering.line(line) {
-                    on_partial(gathering.said());
+                    on_partial(Progress {
+                        said: gathering.said(),
+                        thinking: gathering.thinking(),
+                    });
                 }
             },
         )?;
@@ -925,7 +978,8 @@ impl Connection {
         (seconds, cancel): (u64, &AtomicBool),
     ) -> Result<String, ConnectError> {
         let config = self.curl_config(method, suffix, payload, seconds, false)?;
-        run_curl(&config, (seconds, cancel)).map_err(|error| redact_error(error, &self.api_key))
+        again_after_a_wait(cancel, || run_curl(&config, (seconds, cancel)))
+            .map_err(|error| redact_error(error, &self.api_key))
     }
 
     fn request_streaming(
@@ -936,8 +990,10 @@ impl Connection {
         on_line: &mut dyn FnMut(&str),
     ) -> Result<String, ConnectError> {
         let config = self.curl_config("POST", suffix, Some(payload), seconds, true)?;
-        run_curl_streaming(&config, (seconds, cancel), on_line)
-            .map_err(|error| redact_error(error, &self.api_key))
+        again_after_a_wait(cancel, || {
+            run_curl_streaming(&config, (seconds, cancel), on_line)
+        })
+        .map_err(|error| redact_error(error, &self.api_key))
     }
 
     fn curl_config(
@@ -1048,6 +1104,112 @@ fn curl_escape(value: &str) -> String {
         .replace('"', "\\\"")
         .replace('\r', "\\r")
         .replace('\n', "\\n")
+}
+
+const MOST_WAIT: Duration = Duration::from_mins(1);
+
+const TRIES: usize = 3;
+
+fn wait_asked_for(body: &str) -> Option<Duration> {
+    let asking = body.contains("rate limit")
+        || body.contains("Rate limit")
+        || body.contains("RESOURCE_EXHAUSTED")
+        || body.contains("rate_limit")
+        || body.contains("quota")
+        || body.contains("Quota");
+    if !asking {
+        return None;
+    }
+    let mut rest = body;
+    while let Some(at) = rest.find(" in ") {
+        rest = &rest[at + 4..];
+        let digits: String = rest
+            .chars()
+            .take_while(|letter| letter.is_ascii_digit() || *letter == '.')
+            .collect();
+        if digits.is_empty() {
+            continue;
+        }
+        let after = rest[digits.len()..].trim_start();
+        if !after.starts_with('s') {
+            continue;
+        }
+        if let Ok(seconds) = digits.parse::<f64>()
+            && seconds.is_finite()
+            && seconds > 0.0
+        {
+            return Some(Duration::from_secs_f64(seconds + 1.0));
+        }
+    }
+    None
+}
+
+fn wait_watching(how_long: Duration, cancel: &AtomicBool) -> bool {
+    let until = Instant::now() + how_long;
+    while Instant::now() < until {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100).min(until - Instant::now()));
+    }
+    !cancel.load(Ordering::Relaxed)
+}
+
+fn again_after_a_wait<F>(cancel: &AtomicBool, make: F) -> Result<String, ConnectError>
+where
+    F: FnMut() -> Result<String, ConnectError>,
+{
+    again_after(cancel, make, OVERLOADED_WAITS)
+}
+
+const OVERLOADED_WAITS: [Duration; TRIES] = [
+    Duration::from_secs(3),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+];
+
+fn again_after<F>(
+    cancel: &AtomicBool,
+    mut make: F,
+    overloaded: [Duration; TRIES],
+) -> Result<String, ConnectError>
+where
+    F: FnMut() -> Result<String, ConnectError>,
+{
+    let mut tried = 0;
+    loop {
+        let answer = make();
+        let Err(ConnectError::Http(said)) = &answer else {
+            return answer;
+        };
+        let wait = wait_asked_for(said)
+            .filter(|wait| *wait <= MOST_WAIT)
+            .or_else(|| overloaded_for_now(said).then(|| overloaded[tried.min(TRIES - 1)]));
+        tried += 1;
+        let Some(wait) = wait else {
+            return answer;
+        };
+        if tried > TRIES || !wait_watching(wait, cancel) {
+            return answer;
+        }
+    }
+}
+
+fn overloaded_for_now(said: &str) -> bool {
+    let said = said.to_ascii_lowercase();
+    if said.contains("quota") {
+        return false;
+    }
+    [
+        "high demand",
+        "overloaded",
+        "unavailable",
+        "try again later",
+        "\"code\": 503",
+        "\"code\": 529",
+    ]
+    .iter()
+    .any(|sign| said.contains(sign))
 }
 
 fn run_curl(config: &str, (seconds, cancel): (u64, &AtomicBool)) -> Result<String, ConnectError> {
@@ -1313,6 +1475,10 @@ fn read_limited(mut reader: impl Read) -> (Vec<u8>, bool) {
 fn error_text(body: &str) -> String {
     Json::parse(body)
         .ok()
+        .map(|json| match json {
+            Json::List(mut list) if list.len() == 1 => list.remove(0),
+            other => other,
+        })
         .and_then(|json| {
             json.get("error")
                 .and_then(|error| error.get("message"))
@@ -1619,14 +1785,22 @@ fn read_chat(provider: Provider, root: &Json) -> Result<Reply, ConnectError> {
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Progress<'a> {
+    pub said: &'a str,
+    pub thinking: &'a str,
+}
+
 enum Gathering {
     Responses {
         said: String,
+        thinking: String,
         items: Vec<Json>,
         completed: Option<Json>,
     },
     Messages {
         said: String,
+        thinking: String,
         blocks: Vec<(Json, String)>,
         stop_reason: Option<String>,
         started: bool,
@@ -1634,10 +1808,39 @@ enum Gathering {
     Chat {
         said: String,
         reasoning: String,
-        calls: Vec<(String, String, String)>,
+        calls: Vec<ArrivingCall>,
+        kept: BTreeMap<String, Json>,
         finish_reason: Option<String>,
         started: bool,
     },
+}
+
+#[derive(Default)]
+struct ArrivingCall {
+    id: String,
+    name: String,
+    arguments: String,
+    kept: BTreeMap<String, Json>,
+}
+
+impl ArrivingCall {
+    fn spelled(&self) -> Json {
+        let mut spelled = Json::object([
+            ("id", Json::text(self.id.clone())),
+            ("type", Json::text("function")),
+            (
+                "function",
+                Json::object([
+                    ("name", Json::text(self.name.clone())),
+                    ("arguments", Json::text(self.arguments.clone())),
+                ]),
+            ),
+        ]);
+        for (key, value) in &self.kept {
+            put(&mut spelled, key, value.clone());
+        }
+        spelled
+    }
 }
 
 impl Gathering {
@@ -1645,11 +1848,13 @@ impl Gathering {
         match wire {
             Wire::Responses => Self::Responses {
                 said: String::new(),
+                thinking: String::new(),
                 items: Vec::new(),
                 completed: None,
             },
             Wire::Messages => Self::Messages {
                 said: String::new(),
+                thinking: String::new(),
                 blocks: Vec::new(),
                 stop_reason: None,
                 started: false,
@@ -1658,6 +1863,7 @@ impl Gathering {
                 said: String::new(),
                 reasoning: String::new(),
                 calls: Vec::new(),
+                kept: BTreeMap::new(),
                 finish_reason: None,
                 started: false,
             },
@@ -1672,6 +1878,13 @@ impl Gathering {
         }
     }
 
+    fn thinking(&self) -> &str {
+        match self {
+            Self::Responses { thinking, .. } | Self::Messages { thinking, .. } => thinking,
+            Self::Chat { reasoning, .. } => reasoning,
+        }
+    }
+
     fn line(&mut self, line: &str) -> bool {
         let Some(data) = line.trim_end().strip_prefix("data:") else {
             return false;
@@ -1683,9 +1896,9 @@ impl Gathering {
         let Ok(event) = Json::parse(data) else {
             return false;
         };
-        let before = self.said().len();
+        let before = (self.said().len(), self.thinking().len());
         self.event(&event);
-        self.said().len() != before
+        (self.said().len(), self.thinking().len()) != before
     }
 
     fn event(&mut self, event: &Json) {
@@ -1693,12 +1906,18 @@ impl Gathering {
         match self {
             Self::Responses {
                 said,
+                thinking,
                 items,
                 completed,
             } => match kind {
                 "response.output_text.delta" => {
                     if let Some(piece) = event.get("delta").and_then(Json::as_str) {
                         said.push_str(piece);
+                    }
+                }
+                "response.reasoning_summary_text.delta" => {
+                    if let Some(piece) = event.get("delta").and_then(Json::as_str) {
+                        thinking.push_str(piece);
                     }
                 }
                 "response.output_item.done" => {
@@ -1711,20 +1930,28 @@ impl Gathering {
             },
             Self::Messages {
                 said,
+                thinking,
                 blocks,
                 stop_reason,
                 started,
             } => {
                 *started = true;
-                messages_event(event, kind, said, blocks, stop_reason);
+                messages_event(event, kind, (said, thinking), blocks, stop_reason);
             }
             Self::Chat {
                 said,
                 reasoning,
                 calls,
+                kept,
                 finish_reason,
                 started,
-            } => chat_event(event, (said, reasoning), calls, finish_reason, started),
+            } => chat_event(
+                event,
+                (said, reasoning),
+                (calls, kept),
+                finish_reason,
+                started,
+            ),
         }
     }
 
@@ -1734,6 +1961,7 @@ impl Gathering {
                 said,
                 items,
                 completed,
+                ..
             } => {
                 if let Some(response) = completed {
                     return Some(response.clone());
@@ -1781,6 +2009,7 @@ impl Gathering {
                 said,
                 reasoning,
                 calls,
+                kept,
                 finish_reason,
                 started,
             } => {
@@ -1791,6 +2020,9 @@ impl Gathering {
                     ("role", Json::text("assistant")),
                     ("content", Json::text(said.clone())),
                 ]);
+                for (key, value) in kept {
+                    put(&mut message, key, value.clone());
+                }
                 if !reasoning.is_empty() {
                     put(&mut message, "reasoning", Json::text(reasoning.clone()));
                 }
@@ -1798,24 +2030,7 @@ impl Gathering {
                     put(
                         &mut message,
                         "tool_calls",
-                        Json::List(
-                            calls
-                                .iter()
-                                .map(|(id, name, arguments)| {
-                                    Json::object([
-                                        ("id", Json::text(id.clone())),
-                                        ("type", Json::text("function")),
-                                        (
-                                            "function",
-                                            Json::object([
-                                                ("name", Json::text(name.clone())),
-                                                ("arguments", Json::text(arguments.clone())),
-                                            ]),
-                                        ),
-                                    ])
-                                })
-                                .collect(),
-                        ),
+                        Json::List(calls.iter().map(ArrivingCall::spelled).collect()),
                     );
                 }
                 let mut choice = Json::object([("message", message)]);
@@ -1831,7 +2046,7 @@ impl Gathering {
 fn messages_event(
     event: &Json,
     kind: &str,
-    said: &mut String,
+    (said, thinking): (&mut String, &mut String),
     blocks: &mut Vec<(Json, String)>,
     stop_reason: &mut Option<String>,
 ) {
@@ -1869,7 +2084,11 @@ fn messages_event(
                     append(block, "text", &text);
                 }
                 Some("input_json_delta") => arguments.push_str(&piece("partial_json")),
-                Some("thinking_delta") => append(block, "thinking", &piece("thinking")),
+                Some("thinking_delta") => {
+                    let thought = piece("thinking");
+                    thinking.push_str(&thought);
+                    append(block, "thinking", &thought);
+                }
                 Some("signature_delta") => {
                     put(block, "signature", Json::text(piece("signature")));
                 }
@@ -1901,7 +2120,7 @@ fn messages_event(
 fn chat_event(
     event: &Json,
     (said, reasoning): (&mut String, &mut String),
-    calls: &mut Vec<(String, String, String)>,
+    (calls, kept): (&mut Vec<ArrivingCall>, &mut BTreeMap<String, Json>),
     finish_reason: &mut Option<String>,
     started: &mut bool,
 ) {
@@ -1925,30 +2144,47 @@ fn chat_event(
     if let Some(piece) = delta.get("reasoning").and_then(Json::as_str) {
         reasoning.push_str(piece);
     }
+    if let Json::Object(members) = delta {
+        for (key, value) in members {
+            if !matches!(
+                key.as_str(),
+                "content" | "reasoning" | "role" | "tool_calls"
+            ) {
+                kept.insert(key.clone(), value.clone());
+            }
+        }
+    }
     let Some(asked) = delta.get("tool_calls").and_then(Json::as_list) else {
         return;
     };
     for call in asked {
         let at = index_of(call);
         while calls.len() <= at {
-            calls.push((String::new(), String::new(), String::new()));
+            calls.push(ArrivingCall::default());
         }
-        let (id, name, arguments) = &mut calls[at];
+        let arriving = &mut calls[at];
         if let Some(value) = call.get("id").and_then(Json::as_str) {
-            value.clone_into(id);
+            value.clone_into(&mut arriving.id);
         }
         let function = call.get("function");
         if let Some(value) = function
             .and_then(|function| function.get("name"))
             .and_then(Json::as_str)
         {
-            value.clone_into(name);
+            value.clone_into(&mut arriving.name);
         }
         if let Some(value) = function
             .and_then(|function| function.get("arguments"))
             .and_then(Json::as_str)
         {
-            arguments.push_str(value);
+            arriving.arguments.push_str(value);
+        }
+        if let Json::Object(members) = call {
+            for (key, value) in members {
+                if !matches!(key.as_str(), "id" | "index" | "type" | "function") {
+                    arriving.kept.insert(key.clone(), value.clone());
+                }
+            }
         }
     }
 }
@@ -1992,6 +2228,71 @@ fn arguments_of(value: Option<&Json>) -> Result<Json, ConnectError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_newest_picture_is_sent_again() {
+        let drawn = |id: &str| ToolResult {
+            call_id: id.to_owned(),
+            text: "a page".to_owned(),
+            is_error: false,
+            picture: Some(Picture {
+                media_type: "image/png".to_owned(),
+                base64: id.to_owned(),
+            }),
+        };
+        let turns = vec![
+            Turn::person("look at page 1"),
+            Turn::Results {
+                results: vec![drawn("one"), ToolResult::said("words", "some words")],
+            },
+            Turn::model("I see it."),
+            Turn::Results {
+                results: vec![drawn("two"), drawn("three")],
+            },
+            Turn::model("and that one too"),
+        ];
+        let sent = without_the_old_pictures(&turns);
+        assert_eq!(sent.len(), turns.len());
+        let pictures: Vec<String> = sent
+            .iter()
+            .filter_map(|turn| match turn {
+                Turn::Results { results } => Some(results),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|result| result.picture.as_ref().map(|it| it.base64.clone()))
+            .collect();
+        assert_eq!(pictures, vec!["three".to_owned()]);
+        assert_eq!(sent[1], {
+            let Turn::Results { results } = &turns[1] else {
+                panic!("a turn of results");
+            };
+            Turn::Results {
+                results: vec![
+                    ToolResult {
+                        picture: None,
+                        ..results[0].clone()
+                    },
+                    results[1].clone(),
+                ],
+            }
+        });
+        assert_eq!(sent[0], turns[0]);
+        assert_eq!(sent[2], turns[2]);
+        assert_eq!(sent[4], turns[4]);
+    }
+
+    #[test]
+    fn a_conversation_without_pictures_is_unchanged() {
+        let turns = vec![
+            Turn::person("hello"),
+            Turn::Results {
+                results: vec![ToolResult::said("one", "done")],
+            },
+        ];
+        assert_eq!(without_the_old_pictures(&turns), turns);
+        assert_eq!(without_the_old_pictures(&[]), Vec::<Turn>::new());
+    }
 
     #[test]
     fn presets_and_transport_rules_are_explicit() {
@@ -2959,12 +3260,85 @@ mod tests {
         let mut gathering = Gathering::new(provider.wire());
         let mut partials = Vec::new();
         for line in body.lines() {
-            if gathering.line(line) {
+            if gathering.line(line)
+                && !gathering.said().is_empty()
+                && partials.last().map(String::as_str) != Some(gathering.said())
+            {
                 partials.push(gathering.said().to_owned());
             }
         }
         let whole = gathering.whole().expect("the events rebuild an answer");
         (answer(provider, &whole).expect("an answer"), partials)
+    }
+
+    #[test]
+    fn asking_for_no_thinking_is_not_the_same_as_saying_nothing() {
+        let (chat, _) = reasoning_members(Provider::Ollama, "qwen3.5:latest", Effort::None);
+        assert_eq!(
+            chat,
+            vec![("reasoning_effort", Json::text("none"))],
+            "{chat:?}"
+        );
+        let (claude, _) = reasoning_members(Provider::Anthropic, "claude-opus-5", Effort::None);
+        assert_eq!(
+            claude,
+            vec![("thinking", Json::object([("type", Json::text("disabled"))]))],
+            "{claude:?}"
+        );
+        let (openai, _) = reasoning_members(Provider::OpenAi, "gpt-5", Effort::None);
+        assert_eq!(
+            openai,
+            vec![(
+                "reasoning",
+                Json::object([("effort", Json::text("minimal"))])
+            )],
+            "{openai:?}"
+        );
+        for provider in [Provider::Ollama, Provider::Anthropic, Provider::OpenAi] {
+            let (nothing, _) = reasoning_members(provider, "a-model", Effort::Off);
+            assert!(nothing.is_empty(), "{provider:?} {nothing:?}");
+        }
+        assert_eq!(Effort::parse(Effort::None.as_str()), Some(Effort::None));
+    }
+
+    #[test]
+    fn a_model_that_is_still_thinking_says_so_and_says_nothing_else() {
+        let each = [
+            (
+                Provider::Anthropic,
+                vec![
+                    r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+                    r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"first I"}}"#,
+                    r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" read it"}}"#,
+                ],
+            ),
+            (
+                Provider::OpenAi,
+                vec![
+                    r#"data: {"type":"response.reasoning_summary_text.delta","delta":"first I"}"#,
+                    r#"data: {"type":"response.reasoning_summary_text.delta","delta":" read it"}"#,
+                ],
+            ),
+            (
+                Provider::Ollama,
+                vec![
+                    r#"data: {"choices":[{"delta":{"content":"","reasoning":"first I"}}]}"#,
+                    r#"data: {"choices":[{"delta":{"content":"","reasoning":" read it"}}]}"#,
+                ],
+            ),
+        ];
+        for (provider, body) in each {
+            let mut gathering = Gathering::new(provider.wire());
+            let mut grew = 0;
+            for line in &body {
+                if gathering.line(line) {
+                    grew += 1;
+                }
+            }
+            assert_eq!(gathering.thinking(), "first I read it", "{provider:?}");
+            assert!(gathering.said().is_empty(), "{provider:?}");
+            assert_eq!(grew, 2, "{provider:?}: every piece of thinking is progress");
+        }
     }
 
     #[test]
@@ -3047,6 +3421,162 @@ data: [DONE]
     }
 
     #[test]
+    fn a_tool_call_that_arrived_signed_is_sent_back_signed() {
+        let stream = "\
+data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"extra_content\":{\"google\":{\"thought_signature\":\"sig-xyz\"}},\"function\":{\"name\":\"read_text\",\"arguments\":\"{\\\"first\\\":1,\\\"last\\\":1}\"}}]}}]}
+data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}
+data: [DONE]
+";
+        let (reply, _) = streamed(Provider::Gemini, stream);
+        let raw = reply.raw.expect("the model's own message");
+        let signed = raw.items[0]
+            .get("tool_calls")
+            .and_then(Json::as_list)
+            .and_then(<[Json]>::first)
+            .and_then(|call| call.get("extra_content"))
+            .map(Json::write);
+        assert_eq!(
+            signed.as_deref(),
+            Some(r#"{"google":{"thought_signature":"sig-xyz"}}"#),
+            "the signature Google sent is in the message sent back"
+        );
+        assert_eq!(reply.calls[0].name, "read_text");
+        assert_eq!(reply.calls[0].id, "call_1");
+
+        let stream = "\
+data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}
+data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"extra_content\":{\"google\":{\"thought_signature\":\"sig-plain\"}}},\"finish_reason\":\"stop\"}]}
+data: [DONE]
+";
+        let (reply, _) = streamed(Provider::Gemini, stream);
+        let raw = reply.raw.expect("the model's own message");
+        assert_eq!(
+            raw.items[0]
+                .get("extra_content")
+                .map(Json::write)
+                .as_deref(),
+            Some(r#"{"google":{"thought_signature":"sig-plain"}}"#),
+            "an answer with no tool call keeps its signature too"
+        );
+        assert_eq!(reply.text, "ok");
+    }
+
+    #[test]
+    fn a_provider_that_says_how_long_to_wait_is_read() {
+        let google = r#"{"error":{"code":429,"message":"You exceeded your current quota. \n* Quota exceeded for metric: generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\nPlease retry in 18.4395459245s.","status":"RESOURCE_EXHAUSTED"}}"#;
+        let groq = "Rate limit reached for model `qwen/qwen3.8-27b` in organization `org_1` \
+                    service tier `on_demand` on input tokens per minute (ITPM): Limit 7000, \
+                    Used 6026, Requested 4769. Please try again in 32.5285714286s.";
+        assert_eq!(
+            wait_asked_for(google),
+            Some(Duration::from_secs_f64(19.439_545_924_5))
+        );
+        assert_eq!(
+            wait_asked_for(groq),
+            Some(Duration::from_secs_f64(33.528_571_428_6))
+        );
+        assert_eq!(
+            wait_asked_for(r#"{"error":{"message":"invalid api key"}}"#),
+            None
+        );
+        assert_eq!(
+            wait_asked_for("The model refused to answer in 3 sentences"),
+            None,
+            "a refusal that happens to say \u{201c}in 3 s\u{201d} is still a refusal"
+        );
+        let hour = "Rate limit reached. Please try again in 3600s.";
+        assert!(wait_asked_for(hour).is_some_and(|wait| wait > MOST_WAIT));
+    }
+
+    #[test]
+    fn an_overloaded_provider_is_asked_again() {
+        let cancel = AtomicBool::new(false);
+        let quick = [Duration::from_millis(20); TRIES];
+        let busy = "This model is currently experiencing high demand. Please try again later.";
+        let mut tries = 0;
+        let answer = again_after(
+            &cancel,
+            || {
+                tries += 1;
+                if tries < 3 {
+                    Err(ConnectError::Http(busy.to_owned()))
+                } else {
+                    Ok("the answer".to_owned())
+                }
+            },
+            quick,
+        );
+        assert_eq!(answer.unwrap(), "the answer");
+        assert_eq!(tries, 3);
+        let mut tries = 0;
+        let answer = again_after(
+            &cancel,
+            || {
+                tries += 1;
+                Err::<String, _>(ConnectError::Http(
+                    "You exceeded your current quota. Please try again later.".to_owned(),
+                ))
+            },
+            quick,
+        );
+        assert!(answer.is_err());
+        assert_eq!(tries, 1);
+        let mut tries = 0;
+        let answer = again_after(
+            &cancel,
+            || {
+                tries += 1;
+                Err::<String, _>(ConnectError::Http(busy.to_owned()))
+            },
+            quick,
+        );
+        assert!(answer.is_err());
+        assert_eq!(tries, TRIES + 1, "asked again three times, then told");
+        assert!(!overloaded_for_now("invalid api key"));
+        assert_eq!(
+            error_text(r#"[{"error": {"code": 503, "message": "busy", "status": "UNAVAILABLE"}}]"#),
+            "busy"
+        );
+    }
+
+    #[test]
+    fn a_request_told_to_wait_is_made_again() {
+        let cancel = AtomicBool::new(false);
+        let mut tries = 0;
+        let answer = again_after_a_wait(&cancel, || {
+            tries += 1;
+            if tries < 3 {
+                Err(ConnectError::Http(
+                    "Rate limit reached. Please try again in 0.05s.".to_owned(),
+                ))
+            } else {
+                Ok("the answer".to_owned())
+            }
+        });
+        assert_eq!(answer.unwrap(), "the answer");
+        assert_eq!(tries, 3);
+
+        let mut tries = 0;
+        let answer = again_after_a_wait(&cancel, || {
+            tries += 1;
+            Err::<String, _>(ConnectError::Http("invalid api key".to_owned()))
+        });
+        assert!(matches!(answer, Err(ConnectError::Http(_))));
+        assert_eq!(tries, 1, "a refusal is not tried again");
+
+        let stopped = AtomicBool::new(true);
+        let mut tries = 0;
+        let answer = again_after_a_wait(&stopped, || {
+            tries += 1;
+            Err::<String, _>(ConnectError::Http(
+                "Rate limit reached. Please try again in 0.05s.".to_owned(),
+            ))
+        });
+        assert!(matches!(answer, Err(ConnectError::Http(_))));
+        assert_eq!(tries, 1);
+    }
+
+    #[test]
     fn a_local_server_that_streams_is_seen_as_it_writes() {
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3094,7 +3624,7 @@ data: [DONE]
                 &[],
                 None,
                 &AtomicBool::new(false),
-                &mut |said| partials.push(said.to_owned()),
+                &mut |far| partials.push(far.said.to_owned()),
             )
             .unwrap();
         server.join().unwrap();
@@ -3172,7 +3702,7 @@ data: [DONE]
                     },
                 )),
                 &AtomicBool::new(false),
-                &mut |said| partials.push(said.to_owned()),
+                &mut |far| partials.push(far.said.to_owned()),
             )
             .unwrap();
         println!("partials seen: {}", partials.len());

@@ -203,17 +203,58 @@ pub enum Step {
 
 #[must_use]
 pub fn caret_at_in(stops: &[CaretStop], rows: &[usize], point: (f64, f64)) -> Option<usize> {
+    let row = nearest_row(stops, rows, point)?;
     let mut best: Option<(usize, f64)> = None;
     for (index, stop) in stops.iter().enumerate() {
-        if !rows.contains(&stop.line) {
+        if stop.line != row {
             continue;
         }
-        let distance = caret_distance(stop, point);
+        let distance = along_row_distance(stop, point);
         if best.is_none_or(|(_, shortest)| distance < shortest) {
             best = Some((index, distance));
         }
     }
     best.map(|(index, _)| index)
+}
+
+fn nearest_row(stops: &[CaretStop], rows: &[usize], point: (f64, f64)) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for &line in rows {
+        let Some(anchor) = stops.iter().find(|stop| stop.line == line) else {
+            continue;
+        };
+        let height = anchor.height();
+        let distance = if height <= 1e-9 {
+            (anchor.at[0] - point.0).hypot(anchor.at[1] - point.1)
+        } else {
+            let across = (point.0 - anchor.at[0]).mul_add(
+                anchor.up[0] / height,
+                (point.1 - anchor.at[1]) * (anchor.up[1] / height),
+            );
+            if across < 0.0 {
+                -across
+            } else if across > height {
+                across - height
+            } else {
+                0.0
+            }
+        };
+        if best.is_none_or(|(_, shortest)| distance < shortest) {
+            best = Some((line, distance));
+        }
+    }
+    best.map(|(line, _)| line)
+}
+
+fn along_row_distance(stop: &CaretStop, point: (f64, f64)) -> f64 {
+    let height = stop.height();
+    if height <= 1e-9 {
+        return (stop.at[0] - point.0).hypot(stop.at[1] - point.1);
+    }
+    let along = (-stop.up[1] / height, stop.up[0] / height);
+    (point.0 - stop.at[0])
+        .mul_add(along.0, (point.1 - stop.at[1]) * along.1)
+        .abs()
 }
 
 fn caret_distance(stop: &CaretStop, point: (f64, f64)) -> f64 {
@@ -1252,16 +1293,6 @@ pub fn resized(bounds: [f64; 4], handle: usize, dx: f64, dy: f64) -> [f64; 4] {
 }
 
 #[must_use]
-pub fn covering(one: [f64; 4], other: [f64; 4]) -> [f64; 4] {
-    [
-        one[0].min(other[0]),
-        one[1].min(other[1]),
-        one[2].max(other[2]),
-        one[3].max(other[3]),
-    ]
-}
-
-#[must_use]
 pub fn grow(bounds: [f64; 4], by: f64) -> [f64; 4] {
     [
         bounds[0] - by,
@@ -1269,6 +1300,13 @@ pub fn grow(bounds: [f64; 4], by: f64) -> [f64; 4] {
         bounds[2] + by,
         bounds[3] + by,
     ]
+}
+
+const WIDTH_SLACK: f64 = 0.5;
+
+#[must_use]
+pub fn frame_width_changed(started: [f64; 4], now: [f64; 4]) -> bool {
+    ((now[2] - now[0]) - (started[2] - started[0])).abs() > WIDTH_SLACK
 }
 
 #[must_use]
@@ -1497,8 +1535,8 @@ mod tests {
 
     use super::{
         FRAME_INSET, HANDLE_REACH, MARGIN, Placement, Proportions, Quad, RunBox, SMALLEST_FRAME,
-        Step, block_at, caret_at, caret_step, covering, covers, draw_window, frame_of, grow,
-        handle_at, handles, on_the_ink, resized, run_at, selection_between, selection_quad,
+        Step, block_at, caret_at, caret_step, covers, draw_window, frame_of, frame_width_changed,
+        grow, handle_at, handles, on_the_ink, resized, run_at, selection_between, selection_quad,
         size_at, standing_block_at, stands, texture_box, toolbar_at, visible_after, zoom_anchor,
     };
 
@@ -2437,17 +2475,24 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_shrunk_onto_its_ink_stops_at_the_ink_and_still_holds_it() {
+    fn a_frame_may_be_dragged_narrower_than_its_own_text() {
         let ink = [100.0, 100.0, 300.0, 200.0];
         let frame = [90.0, 90.0, 400.0, 210.0];
+        let pulled = resized(frame, 5, -200.0, 0.0);
+        assert!(alike(pulled, [90.0, 90.0, 200.0, 210.0]), "{pulled:?}");
+        assert!(
+            pulled[2] < ink[2],
+            "the frame did not reach inside the text: {pulled:?}"
+        );
+    }
 
-        let pulled = covering(resized(frame, 5, -200.0, 0.0), ink);
-        assert!(alike(pulled, [90.0, 90.0, 300.0, 210.0]), "{pulled:?}");
-
-        assert!(alike(
-            covering(resized(frame, 5, 60.0, 0.0), ink),
-            [90.0, 90.0, 460.0, 210.0]
-        ));
+    #[test]
+    fn a_frames_width_change_is_told_from_a_slide_and_from_rounding() {
+        let started = [10.0, 10.0, 110.0, 60.0];
+        assert!(frame_width_changed(started, [10.0, 10.0, 140.0, 60.0]));
+        assert!(!frame_width_changed(started, [40.0, 10.0, 140.0, 60.0]));
+        assert!(!frame_width_changed(started, [10.0, 10.0, 110.2, 60.0]));
+        assert!(!frame_width_changed(started, [10.0, 10.0, 110.0, 260.0]));
     }
 
     #[test]
@@ -3045,6 +3090,143 @@ mod scoped_caret_tests {
         let inside = caret_step_in(&stops, &[0, 1], last_row_of_a, Step::Up);
         assert_ne!(inside, last_row_of_a);
         assert_eq!(stops[inside].line, 0);
+    }
+
+    fn three_rows() -> Vec<CaretStop> {
+        let mut stops = Vec::new();
+        let mut row = |line: usize, y: f64, xs: &[f64]| {
+            for (offset, &x) in xs.iter().enumerate() {
+                stops.push(CaretStop {
+                    line,
+                    offset,
+                    at: [x, y],
+                    up: [0.0, -12.0],
+                });
+            }
+        };
+        row(0, 30.0, &[10.0, 30.0, 50.0, 70.0, 90.0]);
+        row(1, 60.0, &[10.0, 30.0]);
+        row(2, 90.0, &[10.0, 30.0, 50.0, 70.0, 90.0]);
+        stops
+    }
+
+    #[test]
+    fn a_click_far_out_in_blank_space_lands_on_the_row_it_is_level_with() {
+        let stops = three_rows();
+        let far_right = (200.0, 54.0);
+        let landed = caret_at_in(&stops, &[0, 1, 2], far_right).expect("a stop of this block");
+        assert_eq!(
+            stops[landed].line, 1,
+            "lands on the row it is level with, not a longer neighbour"
+        );
+        assert_eq!(
+            stops[landed].offset, 1,
+            "and on that row's own last stop, the nearest one along it"
+        );
+    }
+
+    #[test]
+    fn control_the_old_nearest_middle_rule_answered_a_different_row() {
+        let stops = three_rows();
+        let far_right = (200.0, 54.0);
+        let middle_of = |stop: &CaretStop| {
+            (
+                stop.up[0].mul_add(0.5, stop.at[0]),
+                stop.up[1].mul_add(0.5, stop.at[1]),
+            )
+        };
+        let old = stops
+            .iter()
+            .filter(|stop| [0, 1, 2].contains(&stop.line))
+            .min_by(|a, b| {
+                let da = middle_of(a);
+                let db = middle_of(b);
+                let dist_a = (da.0 - far_right.0).hypot(da.1 - far_right.1);
+                let dist_b = (db.0 - far_right.0).hypot(db.1 - far_right.1);
+                dist_a.total_cmp(&dist_b)
+            })
+            .expect("some stop of the block");
+        assert_ne!(
+            old.line, 1,
+            "the instrument: the old rule does not pick the middle row for this click"
+        );
+
+        let landed = caret_at_in(&stops, &[0, 1, 2], far_right).expect("a stop of this block");
+        assert_eq!(
+            stops[landed].line, 1,
+            "the fixed rule picks the row the click is level with, where the old one did not"
+        );
+    }
+
+    #[test]
+    fn a_click_outside_every_band_lands_on_the_nearest_end_row() {
+        let stops = three_rows();
+        let above = caret_at_in(&stops, &[0, 1, 2], (10.0, -50.0)).expect("a stop");
+        assert_eq!(stops[above].line, 0, "above every row: the first");
+        let below = caret_at_in(&stops, &[0, 1, 2], (10.0, 500.0)).expect("a stop");
+        assert_eq!(stops[below].line, 2, "below every row: the last");
+    }
+
+    #[test]
+    fn a_click_in_the_gap_between_two_rows_goes_to_the_nearer() {
+        let stops = three_rows();
+        let nearer_top = caret_at_in(&stops, &[0, 1, 2], (10.0, 35.0)).expect("a stop");
+        assert_eq!(stops[nearer_top].line, 0, "closer to row 0's band");
+        let nearer_bottom = caret_at_in(&stops, &[0, 1, 2], (10.0, 45.0)).expect("a stop");
+        assert_eq!(stops[nearer_bottom].line, 1, "closer to row 1's band");
+    }
+
+    #[test]
+    fn a_click_in_the_middle_of_a_rows_own_text_still_lands_where_it_always_did() {
+        let stops = three_rows();
+        let landed = caret_at_in(&stops, &[0, 1, 2], (52.0, 24.0)).expect("a stop");
+        assert_eq!(stops[landed].line, 0);
+        assert_eq!(
+            stops[landed].offset, 2,
+            "nearest the click along the row, same as before"
+        );
+    }
+
+    #[test]
+    fn a_row_set_at_an_angle_behaves_the_same_in_its_own_frame() {
+        let theta = 20.0_f64.to_radians();
+        let height = 12.0;
+        let up = [height * theta.sin(), -height * theta.cos()];
+        let along = [-up[1] / height, up[0] / height];
+        let base = [100.0, 200.0];
+
+        let mut stops = Vec::new();
+        let mut push_row = |line: usize, row_base: [f64; 2], count: u32| {
+            for offset in 0..count {
+                let d = 20.0 * f64::from(offset);
+                stops.push(CaretStop {
+                    line,
+                    offset: offset as usize,
+                    at: [
+                        d.mul_add(along[0], row_base[0]),
+                        d.mul_add(along[1], row_base[1]),
+                    ],
+                    up,
+                });
+            }
+        };
+        push_row(0, base, 5);
+        let row1_base = [
+            (-30.0f64 / height).mul_add(up[0], base[0]),
+            (-30.0f64 / height).mul_add(up[1], base[1]),
+        ];
+        push_row(1, row1_base, 2);
+
+        let far = [
+            300.0f64.mul_add(along[0], row1_base[0]),
+            300.0f64.mul_add(along[1], row1_base[1]),
+        ];
+        let landed = caret_at_in(&stops, &[0, 1], (far[0], far[1])).expect("a stop");
+        assert_eq!(
+            stops[landed].line, 1,
+            "lands on the angled row it is level with"
+        );
+        assert_eq!(stops[landed].offset, 1, "and that row's own last stop");
     }
 
     #[test]

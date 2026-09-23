@@ -27,6 +27,7 @@ type Regrouped = (usize, Option<Arc<Grouping>>, Option<Arc<Grouping>>);
 
 pub use extract::{blank_document, extract_pages};
 pub use gesture::{GestureError, Intent};
+pub use pdf_syntax::inflate_zlib;
 pub use pictures::pictures_into_pdf;
 pub use select::{
     CandidateStack, Gesture, HitCandidate, InspectError, Inspection, ObjectRef, RevisionId,

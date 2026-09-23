@@ -194,12 +194,61 @@ impl Window {
         job
     }
 
+    fn sense_toolbar_surface(&self, ui: &mut egui::Ui, nominal: egui::Rect) {
+        let rect = self.toolbar_area.unwrap_or(nominal);
+        ui.interact(
+            rect,
+            ui.id().with(TOOLBAR_SURFACE),
+            egui::Sense::click_and_drag(),
+        );
+    }
+
+    fn ordering_buttons(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        let can_order = self.can_order();
+        let say = |command| pdf_app::wording::Message::Command(command).say(lang);
+        let mut asked = None;
+        for (icon, command, order) in [
+            (
+                crate::icons::Icon::BringToFront,
+                pdf_app::wording::Command::BringToFront,
+                pdf_edit::Stacking::ToFront,
+            ),
+            (
+                crate::icons::Icon::BringForward,
+                pdf_app::wording::Command::BringForward,
+                pdf_edit::Stacking::Forward,
+            ),
+            (
+                crate::icons::Icon::SendBackward,
+                pdf_app::wording::Command::SendBackward,
+                pdf_edit::Stacking::Backward,
+            ),
+            (
+                crate::icons::Icon::SendToBack,
+                pdf_app::wording::Command::SendToBack,
+                pdf_edit::Stacking::ToBack,
+            ),
+        ] {
+            let clicked = crate::format::icon_button(ui, icon, &say(command), false, can_order)
+                .on_disabled_hover_text(Message::OrderingWaitsForThePage.say(lang))
+                .clicked();
+            if clicked {
+                asked = Some(order);
+            }
+        }
+        if let Some(order) = asked {
+            self.put_in_order(order);
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one popup, drawn in the three states it has: framed, selected, and being typed in"
     )]
     pub(crate) fn block_toolbar(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
+        self.toolbar_area = None;
         if !self.show_frames {
             return;
         }
@@ -290,7 +339,15 @@ impl Window {
             && self.selection().is_some_and(|(line, from, to)| {
                 !pdf_cli::selection_is_actionable(&overlay.clusters, line, from, to)
             });
-        let size = (760.0, if warning { 62.0 } else { 44.0 });
+        let rows_height = 2.0 * crate::format::CONTROL_HEIGHT + ROW_GAP + 2.0 * POPUP_MARGIN;
+        let size = (
+            760.0,
+            if warning {
+                rows_height + 18.0
+            } else {
+                rows_height
+            },
+        );
         let on_screen = box_on_screen(laid.placed, bounds);
         let view = ui.clip_rect();
         let (x, y) = toolbar_at(
@@ -336,31 +393,40 @@ impl Window {
             .with(&next);
         let mut wanted = None;
         let mut delete = false;
-        ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+        let showing = crate::format::Showing {
+            font: font.as_deref(),
+            size: size_on_page,
+            spacing,
+            fill,
+            pressed,
+            paragraph,
+        };
+        self.sense_toolbar_surface(ui, area);
+        let drawn = ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
             toolbar_frame(ui).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    wanted = self.font_row(
-                        ui,
-                        &crate::format::Showing {
-                            font: font.as_deref(),
-                            size: size_on_page,
-                            spacing,
-                            fill,
-                            pressed,
-                            paragraph,
-                        },
-                    );
-                    if !editing {
-                        crate::format::rule(ui);
-                        delete = crate::format::icon_button(
-                            ui,
-                            crate::icons::Icon::Delete,
-                            &Message::DeleteBlockHelp.say(lang),
-                            false,
-                            true,
-                        )
-                        .clicked();
-                    }
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = ROW_GAP;
+                    ui.horizontal(|ui| {
+                        wanted = self.text_row(ui, &showing);
+                    });
+                    ui.horizontal(|ui| {
+                        if let Some(asked) = self.paragraph_row(ui, &showing) {
+                            wanted = Some(asked);
+                        }
+                        if offers_ordering(Some(Offer::Block), editing) {
+                            crate::format::rule(ui);
+                            self.ordering_buttons(ui);
+                            crate::format::rule(ui);
+                            delete = crate::format::icon_button(
+                                ui,
+                                crate::icons::Icon::Delete,
+                                &Message::DeleteBlockHelp.say(lang),
+                                false,
+                                true,
+                            )
+                            .clicked();
+                        }
+                    });
                 });
                 if warning {
                     ui.label(
@@ -369,8 +435,9 @@ impl Window {
                             .color(ui.visuals().warn_fg_color),
                     );
                 }
-            });
+            })
         });
+        self.toolbar_area = Some(drawn.inner.response.rect);
         if delete {
             self.delete_the_object();
             return;
@@ -683,7 +750,8 @@ impl Window {
             .unwrap_or_else(|| egui::pos2(x as f32, y as f32));
         let area = egui::Rect::from_min_size(corner, egui::vec2(size.0, size.1));
         let mut asked = false;
-        ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+        self.sense_toolbar_surface(ui, area);
+        let drawn = ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
             toolbar_frame(ui).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     asked = crate::format::icon_button(
@@ -694,9 +762,14 @@ impl Window {
                         true,
                     )
                     .clicked();
+                    if offers_ordering(Some(offer), false) {
+                        crate::format::rule(ui);
+                        self.ordering_buttons(ui);
+                    }
                 });
-            });
+            })
         });
+        self.toolbar_area = Some(drawn.inner.response.rect);
         if asked {
             let job = self.editor.begin_flow_round(page, bounds);
             self.send(job);
@@ -734,7 +807,8 @@ impl Window {
             .unwrap_or_else(|| egui::pos2(x as f32, y as f32));
         let area = egui::Rect::from_min_size(corner, egui::vec2(size.0, size.1));
         let mut asked = false;
-        ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+        self.sense_toolbar_surface(ui, area);
+        let drawn = ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
             toolbar_frame(ui).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     asked = crate::format::icon_button(
@@ -746,8 +820,9 @@ impl Window {
                     )
                     .clicked();
                 });
-            });
+            })
         });
+        self.toolbar_area = Some(drawn.inner.response.rect);
         if asked {
             self.delete_the_object();
         }
@@ -822,7 +897,8 @@ impl Window {
         let area = egui::Rect::from_min_size(corner, egui::vec2(size.0, size.1));
         let styling = draft.styling();
         let mut wanted = None;
-        ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+        self.sense_toolbar_surface(ui, area);
+        let drawn = ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
             toolbar_frame(ui).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     wanted = self.font_row(
@@ -844,8 +920,9 @@ impl Window {
                         },
                     );
                 });
-            });
+            })
         });
+        self.toolbar_area = Some(drawn.inner.response.rect);
         if let Some(wanted) = wanted
             && let Some(draft) = self.text_draft.as_mut()
         {
@@ -974,6 +1051,101 @@ pub(crate) fn toolbar_frame(ui: &mut egui::Ui) -> egui::Frame {
         .corner_radius(8.0)
 }
 
+const TOOLBAR_SURFACE: &str = "toolbar-surface";
+
+pub(crate) fn press_belongs_to_the_toolbar(area: Option<egui::Rect>, at: egui::Pos2) -> bool {
+    area.is_some_and(|area| area.contains(at))
+}
+
+pub(crate) fn toolbar_takes_the_pointer(
+    area: Option<egui::Rect>,
+    pressed_at: Option<egui::Pos2>,
+    carrying: bool,
+) -> bool {
+    !carrying && pressed_at.is_some_and(|at| press_belongs_to_the_toolbar(area, at))
+}
+
+#[cfg(test)]
+mod toolbar_hit_area_tests {
+    use eframe::egui;
+
+    use super::{press_belongs_to_the_toolbar, toolbar_takes_the_pointer};
+
+    fn toolbar() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(68.0, 40.0))
+    }
+
+    #[test]
+    fn a_press_on_a_button_belongs_to_the_toolbar() {
+        let area = Some(toolbar());
+        assert!(press_belongs_to_the_toolbar(area, egui::pos2(112.0, 120.0)));
+    }
+
+    #[test]
+    fn a_press_in_the_padding_between_two_buttons_still_belongs_to_the_toolbar() {
+        let area = Some(toolbar());
+        assert!(
+            press_belongs_to_the_toolbar(area, egui::pos2(137.0, 120.0)),
+            "the whole popup must answer, not only its buttons"
+        );
+    }
+
+    #[test]
+    fn a_press_one_pixel_inside_the_edge_belongs_to_the_toolbar() {
+        let area = Some(toolbar());
+        assert!(press_belongs_to_the_toolbar(area, egui::pos2(167.0, 139.0)));
+    }
+
+    #[test]
+    fn a_press_one_pixel_outside_the_edge_does_not_belong_to_the_toolbar() {
+        let area = Some(toolbar());
+        assert!(!press_belongs_to_the_toolbar(
+            area,
+            egui::pos2(169.0, 120.0)
+        ));
+    }
+
+    #[test]
+    fn with_no_toolbar_nothing_belongs_to_it() {
+        assert!(!press_belongs_to_the_toolbar(
+            None,
+            egui::pos2(120.0, 120.0)
+        ));
+    }
+
+    #[test]
+    fn a_drag_let_go_over_the_toolbar_stays_the_pages() {
+        let area = Some(toolbar());
+        let over = Some(egui::pos2(137.0, 120.0));
+        assert!(!toolbar_takes_the_pointer(area, over, true));
+        assert!(toolbar_takes_the_pointer(area, over, false), "the control");
+        assert!(
+            press_belongs_to_the_toolbar(area, egui::pos2(137.0, 120.0)),
+            "where the pointer is, alone, would have given the drag away"
+        );
+    }
+
+    #[test]
+    fn a_press_is_judged_where_it_began() {
+        let area = Some(toolbar());
+        assert!(!toolbar_takes_the_pointer(
+            area,
+            Some(egui::pos2(80.0, 120.0)),
+            false
+        ));
+        assert!(toolbar_takes_the_pointer(
+            area,
+            Some(egui::pos2(112.0, 120.0)),
+            false
+        ));
+        assert!(!toolbar_takes_the_pointer(area, None, false), "no press");
+    }
+}
+
+const ROW_GAP: f32 = 10.0;
+
+const POPUP_MARGIN: f32 = 6.0;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Offer {
     Block,
@@ -991,14 +1163,21 @@ pub(crate) const fn offer_for(members: usize, on_an_object: bool) -> Offer {
     }
 }
 
+pub(crate) const fn offers_ordering(offer: Option<Offer>, editing: bool) -> bool {
+    !editing && matches!(offer, Some(Offer::Block | Offer::Object))
+}
+
 pub(crate) const fn controls_in(offer: Offer) -> usize {
     match offer {
-        Offer::Group | Offer::Object => 1,
+        Offer::Group => 1,
+        Offer::Object => 1 + ORDER_CONTROLS,
         Offer::Block => BLOCK_CONTROLS,
     }
 }
 
-const BLOCK_CONTROLS: usize = 16;
+const BLOCK_CONTROLS: usize = 20;
+
+const ORDER_CONTROLS: usize = 4;
 
 const ONE_CONTROL: f32 = 52.0;
 
@@ -1009,7 +1188,7 @@ fn stem_on_screen(placed: pdf_app::view::Placement) -> f64 {
 
 #[cfg(test)]
 mod offer_tests {
-    use super::{BLOCK_CONTROLS, Offer, controls_in, offer_for};
+    use super::{BLOCK_CONTROLS, ORDER_CONTROLS, Offer, controls_in, offer_for};
 
     #[test]
     fn several_things_chosen_are_offered_one_control() {
@@ -1033,11 +1212,46 @@ mod offer_tests {
         assert_eq!(offer_for(1, false), Offer::Block);
         assert_eq!(controls_in(offer_for(1, false)), BLOCK_CONTROLS);
         assert_eq!(offer_for(1, true), Offer::Object);
-        assert_eq!(controls_in(offer_for(1, true)), 1);
+        assert_eq!(controls_in(offer_for(1, true)), 1 + ORDER_CONTROLS);
         assert_ne!(
             controls_in(offer_for(1, false)),
             controls_in(offer_for(6, false)),
             "one thing and six were offered the same toolbar"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ordering_offer_tests {
+    use super::{Offer, offers_ordering};
+
+    #[test]
+    fn only_one_block_or_one_object_not_being_typed_in_offers_ordering() {
+        assert!(
+            offers_ordering(Some(Offer::Block), false),
+            "a block, at rest"
+        );
+        assert!(offers_ordering(Some(Offer::Object), false), "a picture");
+        assert!(
+            !offers_ordering(Some(Offer::Block), true),
+            "a caret in the block -- the owner: \"while we are typing that \
+             button should not be there\""
+        );
+        assert!(
+            !offers_ordering(Some(Offer::Group), false),
+            "several things chosen keep Delete alone"
+        );
+        assert!(
+            !offers_ordering(None, false),
+            "nothing pointed at offers nothing"
+        );
+    }
+
+    #[test]
+    fn editing_is_the_one_thing_that_changes_the_answer_for_a_block() {
+        assert_ne!(
+            offers_ordering(Some(Offer::Block), false),
+            offers_ordering(Some(Offer::Block), true)
         );
     }
 }

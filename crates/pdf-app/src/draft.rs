@@ -333,6 +333,21 @@ impl Input {
         Some(draft)
     }
 
+    pub fn abandon(&mut self) {
+        let (mut lost, _) = self.drain_queue();
+        if let Some(flight) = self.flight.take() {
+            self.accounting.commands_refused += flight.presses;
+            lost.push_str(&flight.text);
+        }
+        if let Some(draft) = self.draft.take() {
+            lost.push_str(&draft.text);
+        }
+        if let Some(draft) = self.parked.take() {
+            lost.push_str(&draft.text);
+        }
+        self.accounting.discarded += chars(&lost);
+    }
+
     #[must_use]
     pub fn draft(&self) -> Option<&Draft> {
         self.draft.as_ref().or(self.parked.as_ref())
@@ -764,6 +779,73 @@ mod tests {
         );
         assert_eq!(input.accounting().discarded, 1);
         assert!(input.balanced());
+    }
+
+    #[test]
+    fn abandon_drops_a_queued_command_and_whatever_is_in_flight() {
+        let mut input = Input::default();
+        input.accept("AB");
+        input.send(AT, 4).unwrap();
+        input
+            .press(Intent::Caret {
+                step: Step::Left,
+                extend: false,
+            })
+            .unwrap();
+        assert!(input.pending());
+
+        input.abandon();
+
+        assert!(!input.pending(), "the flight and the queue are both gone");
+        assert_eq!(input.draft(), None);
+        assert_eq!(input.accounting().discarded, 2, "the flight's two letters");
+        assert_eq!(
+            input.accounting().commands_refused,
+            1,
+            "the queued caret move, never carried out"
+        );
+        assert!(input.balanced());
+    }
+
+    #[test]
+    fn abandon_drops_the_draft_and_the_one_parked_before_it() {
+        let mut input = Input::default();
+        input.accept("P");
+        input.send(AT, 4).unwrap();
+        input.landed(Landing::Refused(plain("no")));
+        input.park();
+        assert_eq!(input.draft().unwrap().text, "P");
+
+        let elsewhere = Target {
+            page: 0,
+            block: 9,
+            from: (0, 0),
+            to: (0, 0),
+        };
+        input.accept("Q");
+        input.send(elsewhere, 4).unwrap();
+        input.landed(Landing::Refused(plain("no again")));
+        assert_eq!(
+            input.draft().unwrap().text,
+            "Q",
+            "the new draft, not the parked one"
+        );
+
+        input.abandon();
+
+        assert_eq!(input.draft(), None);
+        assert_eq!(
+            input.accounting().discarded,
+            2,
+            "\"P\" parked and \"Q\" drafted"
+        );
+        assert!(input.balanced());
+        let mut only_active = Input::default();
+        only_active.accept("Q");
+        only_active.send(elsewhere, 4).unwrap();
+        only_active.landed(Landing::Refused(plain("no again")));
+        only_active.abandon();
+        assert_eq!(only_active.accounting().discarded, 1);
     }
 
     #[test]

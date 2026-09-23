@@ -86,6 +86,7 @@ pub fn append_object_writes(
         TrailerExtras::default(),
         XrefLimits::default(),
     )
+    .map(Arc::<[u8]>::from)
 }
 
 pub(crate) fn append_object_writes_bounded(
@@ -94,7 +95,7 @@ pub(crate) fn append_object_writes_bounded(
     policy: ProtectionPolicy<'_>,
     extras: TrailerExtras,
     limits: XrefLimits,
-) -> Result<Arc<[u8]>, IncrementalWriteError> {
+) -> Result<Vec<u8>, IncrementalWriteError> {
     if writes.is_empty() {
         return Err(IncrementalWriteError::NothingToWrite);
     }
@@ -120,7 +121,8 @@ pub(crate) fn append_object_writes_bounded(
 
     let security = write_security(source, &chain, &index, encrypt.is_some(), policy)?;
 
-    let mut out = source.as_bytes().to_vec();
+    let mut out = Vec::with_capacity(source.len() + source.len() / 16 + 4096);
+    out.extend_from_slice(source.as_bytes());
     if !out.ends_with(b"\n") {
         out.push(b'\n');
     }
@@ -184,7 +186,7 @@ pub(crate) fn append_object_writes_bounded(
         )
         .as_bytes(),
     );
-    Ok(Arc::<[u8]>::from(out))
+    Ok(out)
 }
 
 fn write_security(
@@ -259,7 +261,8 @@ pub(crate) fn compact_session(
         })
         .collect();
     changed.sort_by_key(|reference| (reference.object_number(), reference.generation()));
-    let mut out = original.as_bytes().to_vec();
+    let mut out = Vec::with_capacity(current.len() + 4096);
+    out.extend_from_slice(original.as_bytes());
     out.push(b'\n');
     let mut placed = Vec::new();
     for reference in changed {
@@ -307,7 +310,7 @@ pub(crate) fn compact_session(
         )
         .as_bytes(),
     );
-    let compact = ByteStore::new(current.id(), out);
+    let compact = ByteStore::owning(current.id(), out);
     parse_revision_chain_strict(&compact, XrefLimits::default())
         .map_err(IncrementalWriteError::Revisions)?;
     Ok(compact)

@@ -1,9 +1,11 @@
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 
 use pdf_bytes::ByteStore;
 use pdf_paint::{Matrix, PaintAtomKind, PaintGraph, Point};
 use pdf_syntax::Reference;
 
+use crate::carry::Copier;
 use crate::copied::{Copied, CopiedObject, CopiedRun, CopiedTextElement, plain};
 use crate::new_path::NewPath;
 use crate::plan::{
@@ -23,6 +25,7 @@ pub(crate) fn plan_paste(
     page_index: usize,
     copied: &Copied,
     (dx, dy): (f64, f64),
+    elsewhere: Option<&ByteStore>,
 ) -> Result<Plan, SpikeError> {
     if copied.objects.is_empty() {
         return Err(refused("there is nothing to paste"));
@@ -30,7 +33,7 @@ pub(crate) fn plan_paste(
     if !(dx.is_finite() && dy.is_finite()) {
         return Err(refused("a paste lands at a place"));
     }
-    let shifted: Vec<CopiedObject> = copied
+    let mut shifted: Vec<CopiedObject> = copied
         .objects
         .iter()
         .map(|object| shift(object, dx, dy))
@@ -38,6 +41,17 @@ pub(crate) fn plan_paste(
     for object in &shifted {
         checked(object)?;
     }
+    let carried = carry_across(source, page.restrictions, copied, &mut shifted, elsewhere)?;
+    let with_carried;
+    let carried_page;
+    let (source, page) = if carried.writes.is_empty() {
+        (source, page)
+    } else {
+        with_carried =
+            crate::block_rewrite::commit_writes(source, &carried.writes, page.restrictions)?;
+        carried_page = read_again(&with_carried, page_index, page)?;
+        (&with_carried, beside(&carried_page, page))
+    };
 
     let stream = last_stream(&page)?;
     let standing = standing_state(&page, stream)?;
@@ -52,35 +66,25 @@ pub(crate) fn plan_paste(
     } else {
         Some(naming.state(PLAIN_STATE)?)
     };
-    let mut names = Vec::with_capacity(shifted.len());
-    for object in &shifted {
-        names.push(match object {
-            CopiedObject::Picture { image, .. } => naming.resource((b"/XObject", "Im"), *image)?,
-            CopiedObject::Text(run) => naming.resource((b"/Font", "F"), run.font)?,
-            CopiedObject::Drawing { stroke, .. } => {
-                match crate::new_path::gstate_entries(*stroke) {
-                    Some(entries) => naming.state(&entries)?,
-                    None => String::new(),
-                }
-            }
-        });
-    }
+    let names = named_in_the_page(&mut naming, &shifted)?;
     let Naming {
-        mut writes,
+        writes: for_resources,
         document,
         ..
     } = naming;
+    let mut writes = carried.writes;
+    writes.extend(for_resources);
 
-    let carried;
+    let named_page;
     let page = if writes.is_empty() {
         page
     } else {
-        carried =
+        named_page =
             crate::spike_move_text::read_page(&document, page_index, page.credential, page.fonts)?;
         PlannerPage {
-            program: &carried.program,
-            operations: &carried.operations,
-            graph: &carried.graph,
+            program: &named_page.program,
+            operations: &named_page.operations,
+            graph: &named_page.graph,
             fonts: page.fonts,
             restrictions: page.restrictions,
             credential: page.credential,
@@ -128,6 +132,102 @@ const fn translation(dx: f64, dy: f64) -> Matrix {
         e: dx,
         f: dy,
     }
+}
+
+fn named_in_the_page(
+    naming: &mut Naming<'_>,
+    shifted: &[CopiedObject],
+) -> Result<Vec<String>, SpikeError> {
+    let mut names = Vec::with_capacity(shifted.len());
+    for object in shifted {
+        names.push(match object {
+            CopiedObject::Picture { image, .. } => naming.resource((b"/XObject", "Im"), *image)?,
+            CopiedObject::Text(run) => naming.resource((b"/Font", "F"), run.font)?,
+            CopiedObject::Drawing { stroke, .. } => {
+                match crate::new_path::gstate_entries(*stroke) {
+                    Some(entries) => naming.state(&entries)?,
+                    None => String::new(),
+                }
+            }
+        });
+    }
+    Ok(names)
+}
+
+fn read_again(
+    source: &ByteStore,
+    page_index: usize,
+    had: PlannerPage<'_>,
+) -> Result<crate::spike_move_text::PageReading, SpikeError> {
+    crate::spike_move_text::read_page(source, page_index, had.credential, had.fonts)
+}
+
+fn beside<'a>(
+    read: &'a crate::spike_move_text::PageReading,
+    had: PlannerPage<'a>,
+) -> PlannerPage<'a> {
+    PlannerPage {
+        program: &read.program,
+        operations: &read.operations,
+        graph: &read.graph,
+        fonts: had.fonts,
+        restrictions: had.restrictions,
+        credential: had.credential,
+    }
+}
+
+struct Carried {
+    writes: Vec<PlannedWrite>,
+}
+
+fn carry_across(
+    source: &ByteStore,
+    restrictions: crate::Restrictions,
+    copied: &Copied,
+    shifted: &mut [CopiedObject],
+    elsewhere: Option<&ByteStore>,
+) -> Result<Carried, SpikeError> {
+    if copied.from == source.id() {
+        return Ok(Carried { writes: Vec::new() });
+    }
+    let Some(other) = elsewhere else {
+        return Err(refused(
+            "this was copied from another document, whose objects are not here to be pasted",
+        ));
+    };
+    let _ = restrictions;
+    if other.id().get() == source.id().get() {
+        return Err(refused(
+            "the document this was copied from is named as this one, so a span of either would resolve in the other",
+        ));
+    }
+    let (index, protected) = crate::previous::readable_index(other, b"")
+        .ok_or_else(|| refused("the document this was copied from cannot be read"))?;
+    if protected.is_some() {
+        return Err(refused(
+            "a copy from a protected document cannot be pasted into another one yet",
+        ));
+    }
+    let mut carrier = Copier {
+        other,
+        index: &index,
+        tree: HashSet::new(),
+        numbers: HashMap::new(),
+        queue: VecDeque::new(),
+        next: crate::block_rewrite::next_object_number(source)?,
+        writes: Vec::new(),
+    };
+    for object in shifted.iter_mut() {
+        match object {
+            CopiedObject::Picture { image, .. } => *image = carrier.number_of(*image)?,
+            CopiedObject::Text(run) => run.font = carrier.number_of(run.font)?,
+            CopiedObject::Drawing { .. } => {}
+        }
+    }
+    carrier.copy_reached()?;
+    Ok(Carried {
+        writes: carrier.writes,
+    })
 }
 
 fn shift(object: &CopiedObject, dx: f64, dy: f64) -> CopiedObject {
@@ -746,12 +846,109 @@ mod tests {
             .count()
     }
 
+    fn a_bare_page() -> ByteStore {
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >>".to_vec(),
+            b"<< /Length 0 >>\nstream\n\nendstream".to_vec(),
+        ];
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            bytes.extend_from_slice(object);
+            bytes.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        ByteStore::new(SourceId::new(1301), Arc::<[u8]>::from(bytes))
+    }
+
+    #[test]
+    fn a_copy_is_pasted_into_another_document_carrying_what_it_names() {
+        let from = three_kinds();
+        let read = read_page(&from, 0, b"", None).expect("reads");
+        let copied = copy_from(&read.graph, &anchors(&read.graph), from.id()).expect("copies");
+        assert_eq!(copied.objects.len(), 3, "a run, a line and a picture");
+
+        let into = a_bare_page();
+        assert_eq!(images(&into), 0, "the second document starts with no image");
+        let bare = read_page(&into, 0, b"", None).expect("reads");
+        assert!(bare.graph.atoms.is_empty(), "and paints nothing");
+
+        let refused = plan_command_with_fonts(
+            &into,
+            &Command::PasteObjects {
+                page_index: 0,
+                copied: copied.clone(),
+                dx: 0.0,
+                dy: 0.0,
+                elsewhere: None,
+            },
+            b"",
+            None,
+        );
+        assert!(
+            refused.is_err(),
+            "a copy from elsewhere must not be pasted blind: {refused:?}"
+        );
+
+        let after = done(
+            &into,
+            &Command::PasteObjects {
+                page_index: 0,
+                copied,
+                dx: 0.0,
+                dy: 0.0,
+                elsewhere: Some(from.clone()),
+            },
+        );
+        let now = read_page(&after, 0, b"", None).expect("reads");
+        assert_eq!(
+            now.graph.atoms.len(),
+            3,
+            "the run, the line and the picture are painted in the second document"
+        );
+        assert_eq!(
+            glyph_origins(&now.graph),
+            glyph_origins(&read.graph),
+            "the same glyphs stand where they stood"
+        );
+        assert_eq!(
+            images(&after),
+            1,
+            "the image was carried across, once, into a file that had none"
+        );
+        assert!(
+            after
+                .as_bytes()
+                .windows(b"/FontFile3".len())
+                .any(|w| w == b"/FontFile3"),
+            "the font program came with it, so the second file stands on its own"
+        );
+    }
+
     #[test]
     fn a_copy_pasted_on_its_own_page_names_what_the_page_already_has() {
         let source = three_kinds();
         let before = read_page(&source, 0, b"", None).expect("reads");
         assert_eq!(before.graph.atoms.len(), 3, "a run, a line and a picture");
-        let copied = copy_from(&before.graph, &anchors(&before.graph)).expect("copies");
+        let copied =
+            copy_from(&before.graph, &anchors(&before.graph), source.id()).expect("copies");
         assert_eq!(copied.objects.len(), 3);
         let plan = plan_command_with_fonts(
             &source,
@@ -760,6 +957,7 @@ mod tests {
                 copied,
                 dx: 15.0,
                 dy: -20.0,
+                elsewhere: None,
             },
             b"",
             None,
@@ -815,7 +1013,8 @@ mod tests {
     fn a_copy_pasted_on_another_page_is_named_there_and_copied_nowhere() {
         let source = three_kinds();
         let before = read_page(&source, 0, b"", None).expect("reads");
-        let copied = copy_from(&before.graph, &anchors(&before.graph)).expect("copies");
+        let copied =
+            copy_from(&before.graph, &anchors(&before.graph), source.id()).expect("copies");
         let plan = plan_command_with_fonts(
             &source,
             &Command::PasteObjects {
@@ -823,6 +1022,7 @@ mod tests {
                 copied,
                 dx: 0.0,
                 dy: 0.0,
+                elsewhere: None,
             },
             b"",
             None,
@@ -869,7 +1069,8 @@ mod tests {
     fn a_paste_is_one_plan_however_many_objects_it_holds() {
         let source = three_kinds();
         let before = read_page(&source, 0, b"", None).expect("reads");
-        let copied = copy_from(&before.graph, &anchors(&before.graph)).expect("copies");
+        let copied =
+            copy_from(&before.graph, &anchors(&before.graph), source.id()).expect("copies");
         let plan = plan_command_with_fonts(
             &source,
             &Command::PasteObjects {
@@ -877,6 +1078,7 @@ mod tests {
                 copied,
                 dx: 1.0,
                 dy: 1.0,
+                elsewhere: None,
             },
             b"",
             None,
@@ -890,7 +1092,8 @@ mod tests {
     fn the_proof_refuses_a_paste_that_landed_elsewhere_or_lost_an_atom() {
         let source = three_kinds();
         let reading = read_page(&source, 0, b"", None).expect("reads");
-        let copied = copy_from(&reading.graph, &anchors(&reading.graph)).expect("copies");
+        let copied =
+            copy_from(&reading.graph, &anchors(&reading.graph), source.id()).expect("copies");
         let named_as_written = |objects: &[CopiedObject]| -> Vec<String> {
             objects
                 .iter()
@@ -950,7 +1153,8 @@ mod tests {
     fn a_page_that_leaves_a_transform_still_pastes_in_default_user_space() {
         let source = document(&["BT /F1 12 Tf 1 0 0 1 20 100 Tm (AB) Tj ET 2 0 0 2 30 40 cm"]);
         let before = read_page(&source, 0, b"", None).expect("reads");
-        let copied = copy_from(&before.graph, &anchors(&before.graph)).expect("copies");
+        let copied =
+            copy_from(&before.graph, &anchors(&before.graph), source.id()).expect("copies");
         let after_source = done(
             &source,
             &Command::PasteObjects {
@@ -958,6 +1162,7 @@ mod tests {
                 copied,
                 dx: 5.0,
                 dy: 5.0,
+                elsewhere: None,
             },
         );
         let after = read_page(&after_source, 0, b"", None).expect("reads");
@@ -974,7 +1179,7 @@ mod tests {
     fn what_cannot_be_copied_or_pasted_is_refused() {
         let source = document(&["BT /F1 12 Tf 1 0 0 1 20 100 Tm 0.5 0 0 0 k (AB) Tj ET"]);
         let before = read_page(&source, 0, b"", None).expect("reads");
-        let refused = copy_from(&before.graph, &anchors(&before.graph));
+        let refused = copy_from(&before.graph, &anchors(&before.graph), source.id());
         assert!(
             matches!(
                 refused,
@@ -988,9 +1193,11 @@ mod tests {
                 page_index: 0,
                 copied: Copied {
                     objects: Vec::new(),
+                    from: source.id(),
                 },
                 dx: 0.0,
                 dy: 0.0,
+                elsewhere: None,
             },
             b"",
             None,

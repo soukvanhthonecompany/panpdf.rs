@@ -644,12 +644,14 @@ fn which_models(
         .iter()
         .filter(|code| chosen.is_empty() || chosen.iter().any(|ticked| ticked == *code))
         .filter_map(|code| pdf_ocr::models::model(code, asked.quality))
-        .map(|model| {
-            Message::OcrErrorRate {
-                code: model.code.to_owned(),
-                cer: model.cer,
-            }
-            .say(lang)
+        .filter_map(|model| {
+            model.cer.map(|cer| {
+                Message::OcrErrorRate {
+                    code: model.code.to_owned(),
+                    cer,
+                }
+                .say(lang)
+            })
         })
         .collect();
     if !about.is_empty() {

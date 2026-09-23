@@ -350,7 +350,10 @@ fn read_edited_block<'g>(
         edit.edges,
         edit.breaks,
     )?;
-    if edit.style.is_some() {
+    if edit
+        .style
+        .is_some_and(|style| *style != crate::plan::TextStyle::default())
+    {
         let widest = reading
             .measured
             .iter()
@@ -3219,7 +3222,10 @@ fn place_lines(
                 .get(group)
                 .copied()
                 .unwrap_or((Alignment::Start, left, 0.0));
-        let alignment = frame.set.unwrap_or(read_as);
+        let (alignment, edge, indent) = match frame.set {
+            Some(set) => (set, left, 0.0),
+            None => (read_as, edge, indent),
+        };
         let indent = if paragraph.opens { indent } else { 0.0 };
         let available = right - edge;
         if available <= 0.0 {

@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 pdf-app = { path = "../pdf-app" }
+pdf-heap = { path = "../pdf-heap" }
 pdf-bytes = { path = "../pdf-bytes" }
 pdf-cli = { path = "../pdf-cli" }
 pdf-content = { path = "../pdf-content" }

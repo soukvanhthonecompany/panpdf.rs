@@ -19,6 +19,7 @@ pub(crate) enum Offer {
     Pdfs,
     AnyPdf,
     Pictures,
+    ForTheChat,
 }
 
 impl Offer {
@@ -31,6 +32,7 @@ impl Offer {
             Self::Pdfs => is("pdf") && !is_a_copy(path),
             Self::AnyPdf => is("pdf"),
             Self::Pictures => is("jpg") || is("jpeg") || is("png"),
+            Self::ForTheChat => Self::Pictures.takes(path) || Self::AnyPdf.takes(path),
         }
     }
 }
@@ -108,9 +110,13 @@ impl Chooser {
     }
 
     pub(crate) fn several(folder: Option<&Path>) -> Self {
+        Self::several_of(folder, Offer::Pictures)
+    }
+
+    pub(crate) fn several_of(folder: Option<&Path>, offer: Offer) -> Self {
         Self {
             ticked: Some(Vec::new()),
-            ..Self::at(folder, Offer::Pictures)
+            ..Self::at(folder, offer)
         }
     }
 
@@ -147,7 +153,7 @@ impl Chooser {
                 folder: std::path::absolute(&self.folder).unwrap_or_else(|_| self.folder.clone()),
                 kind: match self.offer {
                     Offer::Pdfs | Offer::AnyPdf => crate::system_dialog::Kind::Pdfs,
-                    Offer::Pictures => crate::system_dialog::Kind::Pictures,
+                    Offer::Pictures | Offer::ForTheChat => crate::system_dialog::Kind::Pictures,
                 },
                 naming: self
                     .naming
@@ -238,7 +244,7 @@ impl Chooser {
                     } else if self.entries.is_empty() {
                         ui.label(say(match self.offer {
                             Offer::Pdfs | Offer::AnyPdf => Home::NoPdfHere,
-                            Offer::Pictures => Home::NoPictureHere,
+                            Offer::Pictures | Offer::ForTheChat => Home::NoPictureHere,
                         }));
                     }
                     for entry in &self.entries {

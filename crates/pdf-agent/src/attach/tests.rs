@@ -64,8 +64,17 @@ fn a_picture_is_sent_as_it_is_unless_it_is_too_large() {
 }
 
 #[test]
+#[allow(
+    invalid_from_utf8,
+    reason = "the point of the fixture is that it is not valid UTF-8; checking that is the control"
+)]
 fn a_file_of_another_kind_is_refused_by_name() {
-    let refused = prepare("notes.docx", b"PK\x03\x04rest of a zip").unwrap_err();
+    let junk: &[u8] = b"PK\x03\x04\xff\xfe\x80\x81rest of a zip";
+    assert!(
+        std::str::from_utf8(junk).is_err(),
+        "the fixture must not be text"
+    );
+    let refused = prepare("notes.docx", junk).unwrap_err();
     assert_eq!(
         refused,
         AttachError::Unsupported {
@@ -75,6 +84,153 @@ fn a_file_of_another_kind_is_refused_by_name() {
     assert!(!looks_like_pdf(b"PK\x03\x04rest of a zip"));
     assert!(looks_like_pdf(b"%PDF-1.7\n"));
     assert!(looks_like_pdf(b"junk junk junk\n%PDF-1.4\n"));
+}
+
+#[test]
+fn a_utf8_file_with_no_extension_is_read_as_text() {
+    let words = "two lines\nof plain words";
+    let made = prepare("notes", words.as_bytes()).expect("plain UTF-8 is text");
+    assert_eq!(made.len(), 1);
+    assert_eq!(made[0].kind, AttachmentKind::Text);
+    assert_eq!(made[0].as_text(), words);
+}
+
+#[test]
+fn a_txt_file_of_invalid_utf8_is_refused_not_sent_as_mojibake() {
+    let refused = prepare("broken.txt", &[0xFF, b'h', b'i']).unwrap_err();
+    assert_eq!(
+        refused,
+        AttachError::Unsupported {
+            name: "broken.txt".to_owned()
+        }
+    );
+}
+
+#[test]
+fn a_nul_byte_refuses_a_file_even_though_it_is_valid_utf8() {
+    let bytes = b"a\0b";
+    assert!(
+        std::str::from_utf8(bytes).is_ok(),
+        "the fixture is valid UTF-8"
+    );
+    assert_eq!(
+        prepare("odd.dat", bytes).unwrap_err(),
+        AttachError::Unsupported {
+            name: "odd.dat".to_owned()
+        }
+    );
+}
+
+#[test]
+fn text_over_the_cap_is_cut_short_and_says_so() {
+    let long = "a".repeat(MOST_CHARACTERS + 500);
+    let made = prepare("long.log", long.as_bytes()).expect("text attaches");
+    assert_eq!(made.len(), 1);
+    let said = made[0].as_text().into_owned();
+    assert!(
+        said.starts_with(&"a".repeat(MOST_CHARACTERS)),
+        "kept the cap's worth of the file's own text"
+    );
+    assert!(!said.starts_with(&long), "the whole file was not sent");
+    assert!(said.contains("cut short"), "{said}");
+}
+
+#[test]
+fn a_sound_file_is_refused_by_name() {
+    let mut wav = b"RIFF".to_vec();
+    wav.extend_from_slice(&[0xFF, 0xFE, 0xFD, 0xFC]);
+    wav.extend_from_slice(b"WAVEfmt ");
+    let refused = prepare("song.wav", &wav).unwrap_err();
+    assert_eq!(
+        refused,
+        AttachError::Unsupported {
+            name: "song.wav".to_owned()
+        }
+    );
+    assert!(refused.to_string().contains("song.wav"));
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a fixture's own tiny sizes and offsets, always well under u32::MAX"
+)]
+fn office_zip(path: &str, xml: &str) -> Vec<u8> {
+    let name = path.as_bytes();
+    let data = xml.as_bytes();
+    let mut out = Vec::new();
+    let local_at = out.len();
+    out.extend_from_slice(b"PK\x03\x04");
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&[0; 2]);
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    out.extend_from_slice(&[0; 2]);
+    out.extend_from_slice(name);
+    out.extend_from_slice(data);
+    let cd_at = out.len();
+    out.extend_from_slice(b"PK\x01\x02");
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&[0; 2]);
+    out.extend_from_slice(&[0; 2]);
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    out.extend_from_slice(&[0; 6]);
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&[0; 2]);
+    out.extend_from_slice(&(local_at as u32).to_le_bytes());
+    out.extend_from_slice(name);
+    let cd_size = out.len() - cd_at;
+    out.extend_from_slice(b"PK\x05\x06");
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&1_u16.to_le_bytes());
+    out.extend_from_slice(&1_u16.to_le_bytes());
+    out.extend_from_slice(&(cd_size as u32).to_le_bytes());
+    out.extend_from_slice(&(cd_at as u32).to_le_bytes());
+    out.extend_from_slice(&[0; 2]);
+    out
+}
+
+#[test]
+fn a_docx_is_attached_as_the_words_inside_its_document_xml() {
+    let zip = office_zip(
+        "word/document.xml",
+        "<w:p><w:r><w:t>Hello from Word</w:t></w:r></w:p>",
+    );
+    let made = prepare("letter.docx", &zip).expect("a docx's words are read");
+    assert_eq!(made.len(), 1, "{made:?}");
+    assert_eq!(made[0].kind, AttachmentKind::Text);
+    let said = made[0].as_text().into_owned();
+    assert!(said.contains("Hello from Word"), "{said}");
+    assert!(!said.contains('<'), "{said}");
+}
+
+#[test]
+fn an_escaped_ampersand_does_not_turn_what_follows_it_into_an_escape() {
+    let zip = office_zip(
+        "word/document.xml",
+        "<w:t>Tom &amp; Jerry &amp;lt;3 &lt;b&gt;</w:t>",
+    );
+    let made = prepare("letter.docx", &zip).expect("a docx's words are read");
+    let said = made[0].as_text().into_owned();
+    assert_eq!(said, "Tom & Jerry &lt;3 <b>", "{said}");
+}
+
+#[test]
+fn a_zip_that_is_not_an_office_file_is_refused() {
+    let zip = office_zip("readme.txt", "just a file in a zip, not a document");
+    let refused = prepare("archive.zip", &zip).unwrap_err();
+    assert_eq!(
+        refused,
+        AttachError::Unsupported {
+            name: "archive.zip".to_owned()
+        }
+    );
 }
 
 #[test]

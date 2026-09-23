@@ -863,9 +863,17 @@ fn plan_one_command_in_page(
         copied,
         dx,
         dy,
+        elsewhere,
     } = command
     {
-        return crate::paste::plan_paste(source, page, *page_index, copied, (*dx, *dy));
+        return crate::paste::plan_paste(
+            source,
+            page,
+            *page_index,
+            copied,
+            (*dx, *dy),
+            elsewhere.as_ref(),
+        );
     }
     if let Command::DrawPath {
         page_index,

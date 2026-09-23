@@ -46,6 +46,14 @@ fn made(
     #[cfg(not(target_arch = "wasm32"))]
     crate::startup::stage("recent", reading.elapsed());
     window.home = !window.has_document();
+    #[cfg(not(target_arch = "wasm32"))]
+    if window.has_document() {
+        let opened = window.opened.clone();
+        let name = window.title_for_the_chat(&opened);
+        window
+            .ai
+            .document_arrived(name, crate::chrome::place_of(&opened));
+    }
     if let Some(locked) = locked {
         window.unlocking = Some(crate::unlock::Unlock {
             path: locked.path,
@@ -73,6 +81,11 @@ pub fn run(
     locked: Option<Locked>,
 ) -> Result<(), String> {
     crate::reporting::begin();
+    let _ = pdf_heap::settle();
+    crate::reporting::say(
+        pdf_app::trouble::Kind::Session,
+        &format!("memory: {}", pdf_heap::what_it_does()),
+    );
     if !opened.as_os_str().is_empty() {
         crate::reporting::say(
             pdf_app::trouble::Kind::Document,
@@ -205,6 +218,7 @@ impl Window {
             pointing: Pointing::Nothing,
             chosen: Chosen::default(),
             context: None,
+            toolbar_area: None,
             held_still: None,
             running: None,
             destination,
@@ -293,6 +307,8 @@ impl Window {
             page_preview: None,
             renumber: None,
             page_panel_shape: None,
+            ai_panel_shape: None,
+            ai_flow: None,
             file_hover_gap: None,
             panel_menu: None,
             arriving: std::collections::VecDeque::new(),
@@ -984,11 +1000,6 @@ impl Window {
 
     pub(crate) fn frames_of(&self, page: usize) -> &[[f64; 4]] {
         self.editor.frame_boxes(page)
-    }
-
-    pub(crate) fn layout_in(&self, page: usize, frame: usize) -> Option<[f64; 4]> {
-        let block = self.editor.leaf(page)?.overlay.blocks.get(frame)?;
-        (!block.anchors.is_empty()).then_some(block.layout_pixels)
     }
 }
 

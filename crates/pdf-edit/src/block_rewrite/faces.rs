@@ -557,7 +557,7 @@ pub(crate) fn commit_with(
         pdf_syntax::XrefLimits::default(),
     )
     .map_err(|_| unsupported("a typed character's face cannot be added to this document"))?;
-    Ok(ByteStore::new(
+    Ok(ByteStore::owning(
         SourceId::new(source.id().get().wrapping_add(1)),
         bytes,
     ))

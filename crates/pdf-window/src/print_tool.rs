@@ -42,6 +42,7 @@ pub(crate) fn settings_of(choices: &PrintChoices) -> Settings {
         order: choices.order,
         auto_rotate: choices.auto_rotate,
         margin: choices.margin * 72.0 / 25.4,
+        nudge: choices.nudge,
     }
 }
 
@@ -128,6 +129,10 @@ impl Window {
         }
         self.print_draft = Some(PrintDraft {
             sheet: 0,
+            dragging: None,
+            corner: false,
+            landed: None,
+            put_back: false,
             allowance,
             shown: None,
             drawing: None,
@@ -285,7 +290,16 @@ impl Window {
                     });
                 });
                 ui.add_space(16.0);
-                ui.vertical(|ui| preview(ui, draft, (&sheets, count), lang));
+                ui.vertical(|ui| {
+                    preview(ui, draft, (&sheets, count), lang);
+                    if let Some((by, corner)) = draft.landed.take() {
+                        take_the_drag(choices, (&sheets, draft.sheet), (by, corner));
+                    }
+                    if std::mem::take(&mut draft.put_back) {
+                        choices.nudge = [0.0, 0.0];
+                        choices.scaling = PrintScalingKind::Fit;
+                    }
+                });
             });
             let asked = what_is_asked(
                 ui,
@@ -851,6 +865,21 @@ fn preview(
         {
             draft.sheet += 1;
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if crate::format::icon_button(
+                ui,
+                crate::icons::Icon::FitToPaper,
+                &Message::PrintFitAgain.say(lang),
+                false,
+                true,
+            )
+            .clicked()
+            {
+                draft.landed = None;
+                draft.dragging = None;
+                draft.put_back = true;
+            }
+        });
     });
     let Some(sheet) = sheets.get(draft.sheet) else {
         return;
@@ -860,7 +889,7 @@ fn preview(
     let fit = (f64::from(room.x) / sheet.size[0]).min(f64::from(room.y) / sheet.size[1]) as f32;
     #[allow(clippy::cast_possible_truncation)]
     let size = egui::vec2(sheet.size[0] as f32 * fit, sheet.size[1] as f32 * fit);
-    let (area, _) = ui.allocate_exact_size(room, egui::Sense::hover());
+    let (area, response) = ui.allocate_exact_size(room, egui::Sense::click_and_drag());
     let paper = egui::Rect::from_center_size(area.center(), size);
     let painter = ui.painter_at(area);
     painter.rect_filled(
@@ -898,6 +927,125 @@ fn preview(
             egui::Color32::GRAY,
         );
     }
+    moved_by_hand(ui, &painter, &response, (paper, fit), sheet, draft);
+}
+
+fn take_the_drag(
+    choices: &mut PrintChoices,
+    (sheets, at): (&Result<Vec<Sheet>, Message>, usize),
+    (by, corner): (egui::Vec2, bool),
+) {
+    let Ok(sheets) = sheets else { return };
+    let Some(sheet) = sheets.get(at) else { return };
+    let [placed] = sheet.placements.as_slice() else {
+        return;
+    };
+    let room = PREVIEW - egui::vec2(8.0, 40.0);
+    let fit = (f64::from(room.x) / sheet.size[0]).min(f64::from(room.y) / sheet.size[1]);
+    if fit <= 0.0 {
+        return;
+    }
+    if corner {
+        let [x0, _, x1, _] = placed.landing();
+        let width = x1 - x0;
+        if width <= 0.0 {
+            return;
+        }
+        let grown = width + 2.0 * f64::from(by.x) / fit;
+        let factor = (grown / width).clamp(0.1, 10.0);
+        choices.scaling = PrintScalingKind::Custom;
+        choices.percent = (placed.scale * factor * 100.0).clamp(1.0, 1000.0);
+        return;
+    }
+    choices.nudge[0] += f64::from(by.x) / fit;
+    choices.nudge[1] -= f64::from(by.y) / fit;
+}
+
+const HANDLE: f32 = 14.0;
+
+fn moved_by_hand(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    response: &egui::Response,
+    (paper, fit): (egui::Rect, f32),
+    sheet: &Sheet,
+    draft: &mut PrintDraft,
+) {
+    let [placed] = sheet.placements.as_slice() else {
+        return;
+    };
+    let landing = landing_on_screen(placed, (paper, fit, sheet.size[1]));
+    let held = draft.dragging.unwrap_or(egui::Vec2::ZERO);
+    let shown = if draft.corner {
+        scaled_about_centre(landing, held)
+    } else {
+        landing.translate(held)
+    };
+    let live = ui.visuals().selection.stroke.color;
+    painter.rect_stroke(
+        shown,
+        2.0,
+        egui::Stroke::new(1.5, live),
+        egui::StrokeKind::Middle,
+    );
+    for corner in [
+        shown.left_top(),
+        shown.right_top(),
+        shown.left_bottom(),
+        shown.right_bottom(),
+    ] {
+        painter.rect_filled(
+            egui::Rect::from_center_size(corner, egui::vec2(7.0, 7.0)),
+            1.0,
+            live,
+        );
+    }
+    if response.drag_started()
+        && let Some(at) = response.interact_pointer_pos()
+    {
+        draft.corner = nearest_corner(landing, at).is_some();
+        draft.dragging = (draft.corner || landing.contains(at)).then_some(egui::Vec2::ZERO);
+    }
+    if response.dragged() && draft.dragging.is_some() {
+        draft.dragging = Some(held + response.drag_delta());
+    }
+    if response.drag_stopped() {
+        draft.landed = draft.dragging.take().map(|by| (by, draft.corner));
+        draft.corner = false;
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn landing_on_screen(
+    placed: &pdf_print::Placement,
+    (paper, fit, height): (egui::Rect, f32, f64),
+) -> egui::Rect {
+    let [x0, y0, x1, y1] = placed.landing();
+    egui::Rect::from_min_max(
+        paper.left_top() + egui::vec2(x0 as f32 * fit, (height - y1) as f32 * fit),
+        paper.left_top() + egui::vec2(x1 as f32 * fit, (height - y0) as f32 * fit),
+    )
+}
+
+fn nearest_corner(landing: egui::Rect, at: egui::Pos2) -> Option<egui::Pos2> {
+    [
+        landing.left_top(),
+        landing.right_top(),
+        landing.left_bottom(),
+        landing.right_bottom(),
+    ]
+    .into_iter()
+    .find(|corner| corner.distance(at) <= HANDLE)
+}
+
+fn scaled_about_centre(landing: egui::Rect, by: egui::Vec2) -> egui::Rect {
+    let half = landing.size() / 2.0;
+    if half.x <= 0.0 || half.y <= 0.0 {
+        return landing;
+    }
+    let grown = egui::vec2(half.x + by.x.abs() * by.x.signum(), half.y);
+    let factor = (grown.x / half.x).clamp(0.1, 10.0);
+    egui::Rect::from_center_size(landing.center(), landing.size() * factor)
 }
 
 #[cfg(test)]

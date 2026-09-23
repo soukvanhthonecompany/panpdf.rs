@@ -32,7 +32,9 @@ impl std::fmt::Display for AttachError {
             Self::Unsupported { name } => {
                 write!(
                     f,
-                    "{name} is not a picture or a PDF, and cannot be attached"
+                    "{name} cannot be read: it is not a picture, a PDF or text, and this \
+                     program cannot make sense of what is inside it -- so a model could not \
+                     either, over this wire"
                 )
             }
             Self::TooMany => write!(
@@ -46,6 +48,30 @@ impl std::fmt::Display for AttachError {
 }
 
 impl std::error::Error for AttachError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Kind {
+    Picture,
+    Pdf,
+    Office,
+    Text,
+    Unsupported,
+}
+
+#[must_use]
+pub fn kind_of(bytes: &[u8]) -> Kind {
+    if picture_media_type(bytes).is_some() {
+        Kind::Picture
+    } else if looks_like_pdf(bytes) {
+        Kind::Pdf
+    } else if office_text(bytes).is_some() {
+        Kind::Office
+    } else if as_text(bytes).is_some() {
+        Kind::Text
+    } else {
+        Kind::Unsupported
+    }
+}
 
 pub fn fits(so_far: &[(String, usize)], more: (&str, usize)) -> Result<(), AttachError> {
     if so_far.len() >= MOST_FILES {
@@ -71,6 +97,12 @@ pub fn prepare(name: &str, bytes: &[u8]) -> Result<Vec<Attachment>, AttachError>
     }
     if looks_like_pdf(bytes) {
         return from_pdf(name, bytes);
+    }
+    if let Some(text) = office_text(bytes) {
+        return Ok(vec![Attachment::text(name, capped_text(&text))]);
+    }
+    if let Some(text) = as_text(bytes) {
+        return Ok(vec![Attachment::text(name, capped_text(text))]);
     }
     Err(AttachError::Unsupported {
         name: name.to_owned(),
@@ -195,6 +227,149 @@ fn from_pdf(name: &str, bytes: &[u8]) -> Result<Vec<Attachment>, AttachError> {
         ));
     }
     Ok(out)
+}
+
+fn as_text(bytes: &[u8]) -> Option<&str> {
+    if bytes.contains(&0) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()
+}
+
+fn capped_text(text: &str) -> String {
+    if text.chars().count() <= MOST_CHARACTERS {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(MOST_CHARACTERS).collect();
+    let _ = write!(
+        &mut out,
+        "\n\n-- cut short at {MOST_CHARACTERS} characters: this file is longer than one \
+         question can carry --"
+    );
+    out
+}
+
+fn office_text(bytes: &[u8]) -> Option<String> {
+    let mut out = String::new();
+    for entry in central_directory(bytes)?
+        .into_iter()
+        .filter(|entry| wanted_office_member(&entry.name))
+    {
+        if let Some(xml) = zip_member_text(bytes, &entry) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&strip_tags(&xml));
+        }
+    }
+    (!out.trim().is_empty()).then_some(out)
+}
+
+struct ZipEntry {
+    name: String,
+    method: u16,
+    compressed_size: usize,
+    local_header_offset: usize,
+}
+
+fn wanted_office_member(name: &str) -> bool {
+    name == "word/document.xml"
+        || name == "xl/sharedStrings.xml"
+        || (name.starts_with("ppt/slides/slide")
+            && std::path::Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("xml")))
+}
+
+fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
+    bytes
+        .get(at..at + 2)
+        .map(|two| u16::from_le_bytes([two[0], two[1]]))
+}
+
+fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+    bytes
+        .get(at..at + 4)
+        .map(|four| u32::from_le_bytes([four[0], four[1], four[2], four[3]]))
+}
+
+fn central_directory(bytes: &[u8]) -> Option<Vec<ZipEntry>> {
+    let tail_from = bytes.len().saturating_sub(22 + 65_535);
+    let eocd = bytes[tail_from..]
+        .windows(4)
+        .rposition(|four| four == b"PK\x05\x06")?
+        + tail_from;
+    let count = usize::from(u16_at(bytes, eocd + 10)?);
+    let mut at = usize::try_from(u32_at(bytes, eocd + 16)?).ok()?;
+    let mut entries = Vec::with_capacity(count.min(MOST_FILES * 8));
+    for _ in 0..count {
+        if bytes.get(at..at + 4) != Some(&b"PK\x01\x02"[..]) {
+            return None;
+        }
+        let method = u16_at(bytes, at + 10)?;
+        let compressed_size = usize::try_from(u32_at(bytes, at + 20)?).ok()?;
+        let name_len = usize::from(u16_at(bytes, at + 28)?);
+        let extra_len = usize::from(u16_at(bytes, at + 30)?);
+        let comment_len = usize::from(u16_at(bytes, at + 32)?);
+        let local_header_offset = usize::try_from(u32_at(bytes, at + 42)?).ok()?;
+        let name = bytes
+            .get(at + 46..at + 46 + name_len)
+            .and_then(|raw| std::str::from_utf8(raw).ok())?
+            .to_owned();
+        entries.push(ZipEntry {
+            name,
+            method,
+            compressed_size,
+            local_header_offset,
+        });
+        at = at + 46 + name_len + extra_len + comment_len;
+    }
+    Some(entries)
+}
+
+fn zip_member_text(bytes: &[u8], entry: &ZipEntry) -> Option<String> {
+    let at = entry.local_header_offset;
+    if bytes.get(at..at + 4) != Some(&b"PK\x03\x04"[..]) {
+        return None;
+    }
+    let name_len = usize::from(u16_at(bytes, at + 26)?);
+    let extra_len = usize::from(u16_at(bytes, at + 28)?);
+    let data_at = at + 30 + name_len + extra_len;
+    let data = bytes.get(data_at..data_at + entry.compressed_size)?;
+    let raw = match entry.method {
+        0 => data.to_vec(),
+        8 => {
+            let mut zlib = Vec::with_capacity(data.len() + 2);
+            zlib.extend_from_slice(&[0x78, 0x9c]);
+            zlib.extend_from_slice(data);
+            pdf_session::inflate_zlib(&zlib, MOST_TOTAL_BYTES * 4).ok()?
+        }
+        _ => return None,
+    };
+    String::from_utf8(raw).ok()
+}
+
+fn strip_tags(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len());
+    let mut in_tag = false;
+    for ch in xml.chars() {
+        match ch {
+            '<' => {
+                in_tag = true;
+                out.push(' ');
+            }
+            '>' => in_tag = false,
+            _ if in_tag => {}
+            _ => out.push(ch),
+        }
+    }
+    let out = out
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&");
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

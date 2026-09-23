@@ -154,6 +154,37 @@ An empty `text` deletes. Use \\n for a new paragraph. The reply is the block as 
             destructive: false,
         },
         Tool {
+            name: "write_pages",
+            title: "Write a whole document",
+            description: "Writes a whole document, in Markdown, onto the pages, laid out and dressed in a colour theme: \
+headings (the first `#` becomes a title band), paragraphs, numbered and bulleted lists, `>` quotes (a tinted note box), \
+tables (a grid with a coloured head and striped rows), `---` (a line across the page) and fenced code. \
+MATHS: `$...$` inside a line is set as Unicode (x², α, ∑); a paragraph that is only `$$...$$` is set out like a book -- \
+stacked fractions, roots, sums and integrals with limits, matrices (pmatrix/bmatrix), cases, \\left( \\right). \
+CHARTS: a fenced block with the language `chart` holding JSON: \
+{\"type\": \"line\"|\"area\"|\"bar\"|\"scatter\"|\"pie\"|\"donut\"|\"candlestick\"|\"function\", \"title\": .., \"height\": points, \
+\"x\": [labels], \"series\": [{\"name\": .., \"values\": [..]}], \"style\": \"3d\" (bars and pies)}. \
+Scatter: series take \"points\": [[x, y], ..]. Pie: \"values\": [{\"name\": .., \"value\": ..}]. \
+Candlestick: \"candles\": [{\"x\": .., \"open\": .., \"high\": .., \"low\": .., \"close\": ..}] with optional line \"series\" over it. \
+Function: \"functions\": [\"exp(-x^2)\", {\"name\": .., \"expr\": \"sin(x)/x\"}], \"from\", \"to\" (x only; + - * / ^, sin cos tan exp ln log sqrt abs, pi, e). \
+A paragraph is bold or italic only when all of it is. No emoji: they are left out. Adds pages when it runs out of room. \
+Everything is checked before anything is written: a chart that cannot be read refuses the whole call, saying why. \
+Use this rather than a frame at a time whenever more than one paragraph is being written: it is one call, and the \
+spacing and colours come out the same all the way down. `from_page` says which page to start on. `replace` starts at \
+the top of the page instead of under what is already there.",
+            input: r#"{"type":"object","properties":{DOCUMENT,
+"markdown":{"type":"string","description":"The document, in CommonMark, with $maths$ and ```chart blocks."},
+"theme":{"type":"string","enum":["classic","ocean","sunset","forest","grape","rose","slate","midnight","plain"],"description":"The colours. Default classic (navy). midnight is a dark page; plain is black on white."},
+"from_page":{"type":"integer","minimum":1,"description":"Default 1."},
+"replace":{"type":"boolean","description":"Start at the top of the page. Default false."},
+"size":{"type":"number","exclusiveMinimum":0,"description":"Point size of ordinary text. Default 11."},
+"font":{"type":"string","description":"A family list_fonts names. Default: one that has every character."},
+"margin":{"type":"number","exclusiveMinimum":0,"description":"Points of blank edge. Default 56."}},
+"required":["document","markdown"],"additionalProperties":false}"#,
+            read_only: false,
+            destructive: false,
+        },
+        Tool {
             name: "list_fonts",
             title: "Fonts",
             description: "The font families new text can be set in, optionally only those whose name holds `name`.",
@@ -312,6 +343,27 @@ const NOT_IN_A_WINDOW: [&str; 4] = [
     "save_document",
 ];
 
+fn window_only() -> Vec<Tool> {
+    vec![Tool {
+        name: "ask_person",
+        title: "Ask the person",
+        description: "Asks the person at the window a question, with answers for them to choose from, and waits for their answer. \
+Use it when the request can reasonably be read more than one way and the choice matters -- which pages, which theme, how long, \
+whether to replace what is there -- rather than guessing. Do not ask what you can find out by reading the document, and ask one \
+question at a time. Give two to four short options, the one you recommend first with \"(Recommended)\" at the end of its label; \
+the person may also type an answer of their own, or skip the question.",
+        input: r#"{"type":"object","properties":{
+"question":{"type":"string","description":"The question, in one or two sentences, in the language the person writes in."},
+"options":{"type":"array","minItems":2,"maxItems":4,"description":"The answers to choose from.","items":{"type":"object","properties":{
+"label":{"type":"string","description":"The answer, in a few words."},
+"description":{"type":"string","description":"What choosing it means, in one short sentence."}},
+"required":["label"],"additionalProperties":false}}},
+"required":["question","options"],"additionalProperties":false}"#,
+        read_only: true,
+        destructive: false,
+    }]
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ToolFacts {
     pub read_only: bool,
@@ -322,6 +374,7 @@ pub struct ToolFacts {
 pub fn facts(name: &str) -> Option<ToolFacts> {
     tools()
         .iter()
+        .chain(window_only().iter())
         .find(|tool| tool.name == name)
         .map(|tool| ToolFacts {
             read_only: tool.read_only,
@@ -334,6 +387,7 @@ pub fn offered_to_a_window() -> Vec<ToolOffer> {
     tools()
         .into_iter()
         .filter(|tool| !NOT_IN_A_WINDOW.contains(&tool.name))
+        .chain(window_only())
         .map(|tool| ToolOffer {
             name: tool.name.to_owned(),
             description: tool.description.to_owned(),
@@ -380,7 +434,49 @@ block on it.\n\
 \n\
 The person may refuse an action. A refusal is their answer: do not try it again in another \
 way, and ask them what they would like instead. Pages are counted from 1, and positions are \
-points from the top-left corner of the page as it is shown.",
+points from the top-left corner of the page as it is shown.\n\
+\n\
+## What each answer costs them\n\
+\n\
+The whole conversation is sent again with every one of your rounds, and the person pays for \
+all of it each time. Their free allowance is minutes wide, so a wasted round does not merely \
+cost money -- it stops the work for a minute. Spend it like this:\n\
+\n\
+- **Ask for what you need, once.** document_info and read_text are cheap and answer most \
+questions. find_text is cheaper than reading whole pages when you know what you are looking \
+for.\n\
+- **render_page is the expensive one.** A picture of a page costs many times what its words \
+cost. Reach for it last, and only for something words cannot answer -- where something sits, \
+what it looks like, whether a page is a scan. Never render a page whose text you have just \
+read.\n\
+- **Write a document in one call, not a block at a time** (see below).\n\
+- **Do not read back what you have just written** to check it; you are told what was done.\n\
+- **Say what you are doing in a sentence, not a paragraph.** Then do it.\n\
+\n\
+## Which tool\n\
+\n\
+- **Changing what is already there** -- a word, a line, a heading: find it with find_text or \
+read_text, then replace_text on that block, with `find` when only a piece of it changes. Never \
+write a page again to change one line of it.\n\
+- **One short piece in one place** -- a label, a date, a note beside something: add_text.\n\
+- **Making a page or a document** -- a worksheet, a letter, a report, a summary, a study sheet: \
+write_pages, once, in Markdown, and let its structure make it look good: a `#` title, `##` \
+headings for the parts, lists for steps and questions, a table for anything in rows and columns \
+(answer spaces are an empty column), `>` for a tip or a note, `---` between sections, a \
+```chart block when numbers are better seen than read, and a `theme` that suits the subject.\n\
+- **Formulas that matter go on a line of their own as `$$...$$`**, so they are set out like a \
+book -- fractions stacked, roots drawn, limits above and below. Inside a sentence, `$...$` is \
+only for short symbols (`$x^2$`, `$\\alpha$`): a long formula inside a line is flattened into \
+one row of text. In a table cell, keep formulas short for the same reason.\n\
+- **No emoji or pictographs on a page.** The page's fonts do not draw them and they are left \
+out. Use words, numbers and plain marks instead.\n\
+\n\
+## Asking the person\n\
+\n\
+When a request can be read more than one way and the difference matters -- which pages, which \
+theme, how long, whether to replace what is there -- ask with ask_person before you act, with two \
+to four short options and the one you recommend first. Do not ask what reading the document would \
+tell you, do not ask about small things you can decide, and ask one question at a time.",
     )
 }
 
@@ -473,6 +569,7 @@ pub fn call(desk: &mut Desk, name: &str, arguments: &Json) -> Result<Answer, Str
         "render_page" => render_page(desk, &args),
         "replace_text" => replace_text(desk, &args),
         "add_text" => add_text(desk, &args),
+        "write_pages" => write_pages(desk, &args),
         "list_fonts" => Ok(list_fonts(&args)),
         "set_properties" => set_properties(desk, &args),
         "fill_field" => crate::about::fill_field(
@@ -771,6 +868,110 @@ fn add_text(desk: &mut Desk, args: &Args) -> Result<Answer, String> {
     Ok(Answer::of(
         format!("Written on page {} in {family}, {size} pt.", at + 1),
         Json::object([("font", Json::text(family))]),
+    ))
+}
+
+fn write_pages(desk: &mut Desk, args: &Args) -> Result<Answer, String> {
+    use crate::composing::{Faces, Mark, Setting, Sheet, compose, theme};
+
+    let handle = args.required("document")?;
+    let request = crate::tools::request::parse("write_pages", args.0)?;
+    let crate::tools::request::Request::WritePages {
+        from_page,
+        markdown,
+        replace: _,
+        size,
+        family,
+        margin,
+        theme: theme_name,
+    } = request
+    else {
+        return Err("that is not a document to write".to_owned());
+    };
+    let sizes = desk.page_sizes(handle)?;
+    let [wide, high] = *sizes
+        .get(from_page)
+        .filter(|[wide, high]| *wide > 0.0 && *high > 0.0)
+        .ok_or_else(|| format!("there is no page {} to write on", from_page + 1))?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a point size, far inside f32"
+    )]
+    let written = crate::markup::laying_out::parts(&markdown, size as f32);
+    if written.is_empty() {
+        return Err("there is nothing to write in that markdown".to_owned());
+    }
+    let fonts = desk
+        .fonts()
+        .ok_or_else(|| "no fonts were found on this machine".to_owned())?;
+    let setting = Setting {
+        sheet: Sheet {
+            wide,
+            high,
+            margin: margin.min(wide / 3.0).min(high / 3.0),
+        },
+        from_page,
+        start: None,
+        family: &family,
+        theme: theme::named(&theme_name).unwrap_or_else(theme::default_theme),
+        body: size,
+    };
+    let composed = compose(&written, &setting, &Faces(fonts))?;
+    for mark in &composed.marks {
+        match mark {
+            Mark::NewPage { after } => desk.command(
+                handle,
+                &pdf_edit::Command::AddBlankPage {
+                    beside: *after,
+                    before: false,
+                    size: [wide, high],
+                },
+            )?,
+            Mark::Text {
+                page,
+                area,
+                text,
+                style,
+            } => desk.place_text(
+                handle,
+                *page,
+                *area,
+                text,
+                (
+                    &style.family,
+                    style.size,
+                    style.bold,
+                    style.italic,
+                    style.colour,
+                ),
+            )?,
+            Mark::Shape {
+                page,
+                steps,
+                stroke,
+                fill,
+            } => desk.draw(handle, *page, steps, *stroke, *fill)?,
+        }
+    }
+    let pages = composed.pages;
+    let left_out = if composed.left_out.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Left out, as no face on this machine draws them: {}.",
+            composed.left_out
+        )
+    };
+    Ok(Answer::of(
+        format!(
+            "Written: {} pieces over {pages} page{} in {family}, theme {theme_name}.{left_out}",
+            composed.pieces,
+            if pages == 1 { "" } else { "s" }
+        ),
+        Json::object([(
+            "pages",
+            Json::Number(f64::from(u32::try_from(pages).unwrap_or(u32::MAX))),
+        )]),
     ))
 }
 

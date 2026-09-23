@@ -77,6 +77,7 @@ impl Window {
             ui.ctx().request_repaint();
         }
         if width < room::PANEL_GONE {
+            self.page_panel_shape = None;
             self.folded_handle(ui, window, now);
             return;
         }
@@ -1075,14 +1076,7 @@ fn view_file() -> Option<std::path::PathBuf> {
     if cfg!(test) {
         return None;
     }
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| std::path::PathBuf::from(home).join(".local").join("state"))
-        })?;
-    Some(state.join("panpdf").join("view"))
+    crate::own_folder::own_file("view")
 }
 
 pub(crate) fn remembered_view() -> room::View {

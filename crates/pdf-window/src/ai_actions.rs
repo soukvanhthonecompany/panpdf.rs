@@ -56,6 +56,7 @@ pub(crate) struct Tools {
     allowed_now: Option<String>,
     waiting: Option<(String, Instant)>,
     sent: Option<Sent>,
+    writing: Option<Writing>,
     landed: Option<Applied>,
     gathering: Option<Gathering>,
     pub(crate) rounds: usize,
@@ -63,6 +64,67 @@ pub(crate) struct Tools {
     arranged: u64,
     pub(crate) called: BTreeMap<String, String>,
     pub(crate) pictures: BTreeMap<String, egui::ColorImage>,
+    pub(crate) question: Option<Question>,
+}
+
+pub(crate) struct Question {
+    pub(crate) call: String,
+    pub(crate) asked: String,
+    pub(crate) options: Vec<(String, String)>,
+    pub(crate) own: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum QuestionReply {
+    Said(String),
+    Skipped,
+}
+
+pub(crate) enum Doing {
+    Asking,
+    Allowing,
+    Writing { written: usize, pieces: usize },
+    Tool(String, Request),
+}
+
+impl Tools {
+    pub(crate) fn doing(&self) -> Option<Doing> {
+        if self.question.is_some() {
+            return Some(Doing::Asking);
+        }
+        if self.ask.is_some() {
+            return Some(Doing::Allowing);
+        }
+        if let Some(writing) = &self.writing {
+            return Some(Doing::Writing {
+                written: writing.written,
+                pieces: writing.pieces,
+            });
+        }
+        if let Some(sent) = &self.sent {
+            return Some(Doing::Tool(sent.call.name.clone(), sent.request.clone()));
+        }
+        let call = self.queue.front()?;
+        let request = tools::request::parse(&call.name, &call.arguments).ok()?;
+        Some(Doing::Tool(call.name.clone(), request))
+    }
+}
+
+type Paint = (
+    Option<(pdf_agent::composing::Colour, f64)>,
+    Option<pdf_agent::composing::Colour>,
+);
+
+#[derive(Clone, Debug)]
+struct Writing {
+    marks: VecDeque<pdf_agent::composing::Mark>,
+    pieces: usize,
+    pages: usize,
+    written: usize,
+    family: String,
+    theme: String,
+    first_page: usize,
+    left_out: String,
 }
 
 impl Tools {
@@ -76,14 +138,34 @@ impl Tools {
         self.ask = None;
         self.waiting = None;
         self.sent = None;
+        self.writing = None;
         self.landed = None;
         self.gathering = None;
         self.allowed_now = None;
+        self.question = None;
         self.rounds = 0;
     }
 
     pub(crate) fn busy(&self) -> bool {
-        !self.queue.is_empty() || self.ask.is_some() || self.sent.is_some()
+        !self.queue.is_empty()
+            || self.ask.is_some()
+            || self.sent.is_some()
+            || self.question.is_some()
+    }
+
+    pub(crate) fn answer_the_question(&mut self, reply: QuestionReply) {
+        let Some(question) = self.question.take() else {
+            return;
+        };
+        let said = match reply {
+            QuestionReply::Said(answer) => format!("The person answered: {answer}"),
+            QuestionReply::Skipped => {
+                "The person skipped this question without answering. Go on with \
+                               your own best judgement, or ask in words if you cannot."
+                    .to_owned()
+            }
+        };
+        self.answer(ToolResult::said(&question.call, said));
     }
 
     pub(crate) fn take(&mut self, calls: &[ToolCall]) {
@@ -106,6 +188,7 @@ impl Tools {
     fn answer(&mut self, result: ToolResult) {
         self.queue.pop_front();
         self.waiting = None;
+        self.writing = None;
         self.gathering = None;
         self.allowed_now = None;
         self.results.push(result);
@@ -138,6 +221,7 @@ enum Performed {
     NeedPages(Vec<usize>),
     Sent,
     Busy,
+    Waiting,
 }
 
 impl Window {
@@ -159,7 +243,7 @@ impl Window {
 
     pub(crate) fn advance_tools(&mut self, ctx: &egui::Context) {
         self.collect_a_sent_edit();
-        if self.ai.tools.ask.is_some() || self.ai.busy() {
+        if self.ai.tools.ask.is_some() || self.ai.tools.question.is_some() || self.ai.busy() {
             return;
         }
         while let Some(call) = self.ai.tools.queue.front().cloned() {
@@ -204,7 +288,7 @@ impl Window {
             }
             match self.perform(&call) {
                 Performed::Done(result) => self.ai.tools.answer(result),
-                Performed::Sent => return,
+                Performed::Sent | Performed::Waiting => return,
                 Performed::Busy => {
                     ctx.request_repaint();
                     return;
@@ -273,11 +357,46 @@ impl Window {
         if let Some(block) = &now {
             self.remember_the_name(block);
         }
+        if self.ai.tools.writing.is_some() {
+            self.carry_the_writing_on(&sent, &applied);
+            return;
+        }
         if let Applied::Changed { page, .. } = &applied {
             self.ai.say_the_document_changed(*page + 1);
         }
         let result = result_of(&sent.call.id, (&applied, &sent.request), now.as_ref());
         self.ai.tools.answer(result);
+    }
+
+    fn carry_the_writing_on(&mut self, sent: &Sent, applied: &Applied) {
+        let Some(writing) = self.ai.tools.writing.as_mut() else {
+            return;
+        };
+        if let Applied::Refused(why) = applied {
+            let (written, total) = (writing.written, writing.written + writing.marks.len());
+            self.ai.tools.writing = None;
+            let said = format!(
+                "Stopped after {written} of {total} marks: {}",
+                Message::Refused(why.clone()).say(Lang::English)
+            );
+            self.ai
+                .tools
+                .answer(ToolResult::failed(&sent.call.id, said));
+            return;
+        }
+        writing.marks.pop_front();
+        writing.written += 1;
+        let call = sent.call.clone();
+        match self.carry_on_writing(&call) {
+            Performed::Done(result) => self.ai.tools.answer(result),
+            Performed::NeedPages(pages) => {
+                for page in pages {
+                    self.ask_the_painter_for(page);
+                }
+                self.ai.tools.waiting = Some((call.id, Instant::now()));
+            }
+            Performed::Sent | Performed::Busy | Performed::Waiting => {}
+        }
     }
 
     fn block_over(&self, page: usize, area: [f64; 4]) -> Option<Block> {
@@ -297,22 +416,7 @@ impl Window {
         };
         let pages = self.editor.page_count();
         match &request {
-            Request::DocumentInfo => {
-                let sizes = self.shown_page_sizes();
-                let set_aside = self.editor.restrictions_set_aside();
-                let Some(source) = self.editor.source().cloned() else {
-                    return Performed::Done(ToolResult::failed(
-                        &call.id,
-                        "there is no document open in this window",
-                    ));
-                };
-                let credential = self.editor.credential().to_vec();
-                Performed::Done(said(
-                    &call.id,
-                    pdf_agent::about::describe(&source, &credential, sizes, set_aside)
-                        .map(|answer| (answer.text, None)),
-                ))
-            }
+            Request::DocumentInfo => self.document_info(call),
             Request::ReadText { first, last } => self.read_text(call, (*first, *last), pages),
             Request::FindText {
                 text,
@@ -331,6 +435,19 @@ impl Window {
             Request::AddText {
                 page, area, text, ..
             } => self.add_text(call, request.clone(), (*page, *area, text.clone())),
+            Request::WritePages {
+                from_page,
+                markdown,
+                replace,
+                size,
+                family,
+                margin,
+                theme,
+            } => self.write_pages(
+                call,
+                (*from_page, markdown, *replace),
+                (*size, family, *margin, theme),
+            ),
             Request::SetProperties(edit) => {
                 let job = self.editor.begin_describe(edit.clone());
                 self.send_for(call, request.clone(), job, None)
@@ -341,54 +458,83 @@ impl Window {
             Request::AddBlankPage { after, size } => {
                 self.put_a_blank_page(call, request.clone(), *after, *size, pages)
             }
-            Request::DeletePages(wanted) => {
-                if let Some(said) = no_such_page(wanted, pages) {
-                    return Performed::Done(ToolResult::failed(&call.id, said));
-                }
-                let job = self.editor.begin_remove_pages(wanted);
-                self.send_for(call, request.clone(), job, None)
+            Request::DeletePages(_) | Request::MovePages { .. } | Request::RotatePages { .. } => {
+                self.a_page_command(call, request.clone(), pages)
             }
-            Request::MovePages { pages: wanted, to } => {
-                if let Some(said) = no_such_page(wanted, pages) {
-                    return Performed::Done(ToolResult::failed(&call.id, said));
-                }
-                let job = self.editor.begin_move_pages(wanted, *to);
-                self.send_for(call, request.clone(), job, None)
+            Request::InsertPages { .. } => self.insert_pages(call, request.clone(), pages),
+            Request::Undo | Request::Redo => self.step_history(call, request),
+            Request::AskPerson { question, options } => {
+                self.ai.tools.question = Some(Question {
+                    call: call.id.clone(),
+                    asked: question.clone(),
+                    options: options.clone(),
+                    own: String::new(),
+                });
+                Performed::Waiting
             }
+        }
+    }
+
+    fn document_info(&mut self, call: &ToolCall) -> Performed {
+        let sizes = self.shown_page_sizes();
+        let set_aside = self.editor.restrictions_set_aside();
+        let Some(source) = self.editor.source().cloned() else {
+            return Performed::Done(ToolResult::failed(
+                &call.id,
+                "there is no document open in this window",
+            ));
+        };
+        let credential = self.editor.credential().to_vec();
+        Performed::Done(said(
+            &call.id,
+            pdf_agent::about::describe(&source, &credential, sizes, set_aside)
+                .map(|answer| (answer.text, None)),
+        ))
+    }
+
+    fn a_page_command(&mut self, call: &ToolCall, request: Request, pages: usize) -> Performed {
+        let wanted: &[usize] = match &request {
+            Request::DeletePages(wanted)
+            | Request::MovePages { pages: wanted, .. }
+            | Request::RotatePages { pages: wanted, .. } => wanted,
+            _ => return Performed::Done(ToolResult::failed(&call.id, "not a page command")),
+        };
+        if let Some(said) = no_such_page(wanted, pages) {
+            return Performed::Done(ToolResult::failed(&call.id, said));
+        }
+        let job = match &request {
+            Request::DeletePages(wanted) => self.editor.begin_remove_pages(wanted),
+            Request::MovePages { pages: wanted, to } => self.editor.begin_move_pages(wanted, *to),
             Request::RotatePages {
                 pages: wanted,
                 quarter_turns,
-            } => {
-                if let Some(said) = no_such_page(wanted, pages) {
-                    return Performed::Done(ToolResult::failed(&call.id, said));
-                }
-                let job = self.editor.begin_rotate_pages(wanted, *quarter_turns);
-                self.send_for(call, request.clone(), job, None)
-            }
-            Request::InsertPages { .. } => self.insert_pages(call, request.clone(), pages),
-            Request::Undo | Request::Redo => {
-                let back = matches!(request, Request::Undo);
-                if self.running.is_some() {
-                    return Performed::Busy;
-                }
-                if self.walk_history(back) {
-                    self.ai.tools.sent = Some(Sent {
-                        call: call.clone(),
-                        request,
-                        was: None,
-                    });
-                    Performed::Sent
+            } => self.editor.begin_rotate_pages(wanted, *quarter_turns),
+            _ => return Performed::Done(ToolResult::failed(&call.id, "not a page command")),
+        };
+        self.send_for(call, request, job, None)
+    }
+
+    fn step_history(&mut self, call: &ToolCall, request: Request) -> Performed {
+        let back = matches!(request, Request::Undo);
+        if self.running.is_some() {
+            return Performed::Busy;
+        }
+        if self.walk_history(back) {
+            self.ai.tools.sent = Some(Sent {
+                call: call.clone(),
+                request,
+                was: None,
+            });
+            Performed::Sent
+        } else {
+            Performed::Done(ToolResult::said(
+                &call.id,
+                if back {
+                    "There is nothing to undo."
                 } else {
-                    Performed::Done(ToolResult::said(
-                        &call.id,
-                        if back {
-                            "There is nothing to undo."
-                        } else {
-                            "There is nothing to redo."
-                        },
-                    ))
-                }
-            }
+                    "There is nothing to redo."
+                },
+            ))
         }
     }
 
@@ -571,6 +717,240 @@ impl Window {
             .editor
             .begin_edit(page, block, range, &text.replace("\r\n", "\n"));
         self.send_for(call, request, job, was)
+    }
+
+    fn write_pages(
+        &mut self,
+        call: &ToolCall,
+        (from_page, markdown, replace): (usize, &str, bool),
+        (size, family, margin, theme): (f64, &str, f64, &str),
+    ) -> Performed {
+        use pdf_agent::composing::{Faces, Setting, Sheet, compose, theme as themes};
+        if self.ai.tools.writing.is_some() {
+            return self.carry_on_writing(call);
+        }
+        let pages = self.editor.page_count();
+        if from_page >= pages {
+            let said = format!(
+                "there is no page {}: the document has {pages}",
+                from_page + 1
+            );
+            return Performed::Done(ToolResult::failed(&call.id, said));
+        }
+        let Some([wide, high]) = self
+            .shown_page_sizes()
+            .get(from_page)
+            .copied()
+            .filter(|[wide, high]| *wide > 0.0 && *high > 0.0)
+        else {
+            return Performed::Done(ToolResult::failed(
+                &call.id,
+                "that page has no size this program can write on",
+            ));
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a point size, far inside f32"
+        )]
+        let parts = pdf_agent::markup::laying_out::parts(markdown, size as f32);
+        if parts.is_empty() {
+            return Performed::Done(ToolResult::failed(
+                &call.id,
+                "there is nothing to write in that markdown",
+            ));
+        }
+        let Some(fonts) = self.editor.fonts() else {
+            return Performed::Done(ToolResult::failed(
+                &call.id,
+                "no fonts were found on this machine",
+            ));
+        };
+        if !replace && self.editor.leaf(from_page).is_none() {
+            return Performed::NeedPages(vec![from_page]);
+        }
+        let start = if replace {
+            None
+        } else {
+            self.bottom_of_everything(from_page)
+                .map(|below| below + size)
+        };
+        let theme = themes::named(theme).unwrap_or_else(themes::default_theme);
+        let setting = Setting {
+            sheet: Sheet {
+                wide,
+                high,
+                margin: margin.min(wide / 3.0).min(high / 3.0),
+            },
+            from_page,
+            start,
+            family,
+            theme,
+            body: size,
+        };
+        let composed = match compose(&parts, &setting, &Faces(fonts)) {
+            Ok(composed) => composed,
+            Err(why) => {
+                return Performed::Done(ToolResult::failed(
+                    &call.id,
+                    format!("nothing was written: {why}"),
+                ));
+            }
+        };
+        self.ai.tools.writing = Some(Writing {
+            marks: composed.marks.into(),
+            pieces: composed.pieces,
+            pages: composed.pages,
+            written: 0,
+            family: family.to_owned(),
+            theme: theme.name.to_owned(),
+            first_page: from_page,
+            left_out: composed.left_out,
+        });
+        self.carry_on_writing(call)
+    }
+
+    fn carry_on_writing(&mut self, call: &ToolCall) -> Performed {
+        use pdf_agent::composing::Mark;
+        let Some(writing) = self.ai.tools.writing.as_ref() else {
+            return Performed::Done(ToolResult::failed(&call.id, "nothing is being written"));
+        };
+        let Some(mark) = writing.marks.front().cloned() else {
+            let (pieces, pages, first) = (writing.pieces, writing.pages, writing.first_page);
+            let left_out = if writing.left_out.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " Left out, as no face on this machine draws them: {}.",
+                    writing.left_out
+                )
+            };
+            let said = format!(
+                "Written: {pieces} pieces of text over {pages} page{} in {}, theme {}.{left_out}",
+                if pages == 1 { "" } else { "s" },
+                writing.family,
+                writing.theme
+            );
+            self.ai.tools.writing = None;
+            self.ai.say_the_document_changed(first + 1);
+            return Performed::Done(ToolResult::said(&call.id, said));
+        };
+        match mark {
+            Mark::NewPage { after } => {
+                let size = self
+                    .editor
+                    .geometry(after)
+                    .and_then(|geometry| {
+                        pdf_render::DeviceTransform::for_page(
+                            geometry,
+                            1.0,
+                            pdf_render::RenderLimits::default(),
+                        )
+                        .ok()
+                        .map(|device| [f64::from(device.width), f64::from(device.height)])
+                    })
+                    .unwrap_or([595.276, 841.89]);
+                let request = Request::AddBlankPage {
+                    after: after + 1,
+                    size: Some(size),
+                };
+                let job = self.editor.begin_add_page(after, false, size);
+                self.send_for(call, request, job, None)
+            }
+            Mark::Text {
+                page,
+                area,
+                text,
+                style,
+            } => self.write_a_piece(call, page, area, (text, style)),
+            Mark::Shape {
+                page,
+                steps,
+                stroke,
+                fill,
+            } => self.draw_a_shape(call, page, &steps, (stroke, fill)),
+        }
+    }
+
+    fn write_a_piece(
+        &mut self,
+        call: &ToolCall,
+        page: usize,
+        area: [f64; 4],
+        (text, style): (String, pdf_agent::composing::Style),
+    ) -> Performed {
+        let Some(leaf) = self.editor.leaf(page).map(std::sync::Arc::clone) else {
+            return Performed::NeedPages(vec![page]);
+        };
+        let frame = match desk::to_user(&leaf.view, area) {
+            Ok(frame) => frame,
+            Err(why) => {
+                self.ai.tools.writing = None;
+                return Performed::Done(ToolResult::failed(&call.id, why));
+            }
+        };
+        let new = pdf_app::NewTextStyle {
+            family: style.family.clone(),
+            size: style.size,
+            bold: style.bold,
+            italic: style.italic,
+            fill: style.colour,
+            paragraph: pdf_edit::ParagraphLayout::default(),
+        };
+        let job = self.editor.begin_place_text(page, frame, &text, &new);
+        let request = Request::AddText {
+            page,
+            area,
+            text,
+            style: pdf_agent::tools::request::NewText {
+                family: style.family,
+                size: style.size,
+                bold: style.bold,
+                italic: style.italic,
+                fill: style.colour,
+            },
+        };
+        self.send_for(call, request, job, None)
+    }
+
+    fn draw_a_shape(
+        &mut self,
+        call: &ToolCall,
+        page: usize,
+        steps: &[pdf_edit::PenStep],
+        (stroke, fill): Paint,
+    ) -> Performed {
+        let Some(leaf) = self.editor.leaf(page).map(std::sync::Arc::clone) else {
+            return Performed::NeedPages(vec![page]);
+        };
+        let steps = match desk::steps_in_user_space(&leaf.view, steps) {
+            Ok(steps) => steps,
+            Err(why) => {
+                self.ai.tools.writing = None;
+                return Performed::Done(ToolResult::failed(&call.id, why));
+            }
+        };
+        let stroke = stroke.map(|(colour, width)| pdf_edit::PenStroke::pen(colour, width));
+        let job = self.editor.begin_draw_path(
+            page,
+            steps,
+            (stroke, fill),
+            (false, pdf_app::document::Drew::Shape),
+        );
+        match pdf_agent::tools::request::parse(&call.name, &call.arguments) {
+            Ok(request) => self.send_for(call, request, job, None),
+            Err(why) => {
+                self.ai.tools.writing = None;
+                Performed::Done(ToolResult::failed(&call.id, why))
+            }
+        }
+    }
+
+    fn bottom_of_everything(&self, page: usize) -> Option<f64> {
+        let leaf = self.editor.leaf(page)?;
+        (0..leaf.view.index.blocks.len())
+            .filter_map(|index| desk::read_block(&leaf.view, page, index))
+            .map(|block| block.area[3])
+            .max_by(f64::total_cmp)
     }
 
     fn add_text(

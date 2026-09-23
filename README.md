@@ -53,10 +53,6 @@ to those instructions, and every other byte stays where it was.
 
 ## Download
 
-> **There is no release yet.** The table below is where the downloads will be,
-> and every link goes to the latest release's own page. Until the first one is
-> cut, build it from source -- it is three commands.
-
 | Architecture | Windows | Linux | macOS |
 | --- | --- | --- | --- |
 | **x86-64 (64-bit)** | [ZIP](../../releases/latest) | [DEB](../../releases/latest) · [RPM](../../releases/latest) · [AppImage](../../releases/latest) · [tar.gz](../../releases/latest) | [DMG](../../releases/latest) |
@@ -98,7 +94,7 @@ dialog, `curl` for the assistant.
 ## Status
 
 **In development.** It runs, it opens and edits real documents, and it is not
-finished. There is no release yet, and no promise that today's behaviour is
+finished. Releases are previews, with no promise that today's behaviour is
 tomorrow's. Try it, and say what broke.
 
 ## Contributing

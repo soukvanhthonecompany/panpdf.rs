@@ -47,6 +47,8 @@ end of this file, and no other is allowed.
 | `pdf-session` | Open document, interpreted pages, invalidation, and revision-bound selection: object references, the frozen candidate stack and frozen gestures |
 | `pdf-cli` | Engine-facing queries, verification and the native CLI |
 | `pdf-ocr` | Reading the words a scanned page shows, by running an installed recogniser, as a layer for `pdf-edit` to write |
+| `pdf-compose` | A written document as Markdown states it: the model a page layout is derived from, with no paint, no file and no dependency |
+| `pdf-heap` | Asking the allocator to hand freed memory back to the operating system. The only crate where `unsafe` is allowed, by the design record: four C calls, no dependency, its own lint table so the workspace rule stays `forbid` |
 | `pdf-print` | Printing: which pages, on what paper, how large and how many to a sheet; each sheet drawn as it prints; and the job given to the system's print service -- CUPS over IPP, or Windows's spooler |
 | `pdf-app` | Editor logic and the window: the product's one front end |
 | `pdf-agent` | The engine offered to AI agents over the Model Context Protocol (`panpdf-mcp`): the second front end, with no window |
@@ -240,8 +242,10 @@ change here; an edge added needs a reason above.
 | `pdf-session` | `pdf-bytes`, `pdf-content`, `pdf-edit`, `pdf-paint`, `pdf-semantics`, `pdf-syntax` |
 | `pdf-cli` | `pdf-bytes`, `pdf-content`, `pdf-edit`, `pdf-paint`, `pdf-render`, `pdf-semantics`, `pdf-session`, `pdf-syntax` |
 | `pdf-ocr` | `pdf-bytes`, `pdf-content`, `pdf-edit`, `pdf-paint`, `pdf-render`, `pdf-session` |
+| `pdf-compose` | nothing |
+| `pdf-heap` | nothing |
 | `pdf-print` | `pdf-bytes`, `pdf-content`, `pdf-render`, `pdf-session`, `pdf-syntax` |
-| `pdf-app` | `pdf-agent`, `pdf-bytes`, `pdf-cli`, `pdf-content`, `pdf-edit`, `pdf-ocr`, `pdf-paint`, `pdf-print`, `pdf-render`, `pdf-semantics`, `pdf-session`, `pdf-syntax` |
-| `pdf-window` | `pdf-agent`, `pdf-app`, `pdf-bytes`, `pdf-cli`, `pdf-content`, `pdf-edit`, `pdf-ocr`, `pdf-paint`, `pdf-print`, `pdf-render`, `pdf-semantics`, `pdf-session`, `pdf-syntax` |
+| `pdf-app` | `pdf-agent`, `pdf-bytes`, `pdf-cli`, `pdf-content`, `pdf-edit`, `pdf-heap`, `pdf-ocr`, `pdf-paint`, `pdf-print`, `pdf-render`, `pdf-semantics`, `pdf-session`, `pdf-syntax` |
+| `pdf-window` | `pdf-agent`, `pdf-app`, `pdf-bytes`, `pdf-cli`, `pdf-content`, `pdf-edit`, `pdf-heap`, `pdf-ocr`, `pdf-paint`, `pdf-print`, `pdf-render`, `pdf-semantics`, `pdf-session`, `pdf-syntax` |
 | `pdf-desktop` | `pdf-app`, `pdf-bytes`, `pdf-cli`, `pdf-edit`, `pdf-semantics`, `pdf-session`, `pdf-window` |
 | `pdf-agent` | `pdf-bytes`, `pdf-cli`, `pdf-content`, `pdf-edit`, `pdf-paint`, `pdf-render`, `pdf-semantics`, `pdf-session` |

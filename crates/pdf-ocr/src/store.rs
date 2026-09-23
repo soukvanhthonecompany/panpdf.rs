@@ -300,7 +300,7 @@ mod tests {
             quality: Quality::Fast,
             bytes: u64::try_from(data.len()).expect("a small test file"),
             blob,
-            cer: 11.6,
+            cer: Some(11.6),
         }
     }
 

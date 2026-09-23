@@ -305,3 +305,81 @@ fn every_result_answers_the_call_that_asked_for_it() {
         .collect();
     assert_eq!(ids, ["call_1", "call_2"]);
 }
+
+fn asked_a_question() -> Tools {
+    let mut tools = Tools::default();
+    tools.take(&[call("call_q", "ask_person")]);
+    tools.question = Some(super::Question {
+        call: "call_q".to_owned(),
+        asked: "Which theme?".to_owned(),
+        options: vec![
+            ("ocean".to_owned(), String::new()),
+            ("forest".to_owned(), String::new()),
+        ],
+        own: String::new(),
+    });
+    tools
+}
+
+#[test]
+fn the_persons_answer_is_the_questions_result() {
+    let mut tools = asked_a_question();
+    assert!(tools.busy(), "waiting on the person");
+    tools.answer_the_question(super::QuestionReply::Said("forest".to_owned()));
+    assert!(tools.question.is_none());
+    assert_eq!(
+        tools.results,
+        [ToolResult::said("call_q", "The person answered: forest")]
+    );
+    assert!(!tools.busy());
+
+    let mut tools = asked_a_question();
+    tools.answer_the_question(super::QuestionReply::Skipped);
+    let [result] = tools.results.as_slice() else {
+        panic!("one result");
+    };
+    assert!(!result.is_error, "skipping is an answer, not a failure");
+    assert!(
+        result.text.starts_with("The person skipped"),
+        "{}",
+        result.text
+    );
+    assert!(!tools.busy());
+}
+
+#[test]
+fn a_question_needs_no_permission() {
+    let facts =
+        pdf_agent::tools::facts("ask_person").map(|facts| (facts.read_only, facts.destructive));
+    for mode in [Mode::AskBeforeChanges, Mode::DoIt] {
+        assert_eq!(decide(mode, "ask_person", facts, false), Decision::Run);
+    }
+    assert!(matches!(
+        decide(Mode::ChatOnly, "ask_person", facts, false),
+        Decision::Refuse(_)
+    ));
+}
+
+#[test]
+fn what_is_being_done_is_said() {
+    use super::Doing;
+    let mut tools = Tools::default();
+    assert!(tools.doing().is_none());
+    tools.take(&[ToolCall {
+        id: "call_r".to_owned(),
+        name: "read_text".to_owned(),
+        arguments: Json::parse(r#"{"document":"doc-1","first_page":2,"last_page":2}"#)
+            .expect("JSON"),
+    }]);
+    let Some(Doing::Tool(name, request)) = tools.doing() else {
+        panic!("a tool");
+    };
+    assert_eq!(name, "read_text");
+    assert_eq!(
+        pdf_app::ai_status::doing(&request, Lang::English),
+        "Reading page 2"
+    );
+    let mut asking = asked_a_question();
+    asking.queue.clear();
+    assert!(matches!(asking.doing(), Some(Doing::Asking)));
+}

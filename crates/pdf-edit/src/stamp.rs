@@ -388,7 +388,7 @@ pub(crate) fn plan_stamp(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use pdf_bytes::{ByteStore, SourceId};
@@ -438,7 +438,7 @@ mod tests {
         ByteStore::new(SourceId::new(1), bytes)
     }
 
-    fn two_pages() -> ByteStore {
+    pub(crate) fn two_pages() -> ByteStore {
         let content = "0 0 0 rg 10 10 20 20 re f";
         let stream = format!(
             "<< /Length {} >>\nstream\n{content}\nendstream",

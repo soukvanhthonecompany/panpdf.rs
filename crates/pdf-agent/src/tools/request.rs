@@ -45,6 +45,15 @@ pub enum Request {
         text: String,
         style: NewText,
     },
+    WritePages {
+        from_page: usize,
+        markdown: String,
+        replace: bool,
+        size: f64,
+        family: String,
+        margin: f64,
+        theme: String,
+    },
     SetProperties(pdf_edit::info::InfoEdit),
     FillField {
         name: String,
@@ -70,6 +79,10 @@ pub enum Request {
     },
     Undo,
     Redo,
+    AskPerson {
+        question: String,
+        options: Vec<(String, String)>,
+    },
 }
 
 impl Request {
@@ -82,6 +95,7 @@ impl Request {
                 | Self::FindText { .. }
                 | Self::RenderPage { .. }
                 | Self::ListFonts { .. }
+                | Self::AskPerson { .. }
         )
     }
 }
@@ -132,6 +146,7 @@ pub fn parse(name: &str, arguments: &Json) -> Result<Request, String> {
             text: args.required("text")?.to_owned(),
         }),
         "add_text" => add_text(&args),
+        "write_pages" => write_pages(&args),
         "set_properties" => set_properties(&args),
         "fill_field" => Ok(Request::FillField {
             name: args.required("name")?.to_owned(),
@@ -164,8 +179,45 @@ pub fn parse(name: &str, arguments: &Json) -> Result<Request, String> {
         }),
         "undo" => Ok(Request::Undo),
         "redo" => Ok(Request::Redo),
+        "ask_person" => ask_person(&args),
         _ => Err(format!("there is no tool called {name}")),
     }
+}
+
+const MOST_OPTIONS: usize = 4;
+
+fn ask_person(args: &Args) -> Result<Request, String> {
+    let question = args.required("question")?.trim().to_owned();
+    if question.is_empty() {
+        return Err("`question` is empty".to_owned());
+    }
+    let listed = args
+        .0
+        .get("options")
+        .and_then(Json::as_list)
+        .ok_or("`options` is needed: two to four answers, each with a `label`")?;
+    let mut options = Vec::new();
+    for option in listed {
+        let label = option
+            .get("label")
+            .and_then(Json::as_str)
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .ok_or("every option needs a `label`")?;
+        let means = option
+            .get("description")
+            .and_then(Json::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        options.push((label.to_owned(), means.to_owned()));
+    }
+    if !(2..=MOST_OPTIONS).contains(&options.len()) {
+        return Err(format!(
+            "give two to {MOST_OPTIONS} options, not {}; the person can always type their own",
+            options.len()
+        ));
+    }
+    Ok(Request::AskPerson { question, options })
 }
 
 fn optional_page(args: &Args, key: &str) -> Result<Option<usize>, String> {
@@ -209,6 +261,47 @@ fn add_text(args: &Args) -> Result<Request, String> {
             italic: args.flag("italic"),
             fill,
         },
+    })
+}
+
+fn write_pages(args: &Args) -> Result<Request, String> {
+    let markdown = args.required("markdown")?.to_owned();
+    if markdown.trim().is_empty() {
+        return Err("`markdown` is empty: there is nothing to write".to_owned());
+    }
+    let size = args
+        .number("size")
+        .filter(|size| (4.0..=96.0).contains(size))
+        .unwrap_or(11.0);
+    let margin = args
+        .number("margin")
+        .filter(|margin| (0.0..=300.0).contains(margin))
+        .unwrap_or(56.0);
+    let family = match args.text("font") {
+        Some(family) => family.to_owned(),
+        None => crate::about::family_for(&markdown)
+            .ok_or("no installed font has every character of this text: pass `font`")?,
+    };
+    let theme = match args.text("theme") {
+        None => crate::composing::theme::default_theme().name.to_owned(),
+        Some(name) => crate::composing::theme::named(name)
+            .ok_or_else(|| {
+                format!(
+                    "there is no theme \"{name}\": {}",
+                    crate::composing::theme::names().join(", ")
+                )
+            })?
+            .name
+            .to_owned(),
+    };
+    Ok(Request::WritePages {
+        from_page: args.page("from_page").unwrap_or(0),
+        markdown,
+        replace: args.flag("replace"),
+        size,
+        family,
+        margin,
+        theme,
     })
 }
 

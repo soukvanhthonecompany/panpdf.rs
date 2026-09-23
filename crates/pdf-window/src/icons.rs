@@ -51,6 +51,11 @@ pub(crate) enum Icon {
     SignatureField,
     PushButton,
     Arrange,
+    FitToPaper,
+    BringToFront,
+    BringForward,
+    SendBackward,
+    SendToBack,
     LinkAddresses,
     NamedPlaces,
     Unlink,
@@ -58,6 +63,31 @@ pub(crate) enum Icon {
     RotateLeft,
     RotateRight,
     More,
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "the assistant panel is not built for the browser")
+    )]
+    Copy,
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "the assistant panel is not built for the browser")
+    )]
+    Edit,
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "the assistant panel is not built for the browser")
+    )]
+    AskAgain,
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "the assistant panel is not built for the browser")
+    )]
+    Send,
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "the assistant panel is not built for the browser")
+    )]
+    Stop,
     #[cfg_attr(
         target_arch = "wasm32",
         expect(
@@ -80,6 +110,7 @@ const HILL: [u8; 3] = [34, 150, 90];
 const CHAIN: [u8; 3] = [14, 116, 196];
 const TAKE_AWAY: [u8; 3] = [220, 38, 38];
 const SHAPE_FILL: [u8; 3] = [249, 115, 22];
+const STACK: [u8; 3] = [124, 58, 237];
 
 const HEAVIER: f32 = 1.3;
 const BOLD_WEIGHT: f32 = 1.7;
@@ -89,6 +120,10 @@ impl Icon {
         self.draw_tinted(painter, rect, colour, false);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a table of drawings, one arm per icon"
+    )]
     pub(crate) fn draw_tinted(
         self,
         painter: &egui::Painter,
@@ -162,6 +197,11 @@ impl Icon {
             Self::SignatureField => signature_field(&pen),
             Self::PushButton => push_button(&pen),
             Self::Arrange => arrange(&pen),
+            Self::FitToPaper => fit_to_paper(&pen),
+            Self::BringToFront => ordering(&pen, true, true),
+            Self::BringForward => ordering(&pen, true, false),
+            Self::SendBackward => ordering(&pen, false, false),
+            Self::SendToBack => ordering(&pen, false, true),
             Self::LinkAddresses => link_addresses(&pen),
             Self::NamedPlaces => named_places(&pen),
             Self::Unlink => unlink(&pen),
@@ -173,6 +213,33 @@ impl Icon {
                     pen.dot((x, 0.5), 0.09);
                 }
             }
+            Self::Copy => {
+                pen.line(&[
+                    (0.34, 0.30),
+                    (0.34, 0.10),
+                    (0.90, 0.10),
+                    (0.90, 0.66),
+                    (0.70, 0.66),
+                ]);
+                pen.frame((0.10, 0.34), (0.66, 0.90), 0.06);
+            }
+            Self::Edit => {
+                pen.line(&[
+                    (0.14, 0.86),
+                    (0.18, 0.66),
+                    (0.68, 0.16),
+                    (0.84, 0.32),
+                    (0.34, 0.82),
+                    (0.14, 0.86),
+                ]);
+                pen.line(&[(0.58, 0.26), (0.74, 0.42)]);
+            }
+            Self::AskAgain => again(&pen),
+            Self::Send => {
+                pen.line(&[(0.5, 0.86), (0.5, 0.16)]);
+                pen.line(&[(0.22, 0.42), (0.5, 0.14), (0.78, 0.42)]);
+            }
+            Self::Stop => pen.block((0.24, 0.24), (0.76, 0.76), 0.08),
         }
     }
 }
@@ -204,6 +271,17 @@ impl Pen<'_> {
 
     fn in_accent(&self, rgb: [u8; 3]) -> Self {
         let colour = self.accent(rgb);
+        Pen {
+            painter: self.painter,
+            rect: self.rect,
+            stroke: egui::Stroke::new(self.stroke.width, colour),
+            colour,
+            tinted: self.tinted,
+        }
+    }
+
+    fn weak(&self) -> Self {
+        let colour = self.colour.gamma_multiply(0.38);
         Pen {
             painter: self.painter,
             rect: self.rect,
@@ -299,6 +377,36 @@ fn save(pen: &Pen<'_>) {
     ]);
     pen.line(&[(0.28, 0.10), (0.28, 0.34), (0.64, 0.34), (0.64, 0.10)]);
     pen.frame((0.26, 0.56), (0.74, 0.90), 0.0);
+}
+
+fn again(pen: &Pen<'_>) {
+    let steps = 20_u8;
+    let (centre, radius) = ((0.5_f32, 0.52_f32), 0.33_f32);
+    let start = -std::f32::consts::FRAC_PI_2 + 0.45;
+    let sweep = std::f32::consts::TAU * 0.82;
+    let arc: Vec<(f32, f32)> = (0..=steps)
+        .map(|step| {
+            let angle = start + sweep * f32::from(step) / f32::from(steps);
+            (
+                centre.0 + radius * angle.cos(),
+                centre.1 + radius * angle.sin(),
+            )
+        })
+        .collect();
+    pen.line(&arc);
+    let end = start + sweep;
+    let (tip_x, tip_y) = (centre.0 + radius * end.cos(), centre.1 + radius * end.sin());
+    let (along_x, along_y) = (-end.sin(), end.cos());
+    let barb = |turn: f32| {
+        let (sin, cos) = turn.sin_cos();
+        let (back_x, back_y) = (-along_x, -along_y);
+        (
+            tip_x + 0.2 * (back_x * cos - back_y * sin),
+            tip_y + 0.2 * (back_x * sin + back_y * cos),
+        )
+    };
+    let spread = 0.6;
+    pen.line(&[barb(spread), (tip_x, tip_y), barb(-spread)]);
 }
 
 fn turn(pen: &Pen<'_>, forwards: bool) {
@@ -758,6 +866,50 @@ fn arrange(pen: &Pen<'_>) {
     pen.block((0.20, 0.68), (0.78, 0.86), 0.04);
 }
 
+fn fit_to_paper(pen: &Pen<'_>) {
+    pen.frame((0.06, 0.02), (0.94, 0.98), 0.04);
+    let inner = pen.in_accent(STACK);
+    inner.frame((0.30, 0.30), (0.70, 0.70), 0.03);
+    let arrows = pen.heavier(HEAVIER);
+    arrows.line(&[(0.12, 0.22), (0.24, 0.22), (0.24, 0.10)]);
+    arrows.line(&[(0.88, 0.22), (0.76, 0.22), (0.76, 0.10)]);
+    arrows.line(&[(0.12, 0.78), (0.24, 0.78), (0.24, 0.90)]);
+    arrows.line(&[(0.88, 0.78), (0.76, 0.78), (0.76, 0.90)]);
+}
+
+fn ordering(pen: &Pen<'_>, forward: bool, all_the_way: bool) {
+    let other = ((0.02, 0.34), (0.52, 0.84));
+    let moving = ((0.18, 0.14), (0.68, 0.64));
+    let pale = pen.weak();
+    let accent = pen.in_accent(STACK);
+    if forward {
+        pale.block(other.0, other.1, 0.08);
+        accent.block(moving.0, moving.1, 0.08);
+    } else {
+        accent.block(moving.0, moving.1, 0.08);
+        pale.block(other.0, other.1, 0.08);
+    }
+    let ys: &[f32] = match (forward, all_the_way) {
+        (true, false) => &[0.36],
+        (true, true) => &[0.20, 0.48],
+        (false, false) => &[0.60],
+        (false, true) => &[0.48, 0.76],
+    };
+    let badge = pen.heavier(HEAVIER);
+    for &y in ys {
+        chevron_badge(&badge, y, forward);
+    }
+}
+
+fn chevron_badge(pen: &Pen<'_>, y: f32, up: bool) {
+    let (near, far) = if up {
+        (y + 0.10, y - 0.10)
+    } else {
+        (y - 0.10, y + 0.10)
+    };
+    pen.line(&[(0.74, near), (0.87, far), (1.00, near)]);
+}
+
 fn link_addresses(pen: &Pen<'_>) {
     for start in [0.04, 0.34, 0.64] {
         pen.line(&[
@@ -883,6 +1035,10 @@ mod tests {
             Icon::SignatureField,
             Icon::PushButton,
             Icon::Arrange,
+            Icon::BringToFront,
+            Icon::BringForward,
+            Icon::SendBackward,
+            Icon::SendToBack,
             Icon::LinkAddresses,
             Icon::NamedPlaces,
             Icon::Unlink,
@@ -891,12 +1047,17 @@ mod tests {
             Icon::RotateRight,
             Icon::More,
             Icon::Close,
+            Icon::Copy,
+            Icon::Edit,
+            Icon::AskAgain,
+            Icon::Send,
+            Icon::Stop,
         ];
         for (step, icon) in every.iter().enumerate() {
             for other in &every[step + 1..] {
                 assert_ne!(icon, other, "two of the same icon");
             }
         }
-        assert_eq!(every.len(), 53);
+        assert_eq!(every.len(), 62);
     }
 }

@@ -332,6 +332,31 @@ impl Desk {
         apply(open, &command)
     }
 
+    pub fn draw(
+        &mut self,
+        handle: &str,
+        page: usize,
+        steps: &[pdf_edit::PenStep],
+        stroke: Option<([f64; 3], f64)>,
+        fill: Option<[f64; 3]>,
+    ) -> Result<(), Refused> {
+        let open = self.get(handle)?;
+        let view = view_of(&mut open.session, page)?;
+        let command = Command::DrawPath {
+            page_index: page,
+            steps: steps_in_user_space(&view, steps)?,
+            closed: false,
+            stroke: stroke.map(|(colour, width)| pdf_edit::PenStroke::pen(colour, width)),
+            fill,
+        };
+        apply(open, &command)
+    }
+
+    #[must_use]
+    pub fn fonts(&self) -> Option<Arc<dyn pdf_content::FontProvider>> {
+        self.fonts.clone()
+    }
+
     pub fn command(&mut self, handle: &str, command: &Command) -> Result<(), Refused> {
         let open = self.get(handle)?;
         apply(open, command)
@@ -574,6 +599,32 @@ pub fn to_user(view: &PageView, [left, top, right, bottom]: [f64; 4]) -> Result<
         one.x.max(other.x),
         one.y.max(other.y),
     ])
+}
+
+pub fn steps_in_user_space(
+    view: &PageView,
+    steps: &[pdf_edit::PenStep],
+) -> Result<Vec<pdf_edit::PenStep>, Refused> {
+    let device = device(view)?;
+    let inverse = device
+        .matrix
+        .inverse()
+        .ok_or_else(|| "this page has no size".to_owned())?;
+    let thousandths = |value: f64| (value * 1000.0).round() / 1000.0;
+    let point = |(x, y): (f64, f64)| {
+        let at = inverse.transform(Point { x, y });
+        (thousandths(at.x), thousandths(at.y))
+    };
+    Ok(steps
+        .iter()
+        .map(|step| match *step {
+            pdf_edit::PenStep::Move(at) => pdf_edit::PenStep::Move(point(at)),
+            pdf_edit::PenStep::Line(at) => pdf_edit::PenStep::Line(point(at)),
+            pdf_edit::PenStep::Curve(one, other, end) => {
+                pdf_edit::PenStep::Curve(point(one), point(other), point(end))
+            }
+        })
+        .collect())
 }
 
 #[must_use]

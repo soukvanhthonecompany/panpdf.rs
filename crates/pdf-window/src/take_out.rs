@@ -204,6 +204,7 @@ impl Window {
             Choosing::Open
             | Choosing::Pages { .. }
             | Choosing::Picture
+            | Choosing::ChatAttachment
             | Choosing::PicturesIn { .. } => {}
         }
     }

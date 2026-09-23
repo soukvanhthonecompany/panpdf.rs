@@ -6,19 +6,25 @@ use super::{
 use crate::json::Json;
 
 #[test]
-fn a_window_offers_sixteen_of_the_twenty_tools() {
+fn a_window_offers_seventeen_of_the_twenty_one_tools_and_its_own_question() {
     let offered = offered_to_a_window();
-    assert_eq!(offered.len(), 16, "{:?}", offered.len());
+    assert_eq!(offered.len(), 18, "{:?}", offered.len());
     let published = listed();
     let published = published.as_list().expect("a list");
-    assert_eq!(published.len(), 20);
+    assert_eq!(published.len(), 21);
+    assert!(
+        !published
+            .iter()
+            .any(|tool| tool.get("name").and_then(Json::as_str) == Some("ask_person")),
+        "the server does not publish the window's question"
+    );
     for name in NOT_IN_A_WINDOW {
         assert!(
             !offered.iter().any(|tool| tool.name == name),
             "{name} is not offered to a window"
         );
     }
-    for tool in &offered {
+    for tool in offered.iter().filter(|tool| tool.name != "ask_person") {
         let same = published
             .iter()
             .find(|it| it.get("name").and_then(Json::as_str) == Some(tool.name.as_str()))
@@ -48,6 +54,7 @@ fn what_a_tool_does_is_read_from_the_same_table() {
             "list_fonts".to_owned(),
             "read_text".to_owned(),
             "render_page".to_owned(),
+            "ask_person".to_owned(),
         ])
     );
     let destructive: BTreeSet<String> = offered_to_a_window()

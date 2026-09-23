@@ -239,6 +239,61 @@ impl Frames {
         }
     }
 
+    pub fn resized_and_relaid(
+        &mut self,
+        page: usize,
+        block: usize,
+        started: Rect,
+        grown: Rect,
+        edges: Edges,
+        breaks: Breaks,
+    ) {
+        let mut before = self.page(page).to_vec();
+        if let Some(bounds) = before.get_mut(block) {
+            *bounds = started;
+        }
+        let declared_before = self.declared_page(page);
+        let edges_before = self.edges_page(page);
+        let breaks_before = self.breaks_page(page);
+        let turns = self.turns_page(page);
+        if let Some(flag) = self
+            .declared
+            .get_mut(&page)
+            .and_then(|flags| flags.get_mut(block))
+        {
+            *flag = true;
+        }
+        if let Some(held) = self.edges.get_mut(&page).and_then(|all| all.get_mut(block)) {
+            *held = edges;
+        }
+        if let Some(held) = self
+            .breaks
+            .get_mut(&page)
+            .and_then(|all| all.get_mut(block))
+        {
+            *held = breaks;
+        }
+        self.preview(page, block, grown);
+        self.record(Change {
+            turns_before: turns.clone(),
+            turns_after: turns,
+            page,
+            before,
+            after: self.page(page).to_vec(),
+            declared_before,
+            declared_after: self.declared_page(page),
+            edges_before,
+            edges_after: self.edges_page(page),
+            breaks_before,
+            breaks_after: self.breaks_page(page),
+            source: true,
+            pages: None,
+            parked: false,
+            forgets: false,
+            taken: Vec::new(),
+        });
+    }
+
     pub fn pages_forgotten(&mut self, pages: &[usize]) {
         let taken: Vec<(usize, Option<Kept>)> = pages
             .iter()

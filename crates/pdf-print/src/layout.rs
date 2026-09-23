@@ -155,6 +155,7 @@ pub struct Settings {
     pub order: Order,
     pub auto_rotate: bool,
     pub margin: f64,
+    pub nudge: [f64; 2],
 }
 
 impl Default for Settings {
@@ -167,6 +168,7 @@ impl Default for Settings {
             order: Order::Horizontal,
             auto_rotate: true,
             margin: DEFAULT_MARGIN,
+            nudge: [0.0, 0.0],
         }
     }
 }
@@ -336,6 +338,8 @@ fn single(page: usize, size: [f64; 2], settings: &Settings) -> Sheet {
         (scale, turned),
         [margin, margin, sheet[0] - margin, sheet[1] - margin],
     );
+    placement.matrix[4] += settings.nudge[0];
+    placement.matrix[5] += settings.nudge[1];
     placement.clip = [0.0, 0.0, sheet[0], sheet[1]];
     Sheet {
         size: sheet,

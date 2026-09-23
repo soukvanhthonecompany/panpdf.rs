@@ -1,4 +1,6 @@
+mod catalogue;
 pub mod models;
+pub mod names;
 pub mod setup;
 pub mod sha1;
 pub mod store;

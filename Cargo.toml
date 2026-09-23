@@ -6,10 +6,12 @@ members = [
     "crates/pdf-app",
     "crates/pdf-bytes",
     "crates/pdf-cli",
+    "crates/pdf-compose",
     "crates/pdf-desktop",
     "crates/pdf-content",
     "crates/pdf-edit",
     "crates/pdf-font",
+    "crates/pdf-heap",
     "crates/pdf-ocr",
     "crates/pdf-paint",
     "crates/pdf-print",
@@ -22,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.97"
 license = "AGPL-3.0-only"

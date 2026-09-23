@@ -49,6 +49,10 @@ pub enum Message {
     DiscardChanges,
     CancelLeaving,
     ResolveDraftBeforeSaving,
+    SaveWaitsForTheRunningEdit,
+    SaveWaitsForTypingToLand,
+    SaveWaitsForTheDraft,
+    SaveWaitsForTheDocumentToOpen,
     EditingRestricted,
     EditingRestrictedWarning,
     EditAnyway,
@@ -232,6 +236,7 @@ pub enum Message {
     PrintOrderIs(pdf_print::Order),
     PrintBorders,
     PrintAutoRotate,
+    PrintFitAgain,
     PrintMargin,
     PrintMarginOfPrinter {
         millimetres: String,
@@ -463,10 +468,15 @@ pub enum Message {
         why: String,
     },
 
-    FrameStopsAtText,
     FrameDeclared {
         wide: f64,
         high: f64,
+        relaid: bool,
+    },
+    FrameKeptNotRelaid {
+        wide: f64,
+        high: f64,
+        why: String,
     },
     ParagraphOf {
         rows: usize,
@@ -538,6 +548,7 @@ pub enum Message {
     NothingInTheWay,
     FlowRoundFellBehind,
     TextFlowsRoundThis,
+    OrderingWaitsForThePage,
     TextMadeWay {
         blocks: usize,
     },
@@ -584,10 +595,60 @@ pub enum Message {
     AiBaseUrl,
     AiApiKey,
     AiModel,
+    AiProvider,
+    AiAttach,
+    AiHistory,
+    AiNewChatTitle,
+    AiNoChatsYet,
+    AiUntitledChat,
+    AiForgetChat,
+    AiKeepTheKey,
+    AiKeepTheKeyMeans,
+    AiKeptKeyUnreadable,
+    AiNowOnDocument(String),
+    AiResetToDefault,
+    AiFullAccessAsk,
+    AiFullAccessMeans,
+    AiFullAccessConfirm,
+    AiAdd,
+    AiAttachFiles,
+    AiAttachFilesMeans,
+    AiEffortOffMeans,
+    AiEffortNoneMeans,
+    AiEffortLowMeans,
+    AiEffortMediumMeans,
+    AiEffortHighMeans,
     AiTestConnection,
     AiCancel,
     AiDisconnect,
     AiConnected,
+    AiConnectedTo,
+    AiNotConnected,
+    AiCheckingConnection,
+    AiNotConnectedYet,
+    AiThisDocumentsChat,
+    AiEdit,
+    AiEditMeans,
+    AiAskAgain,
+    AiAskAgainMeans,
+    AiWentBack,
+    AiWentBackDocumentStays,
+    AiPutBack,
+    AiChatMenu,
+    AiCopyWholeChat,
+    AiDeleteThisChatSure,
+    AiThisDocument,
+    AiOtherChats,
+    AiQuestionForYou,
+    AiOwnAnswer,
+    AiAnswer,
+    AiSkipQuestion,
+    AiWritingTheAnswer,
+    AiWaitingForModel(String),
+    AiWritingPieces {
+        written: usize,
+        pieces: usize,
+    },
     AiAskHint,
     AiIncludeContext {
         characters: usize,
@@ -624,6 +685,7 @@ pub enum Message {
     AiTooManyRounds,
     AiEffort,
     AiEffortOff,
+    AiEffortNone,
     AiEffortLow,
     AiEffortMedium,
     AiEffortHigh,
@@ -631,9 +693,11 @@ pub enum Message {
     AiModeChatOnly,
     AiModeAskBeforeChanges,
     AiModeDoIt,
+    AiModeFree,
     AiModeChatOnlyWhat,
     AiModeAskBeforeChangesWhat,
     AiModeDoItWhat,
+    AiModeFreeWhat,
 
     AgentsTitle,
     AgentsWhat,
@@ -652,6 +716,16 @@ pub enum Message {
     Plain(String),
 
     NoGraphics(String),
+
+    DropToAttach,
+    AiAttachPicture,
+    AiAttachPdf,
+    AiAttachText,
+    AiAttachRefused,
+    AiThinkingAloud,
+    AiCopyCode,
+    AiAPicture,
+    AiAnswerCutShort,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -827,6 +901,14 @@ impl Message {
             Self::SaveBeforeLeaving => "Save your changes before leaving this document?".to_owned(),
             Self::DiscardChanges => "Discard changes".to_owned(),
             Self::CancelLeaving => "Cancel".to_owned(),
+            Self::SaveWaitsForTheRunningEdit => "An edit is still running".to_owned(),
+            Self::SaveWaitsForTypingToLand => {
+                "What was typed has not reached the document yet".to_owned()
+            }
+            Self::SaveWaitsForTheDraft => {
+                "A draft has to be retried, copied or discarded first".to_owned()
+            }
+            Self::SaveWaitsForTheDocumentToOpen => "Another document is still opening".to_owned(),
             Self::EditingRestricted => "Editing is restricted".to_owned(),
             Self::EditingRestrictedWarning => "The author of this document set it so that its \
                 content should not be changed. You can edit it anyway: the saved copy keeps the \
@@ -1137,6 +1219,9 @@ impl Message {
             }
             Self::PrintBorders => "Print page borders".to_owned(),
             Self::PrintAutoRotate => "Turn pages to fit the paper".to_owned(),
+            Self::PrintFitAgain => {
+                "Put the page back in the middle, at the size that fits".to_owned()
+            }
             Self::PrintMargin => "Margins".to_owned(),
             Self::PrintMarginOfPrinter { millimetres } => {
                 format!("Printer's margin: {millimetres} mm")
@@ -1356,7 +1441,7 @@ impl Message {
             Self::FieldCheckedByDefault => "Checked by default".to_owned(),
             Self::FieldInUnison => "Buttons with the same name and choice are selected in unison".to_owned(),
             Self::FieldItem => "Item".to_owned(),
-            Self::FieldAddItem => "Add".to_owned(),
+            Self::FieldAddItem | Self::AiAdd => "Add".to_owned(),
             Self::FieldDeleteItem => "Delete".to_owned(),
             Self::FieldItemUp => "Up".to_owned(),
             Self::FieldItemDown => "Down".to_owned(),
@@ -1504,11 +1589,17 @@ impl Message {
             }
             Self::DraftDiscarded => "Draft discarded".to_owned(),
             Self::PageWillNotOpen { page, why } => format!("Page {page} will not open\n{why}"),
-            Self::FrameStopsAtText => {
-                "The frame stops at the text: it cannot be laid out again yet".to_owned()
+            Self::FrameDeclared { wide, high, relaid } => {
+                let done = if *relaid {
+                    "text laid out again"
+                } else {
+                    "text not laid out again"
+                };
+                format!("Frame {wide:.0} by {high:.0} points \u{2014} declared, {done}")
             }
-            Self::FrameDeclared { wide, high } => format!(
-                "Frame {wide:.0} by {high:.0} points \u{2014} declared, text not laid out again"
+            Self::FrameKeptNotRelaid { wide, high, why } => format!(
+                "Frame {wide:.0} by {high:.0} points \u{2014} kept at its new width, but the \
+                 text could not be laid out again: {why}"
             ),
             Self::ParagraphOf { rows, runs } => {
                 format!("Paragraph of {rows} rows{SEP}{runs} show operations")
@@ -1617,6 +1708,7 @@ impl Message {
                 "Let the text flow round this\nThe text keeps clear of its upright box, turned or not"
                     .to_owned()
             }
+            Self::OrderingWaitsForThePage => "This page has not read back yet".to_owned(),
             Self::TextMadeWay { blocks } if *blocks == 1 => {
                 "One block of text moved out of its way".to_owned()
             }
@@ -1686,10 +1778,68 @@ impl Message {
             Self::AiBaseUrl => "Base URL".to_owned(),
             Self::AiApiKey => "API key (session only)".to_owned(),
             Self::AiModel => "Model".to_owned(),
+            Self::AiProvider => "Provider".to_owned(),
+            Self::AiAttach => "Attach a picture or a PDF".to_owned(),
+            Self::AiHistory => "Earlier chats".to_owned(),
+            Self::AiNoChatsYet => "No chats kept yet".to_owned(),
+            Self::AiUntitledChat => "Untitled chat".to_owned(),
+            Self::AiForgetChat => "Delete this chat".to_owned(),
+            Self::AiKeepTheKey => "Keep this key on this machine".to_owned(),
+            Self::AiKeepTheKeyMeans => "The key is written to a file only you can read, \
+                 locked with a secret made for this installation. It keeps the key out of \
+                 backups and screenshots; it does not protect it from a program already \
+                 running as you. Leave it unticked to give the key afresh each session."
+                .to_owned(),
+            Self::AiNowOnDocument(name) => format!("Now on {name}"),
+            Self::AiResetToDefault => "Reset to default".to_owned(),
+            Self::AiFullAccessAsk => "Turn on full access?".to_owned(),
+            Self::AiFullAccessMeans => "The assistant will change the document and take pages \
+                 out of any file on this computer without asking you first. Every change is \
+                 still one step you can undo. You can turn this off again at any time."
+                .to_owned(),
+            Self::AiFullAccessConfirm => "Turn it on".to_owned(),
+            Self::AiAttachFiles => "Pictures or PDFs".to_owned(),
+            Self::AiAttachFilesMeans => "Choose files to send with the question".to_owned(),
+            Self::AiEffortOffMeans => "Leave it to the model".to_owned(),
+            Self::AiEffortNoneMeans => "Answer straight away; fastest".to_owned(),
+            Self::AiEffortLowMeans => "A little thought first".to_owned(),
+            Self::AiEffortMediumMeans => "Think it through; slower".to_owned(),
+            Self::AiEffortHighMeans => "Think hard; slowest, uses the most".to_owned(),
+            Self::AiKeptKeyUnreadable => "The key kept on this machine could not be read. \
+                 Give it again."
+                .to_owned(),
             Self::AiTestConnection => "Test connection".to_owned(),
             Self::AiCancel => "Stop asking".to_owned(),
             Self::AiDisconnect => "Disconnect".to_owned(),
             Self::AiConnected => "Connected".to_owned(),
+            Self::AiConnectedTo => "Connected \u{2713}".to_owned(),
+            Self::AiNotConnected => "Not connected \u{2014} open the settings and give a key".to_owned(),
+            Self::AiCheckingConnection => "Checking the connection\u{2026}".to_owned(),
+            Self::AiNotConnectedYet => "Not connected \u{2014} open the settings".to_owned(),
+            Self::AiThisDocumentsChat => "This document's chat, carried on from last time".to_owned(),
+            Self::AiEdit => "Edit".to_owned(),
+            Self::AiEditMeans => "Go back to this question to change it and ask again".to_owned(),
+            Self::AiAskAgain => "Ask again".to_owned(),
+            Self::AiAskAgainMeans => "Ask for this answer again".to_owned(),
+            Self::AiWentBack => "Went back to an earlier question.".to_owned(),
+            Self::AiWentBackDocumentStays => {
+                "What the assistant changed in the document is still there \u{2014} Undo takes it back.".to_owned()
+            }
+            Self::AiPutBack => "Put the conversation back".to_owned(),
+            Self::AiChatMenu => "More".to_owned(),
+            Self::AiCopyWholeChat => "Copy the whole chat".to_owned(),
+            Self::AiDeleteThisChatSure => "Click again to delete it for good".to_owned(),
+            Self::AiThisDocument => "This document".to_owned(),
+            Self::AiOtherChats => "Other chats".to_owned(),
+            Self::AiQuestionForYou => "A question for you".to_owned(),
+            Self::AiOwnAnswer => "Or type your own answer\u{2026}".to_owned(),
+            Self::AiAnswer => "Answer".to_owned(),
+            Self::AiSkipQuestion => "Skip".to_owned(),
+            Self::AiWritingTheAnswer => "Writing the answer\u{2026}".to_owned(),
+            Self::AiWaitingForModel(model) => format!("Waiting for {model}\u{2026}"),
+            Self::AiWritingPieces { written, pieces } => {
+                format!("Writing the document \u{2014} {written} of {pieces}")
+            }
             Self::AiAskHint => "Ask a question\u{2026}".to_owned(),
             Self::AiIncludeContext { characters } => {
                 format!("Include the text of the page on screen (up to {characters} characters)")
@@ -1712,7 +1862,7 @@ impl Message {
             Self::AiNothingAskedYet => {
                 "Ask about the document on screen, or anything else.".to_owned()
             }
-            Self::AiNewChat => "New chat".to_owned(),
+            Self::AiNewChat | Self::AiNewChatTitle => "New chat".to_owned(),
             Self::AiConnection => "Connection".to_owned(),
             Self::AiYou => "You".to_owned(),
             Self::AiThinking => "Thinking\u{2026}".to_owned(),
@@ -1750,23 +1900,27 @@ impl Message {
             }
             Self::AiEffort => "Thinking".to_owned(),
             Self::AiEffortOff => "Thinking: default".to_owned(),
+            Self::AiEffortNone => "Thinking: off".to_owned(),
             Self::AiEffortLow => "Thinking: low".to_owned(),
             Self::AiEffortMedium => "Thinking: medium".to_owned(),
             Self::AiEffortHigh => "Thinking: high".to_owned(),
             Self::AiMode => "What it may do".to_owned(),
             Self::AiModeChatOnly => "Chat only".to_owned(),
-            Self::AiModeAskBeforeChanges => "Ask before changes".to_owned(),
-            Self::AiModeDoIt => "Do it".to_owned(),
+            Self::AiModeAskBeforeChanges => "Ask for approval".to_owned(),
+            Self::AiModeDoIt => "Approve for me".to_owned(),
+            Self::AiModeFree => "Full access".to_owned(),
             Self::AiModeChatOnlyWhat => {
                 "It answers questions and cannot touch the document.".to_owned()
             }
             Self::AiModeAskBeforeChangesWhat => {
-                "It may read the document; it asks you before it changes anything.".to_owned()
+                "Reads freely; asks you before every change".to_owned()
             }
             Self::AiModeDoItWhat => {
-                "It changes the document without asking, except when it would take pages \
-                 out of another file. Every change is one step you can undo."
+                "Changes without asking; asks only before taking pages from another file"
                     .to_owned()
+            }
+            Self::AiModeFreeWhat => {
+                "Never asks, even to read other files on this computer".to_owned()
             }
             Self::AgentsTitle => "Connect agents".to_owned(),
             Self::AgentsWhat => {
@@ -1803,6 +1957,17 @@ impl Message {
                 crate::speed::A_FRAME_MS,
             ),
             Self::Plain(said) => said.clone(),
+            Self::DropToAttach => "Let go here to attach them to your question".to_owned(),
+            Self::AiAttachPicture => "picture".to_owned(),
+            Self::AiAttachPdf => "PDF".to_owned(),
+            Self::AiAttachText => "text".to_owned(),
+            Self::AiAttachRefused => "refused".to_owned(),
+            Self::AiThinkingAloud => "thinking\u{2026}".to_owned(),
+            Self::AiCopyCode => "Copy this code".to_owned(),
+            Self::AiAPicture => "a picture".to_owned(),
+            Self::AiAnswerCutShort => {
+                "The model ran out of room and stopped here \u{2014} ask it to go on".to_owned()
+            }
         }
     }
 }
@@ -1943,6 +2108,7 @@ mod tests {
             Message::PrintOrderIs(pdf_print::Order::VerticalReversed),
             Message::PrintBorders,
             Message::PrintAutoRotate,
+            Message::PrintFitAgain,
             Message::PrintMargin,
             Message::PrintMarginOfPrinter {
                 millimetres: "3.0".to_owned(),
@@ -2000,12 +2166,80 @@ mod tests {
             Message::AiServiceRefused,
             Message::AiAnswerUnexpected,
             Message::AiDismiss,
+            Message::DropToAttach,
+            Message::AiAttachPicture,
+            Message::AiAttachPdf,
+            Message::AiAttachText,
+            Message::AiAttachRefused,
+            Message::AiThinkingAloud,
+        ]
+    }
+
+    fn newest() -> Vec<Message> {
+        vec![
+            Message::AiCheckingConnection,
+            Message::AiNotConnectedYet,
+            Message::AiThisDocumentsChat,
+            Message::AiEdit,
+            Message::AiEditMeans,
+            Message::AiAskAgain,
+            Message::AiAskAgainMeans,
+            Message::AiWentBack,
+            Message::AiWentBackDocumentStays,
+            Message::AiPutBack,
+            Message::AiChatMenu,
+            Message::AiCopyWholeChat,
+            Message::AiDeleteThisChatSure,
+            Message::AiThisDocument,
+            Message::AiOtherChats,
+            Message::AiQuestionForYou,
+            Message::AiOwnAnswer,
+            Message::AiAnswer,
+            Message::AiSkipQuestion,
+            Message::AiWritingTheAnswer,
+            Message::AiWaitingForModel("qwen".to_owned()),
+            Message::AiWritingPieces {
+                written: 3,
+                pieces: 10,
+            },
+        ]
+    }
+
+    fn latest() -> Vec<Message> {
+        vec![
+            Message::AiCopyCode,
+            Message::AiProvider,
+            Message::AiAttach,
+            Message::AiHistory,
+            Message::AiNewChatTitle,
+            Message::AiNoChatsYet,
+            Message::AiUntitledChat,
+            Message::AiForgetChat,
+            Message::AiKeepTheKey,
+            Message::AiKeepTheKeyMeans,
+            Message::AiKeptKeyUnreadable,
+            Message::AiNowOnDocument("a.pdf".to_owned()),
+            Message::AiResetToDefault,
+            Message::AiFullAccessAsk,
+            Message::AiFullAccessMeans,
+            Message::AiFullAccessConfirm,
+            Message::AiAdd,
+            Message::AiAttachFiles,
+            Message::AiAttachFilesMeans,
+            Message::AiEffortOffMeans,
+            Message::AiEffortNoneMeans,
+            Message::AiEffortLowMeans,
+            Message::AiEffortMediumMeans,
+            Message::AiEffortHighMeans,
+            Message::AiAPicture,
+            Message::AiAnswerCutShort,
+            Message::AiEffortNone,
         ]
     }
 
     #[test]
     fn every_language_answers_every_message_and_answers_differently() {
-        let every = [earlier(), later()].concat();
+        let every = [earlier(), later(), latest(), newest()].concat();
         for message in &every {
             for lang in Lang::ALL {
                 let said = message.say(*lang);
@@ -2059,6 +2293,37 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), spoken, "two languages share a name");
         assert_eq!(spoken, Lang::ALL.len());
+    }
+
+    #[test]
+    fn a_frame_declared_says_whether_it_was_laid_out_again() {
+        let relaid = Message::FrameDeclared {
+            wide: 40.0,
+            high: 20.0,
+            relaid: true,
+        };
+        let not = Message::FrameDeclared {
+            wide: 40.0,
+            high: 20.0,
+            relaid: false,
+        };
+        assert!(relaid.say(Lang::English).contains("laid out again"));
+        assert!(!relaid.say(Lang::English).contains("not laid out again"));
+        assert!(not.say(Lang::English).contains("not laid out again"));
+        assert_ne!(relaid.say(Lang::English), not.say(Lang::English));
+
+        let empty = Message::FrameKeptNotRelaid {
+            wide: 40.0,
+            high: 20.0,
+            why: "the block is empty".to_owned(),
+        };
+        let turned = Message::FrameKeptNotRelaid {
+            wide: 40.0,
+            high: 20.0,
+            why: "the page is turned".to_owned(),
+        };
+        assert!(empty.say(Lang::English).contains("the block is empty"));
+        assert_ne!(empty.say(Lang::English), turned.say(Lang::English));
     }
 
     #[test]
@@ -2147,7 +2412,7 @@ mod tests {
                 assert!(offer.contains(size), "{offer}");
                 let said = Message::OcrErrorRate {
                     code: model.code.to_owned(),
-                    cer: model.cer,
+                    cer: model.cer.expect("lao is one of the six measured rows"),
                 }
                 .say(*lang);
                 assert!(said.contains(rate), "{said}");
