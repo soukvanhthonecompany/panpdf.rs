@@ -90,6 +90,9 @@ pub fn colour_signature(colour: &Color) -> String {
 
 fn shading_signature(paint: &crate::shading::ShadingPaint) -> String {
     let geometry = match &paint.geometry {
+        ShadingGeometry::Function { domain, matrix } => {
+            format!("function{:?} matrix={:?}", domain.value, matrix.value)
+        }
         ShadingGeometry::Axial(coords) => format!("axial{:?}", coords.value),
         ShadingGeometry::Radial(coords) => format!("radial{:?}", coords.value),
     };
@@ -209,6 +212,9 @@ pub fn paint_signature(kind: &PaintAtomKind) -> String {
         }
         PaintAtomKind::Shading(paint) => {
             let geometry = match &paint.geometry {
+                ShadingGeometry::Function { domain, matrix } => {
+                    format!("function{:?} matrix={:?}", domain.value, matrix.value)
+                }
                 ShadingGeometry::Axial(coords) => format!("axial{:?}", coords.value),
                 ShadingGeometry::Radial(coords) => format!("radial{:?}", coords.value),
             };

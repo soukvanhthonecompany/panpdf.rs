@@ -231,18 +231,29 @@ pub(crate) fn decode_xref_stream_prefix(
         });
     }
 
-    let encoded = source.as_bytes().get(data_start..).ok_or_else(|| {
-        StreamDecodeError::new(data_start, StreamDecodeErrorKind::SourceSpanFailure)
-    })?;
-    let decoded = decode_pipeline_with_filters(
-        source,
-        &filters,
-        encoded,
-        data_start,
-        max_decoded_bytes,
-        true,
-        Tolerance::Strict,
-    )?;
+    if data_start > source.len() {
+        return Err(StreamDecodeError::new(
+            data_start,
+            StreamDecodeErrorKind::SourceSpanFailure,
+        ));
+    }
+    let decode = |encoded: &[u8]| {
+        decode_pipeline_with_filters(
+            source,
+            &filters,
+            encoded,
+            data_start,
+            max_decoded_bytes,
+            true,
+            Tolerance::Strict,
+        )
+    };
+    let run = source.bytes_from(data_start);
+    let decoded = match decode(run) {
+        Ok(decoded) if decoded.encoded_length < run.len() => decoded,
+        read if data_start + run.len() >= source.len() => read?,
+        _ => decode(&source.as_bytes()[data_start..])?,
+    };
     Ok(PrefixDecodedStream {
         decoded: decoded.bytes,
         encoded_length: decoded.encoded_length,

@@ -576,13 +576,16 @@ pub fn parse_header_recovering(
     }
 
     let mut repairs = Vec::new();
-    if source.as_bytes().starts_with(HEADER_PREFIX) {
+    if source
+        .ahead(0, HEADER_PREFIX.len())
+        .starts_with(HEADER_PREFIX)
+    {
         let header = header_at(source, 0, &mut repairs)?;
         return Ok(Recovered::new(header, repairs));
     }
 
     let window_end = limits.max_header_scan_bytes.min(source.len());
-    let window = &source.as_bytes()[..window_end];
+    let window = &source.ahead(0, window_end)[..window_end];
     let byte_offset = find_subslice(window, HEADER_PREFIX).ok_or(HeaderError::MissingAtByteZero)?;
     repairs.push(Repair::new(
         byte_offset,

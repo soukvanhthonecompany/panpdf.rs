@@ -96,66 +96,50 @@ pub(crate) fn append_object_writes_bounded(
     extras: TrailerExtras,
     limits: XrefLimits,
 ) -> Result<Vec<u8>, IncrementalWriteError> {
-    if writes.is_empty() {
-        return Err(IncrementalWriteError::NothingToWrite);
+    let appended = appended_revision(source, writes, policy, extras, limits)?;
+    let mut out = Vec::with_capacity(source.len() + appended.len());
+    for run in source.runs() {
+        out.extend_from_slice(run);
     }
-    let chain =
-        parse_revision_chain_strict(source, limits).map_err(IncrementalWriteError::Revisions)?;
-    if chain.revisions().len() >= limits.max_revisions {
-        return Err(IncrementalWriteError::RevisionCapacity);
-    }
-    let index = RevisionIndex::from_chain(&chain).map_err(IncrementalWriteError::Index)?;
+    out.extend_from_slice(&appended);
+    Ok(out)
+}
 
-    let root = effective_trailer_value(source, &chain, b"/Root")
-        .ok_or(IncrementalWriteError::MissingRoot)?;
-    let size = effective_trailer_value(source, &chain, b"/Size")
-        .ok_or(IncrementalWriteError::MissingSize)?;
-    let info = extras.info.map_or_else(
-        || effective_trailer_value(source, &chain, b"/Info"),
-        |reference| {
-            Some(format!("{} {} R", reference.object_number(), reference.generation()).into_bytes())
-        },
-    );
-    let id = effective_trailer_value(source, &chain, b"/ID");
-    let encrypt = effective_trailer_value(source, &chain, b"/Encrypt");
+pub(crate) fn append_revision(
+    source: &ByteStore,
+    writes: &[ObjectWrite<'_>],
+    (policy, extras): (ProtectionPolicy<'_>, TrailerExtras),
+    id: pdf_bytes::SourceId,
+) -> Result<ByteStore, IncrementalWriteError> {
+    let appended = appended_revision(source, writes, policy, extras, XrefLimits::default())?;
+    Ok(source.followed_by(id, appended))
+}
 
-    let security = write_security(source, &chain, &index, encrypt.is_some(), policy)?;
+fn ends_with_line_end(source: &ByteStore) -> bool {
+    source
+        .len()
+        .checked_sub(1)
+        .is_some_and(|last| source.bytes_from(last) == b"\n")
+}
 
-    let mut out = Vec::with_capacity(source.len() + source.len() / 16 + 4096);
-    out.extend_from_slice(source.as_bytes());
-    if !out.ends_with(b"\n") {
+fn appended_revision(
+    source: &ByteStore,
+    writes: &[ObjectWrite<'_>],
+    policy: ProtectionPolicy<'_>,
+    extras: TrailerExtras,
+    limits: XrefLimits,
+) -> Result<Vec<u8>, IncrementalWriteError> {
+    let revision = Revision::read(source, writes, policy, extras, limits)?;
+
+    let mut out = Vec::with_capacity(4096);
+    if !ends_with_line_end(source) {
         out.push(b'\n');
     }
-    let mut placed: Vec<(Reference, usize)> = Vec::with_capacity(writes.len());
-    let mut highest = 0_u32;
-    for write in writes {
-        let offset = out.len();
-        if offset as u64 > MAX_CLASSIC_XREF_OFFSET {
-            return Err(IncrementalWriteError::ClassicXrefOffsetTooLarge);
-        }
-        highest = highest.max(write.reference.object_number());
-        out.extend_from_slice(
-            format!(
-                "{} {} obj\n",
-                write.reference.object_number(),
-                write.reference.generation()
-            )
-            .as_bytes(),
-        );
-        write_object_body(&mut out, source, &index, security.as_ref(), *write)?;
-        out.extend_from_slice(b"\nendobj\n");
-        placed.push((write.reference, offset));
-    }
+    let origin = source.len();
+    let (placed, highest) = revision.write_objects(&mut out, origin, source, writes)?;
+    let size = revision.size_after(highest);
 
-    let size = match std::str::from_utf8(&size)
-        .ok()
-        .and_then(|text| text.trim().parse::<u32>().ok())
-    {
-        Some(declared) if declared <= highest => (highest + 1).to_string().into_bytes(),
-        _ => size,
-    };
-
-    let xref_offset = out.len();
+    let xref_offset = origin + out.len();
     out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n");
     for (reference, offset) in &placed {
         out.extend_from_slice(format!("{} 1\n", reference.object_number()).as_bytes());
@@ -166,27 +150,126 @@ pub(crate) fn append_object_writes_bounded(
     out.extend_from_slice(b"trailer\n<< /Size ");
     out.extend_from_slice(&size);
     out.extend_from_slice(b" /Root ");
-    out.extend_from_slice(&root);
-    if let Some(info) = info {
+    out.extend_from_slice(&revision.root);
+    if let Some(info) = &revision.info {
         out.extend_from_slice(b" /Info ");
-        out.extend_from_slice(&info);
+        out.extend_from_slice(info);
     }
-    if let Some(id) = id {
+    if let Some(id) = &revision.id {
         out.extend_from_slice(b" /ID ");
-        out.extend_from_slice(&id);
+        out.extend_from_slice(id);
     }
-    if let Some(encrypt) = encrypt {
+    if let Some(encrypt) = &revision.encrypt {
         out.extend_from_slice(b" /Encrypt ");
-        out.extend_from_slice(&encrypt);
+        out.extend_from_slice(encrypt);
     }
     out.extend_from_slice(
         format!(
             " /Prev {} >>\nstartxref\n{xref_offset}\n%%EOF\n",
-            chain.startxref()
+            revision.chain.startxref()
         )
         .as_bytes(),
     );
     Ok(out)
+}
+
+struct Revision {
+    chain: pdf_syntax::RevisionChain,
+    index: RevisionIndex,
+    root: Vec<u8>,
+    size: Vec<u8>,
+    info: Option<Vec<u8>>,
+    id: Option<Vec<u8>>,
+    encrypt: Option<Vec<u8>>,
+    security: Option<pdf_security::AuthenticatedSecurity>,
+}
+
+impl Revision {
+    fn read(
+        source: &ByteStore,
+        writes: &[ObjectWrite<'_>],
+        policy: ProtectionPolicy<'_>,
+        extras: TrailerExtras,
+        limits: XrefLimits,
+    ) -> Result<Self, IncrementalWriteError> {
+        if writes.is_empty() {
+            return Err(IncrementalWriteError::NothingToWrite);
+        }
+        let chain = parse_revision_chain_strict(source, limits)
+            .map_err(IncrementalWriteError::Revisions)?;
+        if chain.revisions().len() >= limits.max_revisions {
+            return Err(IncrementalWriteError::RevisionCapacity);
+        }
+        let index = RevisionIndex::from_chain(&chain).map_err(IncrementalWriteError::Index)?;
+
+        let root = effective_trailer_value(source, &chain, b"/Root")
+            .ok_or(IncrementalWriteError::MissingRoot)?;
+        let size = effective_trailer_value(source, &chain, b"/Size")
+            .ok_or(IncrementalWriteError::MissingSize)?;
+        let info = extras.info.map_or_else(
+            || effective_trailer_value(source, &chain, b"/Info"),
+            |reference| {
+                Some(
+                    format!("{} {} R", reference.object_number(), reference.generation())
+                        .into_bytes(),
+                )
+            },
+        );
+        let id = effective_trailer_value(source, &chain, b"/ID");
+        let encrypt = effective_trailer_value(source, &chain, b"/Encrypt");
+
+        let security = write_security(source, &chain, &index, encrypt.is_some(), policy)?;
+        Ok(Self {
+            chain,
+            index,
+            root,
+            size,
+            info,
+            id,
+            encrypt,
+            security,
+        })
+    }
+
+    fn write_objects(
+        &self,
+        out: &mut Vec<u8>,
+        origin: usize,
+        source: &ByteStore,
+        writes: &[ObjectWrite<'_>],
+    ) -> Result<(Vec<(Reference, usize)>, u32), IncrementalWriteError> {
+        let mut placed: Vec<(Reference, usize)> = Vec::with_capacity(writes.len());
+        let mut highest = 0_u32;
+        for write in writes {
+            let offset = origin + out.len();
+            if offset as u64 > MAX_CLASSIC_XREF_OFFSET {
+                return Err(IncrementalWriteError::ClassicXrefOffsetTooLarge);
+            }
+            highest = highest.max(write.reference.object_number());
+            out.extend_from_slice(
+                format!(
+                    "{} {} obj\n",
+                    write.reference.object_number(),
+                    write.reference.generation()
+                )
+                .as_bytes(),
+            );
+            write_object_body(out, source, &self.index, self.security.as_ref(), *write)?;
+            out.extend_from_slice(b"\nendobj\n");
+            placed.push((write.reference, offset));
+        }
+        Ok((placed, highest))
+    }
+
+    fn size_after(&self, highest: u32) -> Vec<u8> {
+        match std::str::from_utf8(&self.size)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+        {
+            Some(declared) if declared <= highest => (highest + 1).to_string().into_bytes(),
+            _ => self.size.clone(),
+        }
+    }
 }
 
 fn write_security(
@@ -236,6 +319,7 @@ pub(crate) fn session_write_limits() -> XrefLimits {
     limits
 }
 
+#[cfg(test)]
 pub(crate) fn compact_session(
     original: &ByteStore,
     current: &ByteStore,
@@ -314,6 +398,193 @@ pub(crate) fn compact_session(
     parse_revision_chain_strict(&compact, XrefLimits::default())
         .map_err(IncrementalWriteError::Revisions)?;
     Ok(compact)
+}
+
+pub(crate) fn fold_object_writes(
+    original: &ByteStore,
+    source: &ByteStore,
+    writes: &[ObjectWrite<'_>],
+    (policy, extras): (ProtectionPolicy<'_>, TrailerExtras),
+    id: pdf_bytes::SourceId,
+) -> Result<ByteStore, IncrementalWriteError> {
+    let prefix = source
+        .prefix(original.id(), original.len())
+        .ok_or(IncrementalWriteError::InvalidSourceSpan)?;
+    if !prefix.is_same(original) && prefix.as_bytes() != original.as_bytes() {
+        return Err(IncrementalWriteError::InvalidSourceSpan);
+    }
+    let revision = Revision::read(source, writes, policy, extras, session_write_limits())?;
+    let origin = source.len() + usize::from(!ends_with_line_end(source));
+    let mut written = Vec::new();
+    let (placed, highest) = revision.write_objects(&mut written, origin, source, writes)?;
+    let size = revision.size_after(highest);
+
+    let mut changed: Vec<(Reference, &[u8])> = Vec::with_capacity(placed.len());
+    for (at, (reference, offset)) in placed.iter().enumerate() {
+        let start = offset - origin;
+        let end = placed
+            .get(at + 1)
+            .map_or(written.len(), |(_, next)| next - origin)
+            - 1;
+        changed.push((*reference, &written[start..end]));
+    }
+    session_objects(original, source, &revision.index, &mut changed)?;
+    changed.sort_by_key(|(reference, _)| (reference.object_number(), reference.generation()));
+
+    let original_chain = parse_revision_chain_strict(original, XrefLimits::default())
+        .map_err(IncrementalWriteError::Revisions)?;
+    let objects: usize = changed.iter().map(|(_, raw)| raw.len() + 1).sum();
+    let base = original.len();
+    let mut out = Vec::with_capacity(objects + 64 * changed.len() + 4096);
+    out.push(b'\n');
+    let mut offsets = Vec::with_capacity(changed.len());
+    for (_, raw) in &changed {
+        offsets.push(base + out.len());
+        out.extend_from_slice(raw);
+        out.push(b'\n');
+    }
+    let xref = base + out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n");
+    for ((reference, _), offset) in changed.iter().zip(&offsets) {
+        if *offset as u64 > MAX_CLASSIC_XREF_OFFSET {
+            return Err(IncrementalWriteError::ClassicXrefOffsetTooLarge);
+        }
+        out.extend_from_slice(
+            format!(
+                "{} 1\n{offset:010} {:05} n \n",
+                reference.object_number(),
+                reference.generation()
+            )
+            .as_bytes(),
+        );
+    }
+    out.extend_from_slice(b"trailer\n<<");
+    let trailer = [
+        (b"/Size".as_slice(), Some(&size)),
+        (b"/Root", Some(&revision.root)),
+        (b"/Info", revision.info.as_ref()),
+        (b"/ID", revision.id.as_ref()),
+        (b"/Encrypt", revision.encrypt.as_ref()),
+    ];
+    for (key, value) in trailer {
+        if let Some(value) = value {
+            out.push(b' ');
+            out.extend_from_slice(key);
+            out.push(b' ');
+            out.extend_from_slice(value);
+        }
+    }
+    out.extend_from_slice(
+        format!(
+            " /Prev {} >>\nstartxref\n{xref}\n%%EOF\n",
+            original_chain.startxref()
+        )
+        .as_bytes(),
+    );
+
+    let folded = original.followed_by(id, out);
+    read_back(&folded, &changed, &offsets)?;
+    Ok(folded)
+}
+
+pub(crate) fn objects_alone(
+    source: &ByteStore,
+    writes: &[ObjectWrite<'_>],
+    policy: ProtectionPolicy<'_>,
+) -> Result<ByteStore, IncrementalWriteError> {
+    let revision = Revision::read(
+        source,
+        writes,
+        policy,
+        TrailerExtras::default(),
+        XrefLimits::default(),
+    )?;
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let (placed, highest) = revision.write_objects(&mut out, 0, source, writes)?;
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n");
+    for (reference, offset) in &placed {
+        out.extend_from_slice(
+            format!(
+                "{} 1\n{offset:010} {:05} n \n",
+                reference.object_number(),
+                reference.generation()
+            )
+            .as_bytes(),
+        );
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} >>\nstartxref\n{xref}\n%%EOF\n",
+            highest + 1
+        )
+        .as_bytes(),
+    );
+    Ok(ByteStore::owning(
+        pdf_bytes::SourceId::new(source.id().get().wrapping_add(1)),
+        out,
+    ))
+}
+
+fn session_objects<'a>(
+    original: &ByteStore,
+    source: &'a ByteStore,
+    index: &RevisionIndex,
+    changed: &mut Vec<(Reference, &'a [u8])>,
+) -> Result<(), IncrementalWriteError> {
+    for selected in index.selected_entries() {
+        let entry = selected.entry();
+        let XrefEntryKind::InUse { byte_offset } = entry.kind() else {
+            continue;
+        };
+        if byte_offset < original.len() as u64
+            || changed
+                .iter()
+                .any(|(written, _)| written.object_number() == entry.object_number())
+        {
+            continue;
+        }
+        let reference = Reference::new(entry.object_number(), entry.generation());
+        let resolved = index
+            .resolve_object(source, reference, ResolveLimits::default())
+            .map_err(IncrementalWriteError::Target)?;
+        let object = resolved
+            .indirect_object()
+            .ok_or(IncrementalWriteError::InvalidSourceSpan)?;
+        let raw = source
+            .resolve(object.span())
+            .map_err(|_| IncrementalWriteError::InvalidSourceSpan)?;
+        changed.push((reference, raw));
+    }
+    Ok(())
+}
+
+fn read_back(
+    folded: &ByteStore,
+    changed: &[(Reference, &[u8])],
+    offsets: &[usize],
+) -> Result<(), IncrementalWriteError> {
+    let chain = parse_revision_chain_strict(folded, XrefLimits::default())
+        .map_err(IncrementalWriteError::Revisions)?;
+    let index = RevisionIndex::from_chain(&chain).map_err(IncrementalWriteError::Index)?;
+    for ((reference, raw), offset) in changed.iter().zip(offsets) {
+        let resolved = index
+            .resolve_object(folded, *reference, ResolveLimits::default())
+            .map_err(IncrementalWriteError::Target)?;
+        let span = resolved
+            .indirect_object()
+            .ok_or(IncrementalWriteError::InvalidSourceSpan)?
+            .span();
+        if span.start() != *offset
+            || folded
+                .resolve(span)
+                .map_err(|_| IncrementalWriteError::InvalidSourceSpan)?
+                != *raw
+        {
+            return Err(IncrementalWriteError::InvalidSourceSpan);
+        }
+    }
+    Ok(())
 }
 
 fn write_object_body(
@@ -639,6 +910,57 @@ pub(crate) mod tests {
             .as_bytes(),
         );
         store(bytes)
+    }
+
+    #[test]
+    fn a_revision_follows_its_source_without_copying_it() {
+        let opened = stream_pdf(7, false, false);
+        let write = |decoded: &'static [u8]| ObjectWrite {
+            reference: Reference::new(2, 7),
+            body: ObjectBody::ReplacedStream { decoded },
+        };
+        let copies = pdf_bytes::whole_copies();
+        let policy = (
+            ProtectionPolicy::RefuseProtected,
+            super::TrailerExtras::default(),
+        );
+        let first = super::append_revision(&opened, &[write(b"first")], policy, SourceId::new(2))
+            .expect("appends");
+        let second = super::append_revision(&first, &[write(b"second")], policy, SourceId::new(3))
+            .expect("appends onto an appended revision");
+
+        let expected = append_object_writes(
+            &ByteStore::new(
+                SourceId::new(9),
+                append_object_writes(
+                    &opened,
+                    &[write(b"first")],
+                    ProtectionPolicy::RefuseProtected,
+                )
+                .expect("appends"),
+            ),
+            &[write(b"second")],
+            ProtectionPolicy::RefuseProtected,
+        )
+        .expect("appends");
+        assert!(second.same_bytes_as(&expected));
+        assert!(
+            second
+                .prefix(opened.id(), opened.len())
+                .expect("longer")
+                .is_same(&opened)
+        );
+        let chain = parse_revision_chain_strict(&second, XrefLimits::default()).expect("reads");
+        let index = RevisionIndex::from_chain(&chain).expect("indexes");
+        let resolved = index
+            .resolve_object(&second, Reference::new(2, 7), ResolveLimits::default())
+            .expect("the newest body");
+        let stream = resolved.stream().expect("a stream");
+        assert_eq!(second.resolve(stream.data_span()), Ok(&b"second"[..]));
+        assert_eq!(pdf_bytes::whole_copies(), copies);
+
+        assert_eq!(second.as_bytes(), &expected[..]);
+        assert_eq!(pdf_bytes::whole_copies(), copies + 1);
     }
 
     #[test]
@@ -1001,5 +1323,133 @@ pub(crate) mod tests {
             ),
             Err(IncrementalWriteError::ProtectedDocument)
         );
+    }
+
+    fn both_ways(
+        original: &ByteStore,
+        source: &ByteStore,
+        writes: &[ObjectWrite<'_>],
+        policy: ProtectionPolicy<'_>,
+    ) -> (ByteStore, ByteStore) {
+        let id = SourceId::new(source.id().get() + 1);
+        let folded = super::fold_object_writes(
+            original,
+            source,
+            writes,
+            (policy, super::TrailerExtras::default()),
+            id,
+        )
+        .expect("the pass writes");
+        let appended = super::append_object_writes_bounded(
+            source,
+            writes,
+            policy,
+            super::TrailerExtras::default(),
+            super::session_write_limits(),
+        )
+        .expect("the append writes");
+        let two = super::compact_session(original, &ByteStore::owning(id, appended))
+            .expect("the session folds");
+        (folded, two)
+    }
+
+    #[test]
+    fn fold_is_the_two_steps() {
+        let unended = {
+            let bytes = stream_pdf(0, false, false);
+            let bytes = bytes.as_bytes();
+            store(bytes[..bytes.len() - 1].to_vec())
+        };
+        let policy = ProtectionPolicy::Preserve {
+            credential: b"",
+            restrictions: super::Restrictions::Respect,
+        };
+        for (original, stream) in [
+            (stream_pdf(0, false, false), Reference::new(2, 0)),
+            (stream_pdf(3, false, false), Reference::new(2, 3)),
+            (unended, Reference::new(2, 0)),
+            (protected_pdf(), Reference::new(2, 0)),
+        ] {
+            let rounds: [&[ObjectWrite<'_>]; 4] = [
+                &[ObjectWrite {
+                    reference: stream,
+                    body: ObjectBody::ReplacedStream {
+                        decoded: b"first page text",
+                    },
+                }],
+                &[
+                    ObjectWrite {
+                        reference: Reference::new(9, 0),
+                        body: ObjectBody::NewStream {
+                            dictionary: b"/Subtype /Form",
+                            decoded: b"0 0 m 5 5 l S",
+                        },
+                    },
+                    ObjectWrite {
+                        reference: Reference::new(1, 0),
+                        body: ObjectBody::Direct {
+                            body: b"<< /Type /Catalog /Lang (th) >>",
+                        },
+                    },
+                ],
+                &[ObjectWrite {
+                    reference: stream,
+                    body: ObjectBody::ReplacedStream {
+                        decoded: &[b'x'; 5000],
+                    },
+                }],
+                &[ObjectWrite {
+                    reference: Reference::new(7, 0),
+                    body: ObjectBody::Direct { body: b"[1 2 3]" },
+                }],
+            ];
+            let mut source = original.clone();
+            for writes in rounds {
+                let (folded, two) = both_ways(&original, &source, writes, policy);
+                assert_eq!(folded.as_bytes(), two.as_bytes());
+                assert_eq!(folded.id(), two.id());
+                source = two;
+            }
+            assert!(source.as_bytes().starts_with(original.as_bytes()));
+            parse_revision_chain_strict(&source, XrefLimits::default()).expect("reads");
+        }
+    }
+
+    #[test]
+    fn a_number_written_twice_is_refused_as_the_two_steps_refused_it() {
+        let original = stream_pdf(0, false, false);
+        let twice = [
+            ObjectWrite {
+                reference: Reference::new(8, 0),
+                body: ObjectBody::Direct { body: b"1" },
+            },
+            ObjectWrite {
+                reference: Reference::new(8, 0),
+                body: ObjectBody::Direct { body: b"2" },
+            },
+        ];
+        let policy = ProtectionPolicy::RefuseProtected;
+        let folded = super::fold_object_writes(
+            &original,
+            &original,
+            &twice,
+            (policy, super::TrailerExtras::default()),
+            SourceId::new(9),
+        );
+        let appended = super::append_object_writes_bounded(
+            &original,
+            &twice,
+            policy,
+            super::TrailerExtras::default(),
+            super::session_write_limits(),
+        )
+        .expect("the append writes it");
+        let two = super::compact_session(&original, &ByteStore::owning(SourceId::new(9), appended));
+        let refusal = two.expect_err("the two steps refuse it");
+        assert!(
+            matches!(refusal, IncrementalWriteError::Index(_)),
+            "{refusal:?}"
+        );
+        assert_eq!(folded.expect_err("the pass refuses it"), refusal);
     }
 }

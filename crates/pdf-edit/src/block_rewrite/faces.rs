@@ -7,8 +7,8 @@ use pdf_paint::AppliedFont;
 use pdf_syntax::Reference;
 
 use super::{Piece, Run, Style, Token, advance_of, inner_kern, unsupported};
-use crate::incremental::{ObjectBody, ObjectWrite, ProtectionPolicy};
-use crate::plan::{PlannedBody, PlannedWrite};
+use crate::incremental::{ObjectWrite, ProtectionPolicy};
+use crate::plan::PlannedWrite;
 use crate::spike_move_text::SpikeError;
 
 pub(super) struct NewFaces<'p> {
@@ -195,9 +195,21 @@ impl<'p> NewFaces<'p> {
         style: &mut Style<'_>,
         tokens: &mut [Token],
     ) -> Result<Settled, SpikeError> {
-        let (writes, document, named) = self.embed(source, page)?;
+        let (writes, written, named) = self.embed(source, page)?;
+        let alone = match &written {
+            Written::Alone => self.fonts_alone(source, &writes, &named).ok(),
+            Written::Committed(_) => None,
+        };
+        let read = match (alone, written) {
+            (Some(read), _) => read,
+            (None, Written::Committed(document)) => Self::fonts_in(&document, page_index, &named)?,
+            (None, Written::Alone) => {
+                let document = commit(source, &writes, self.restrictions)?;
+                Self::fonts_in(&document, page_index, &named)?
+            }
+        };
         let base = style.runs.len();
-        let fonts = self.add_runs(&document, page_index, &named, style)?;
+        let fonts = self.add_runs(read, &named, style)?;
         self.fill_pieces(style, tokens, base)?;
         Ok(Settled { writes, fonts })
     }
@@ -206,7 +218,7 @@ impl<'p> NewFaces<'p> {
         &self,
         source: &ByteStore,
         page: Reference,
-    ) -> Result<(Vec<PlannedWrite>, ByteStore, Vec<Named>), SpikeError> {
+    ) -> Result<(Vec<PlannedWrite>, Written, Vec<Named>), SpikeError> {
         let mark_of = |face: &Face| crate::new_font::face_mark(&face.sha256, face.index);
         let mut marks: Vec<String> = Vec::new();
         for face in &self.faces {
@@ -218,18 +230,27 @@ impl<'p> NewFaces<'p> {
         let mut document = source.clone();
         let mut writes: Vec<PlannedWrite> = Vec::new();
         let mut placed = Vec::with_capacity(marks.len());
-        for mark in &marks {
+        let mut last: Vec<PlannedWrite> = Vec::new();
+        for (at, mark) in marks.iter().enumerate() {
+            if at > 0 {
+                document = commit(&document, &last, self.restrictions)?;
+            }
             let sharing: Vec<&Face> = self
                 .faces
                 .iter()
                 .filter(|face| mark_of(face) == *mark)
                 .collect();
             let (step, name, font) = self.embed_face(source, &document, page, mark, &sharing)?;
-            document = commit(&document, &step, self.restrictions)?;
             writes.retain(|write| step.iter().all(|new| new.reference != write.reference));
-            writes.extend(step);
+            writes.extend(step.iter().cloned());
+            last = step;
             placed.push((name, font));
         }
+        let written = if marks.len() > 1 {
+            Written::Committed(commit(&document, &last, self.restrictions)?)
+        } else {
+            Written::Alone
+        };
         let named = self
             .faces
             .iter()
@@ -241,7 +262,7 @@ impl<'p> NewFaces<'p> {
                 placed[at].clone()
             })
             .collect();
-        Ok((writes, document, named))
+        Ok((writes, written, named))
     }
 
     fn embed_face(
@@ -293,13 +314,11 @@ impl<'p> NewFaces<'p> {
         Ok((step, format!("/{name}"), objects.font))
     }
 
-    fn add_runs(
-        &self,
+    fn fonts_in(
         document: &ByteStore,
         page_index: usize,
         named: &[(String, Reference)],
-        style: &mut Style<'_>,
-    ) -> Result<Vec<pdf_content::ResourceEntry>, SpikeError> {
+    ) -> Result<Vec<(pdf_content::ResourceEntry, pdf_content::Font)>, SpikeError> {
         let unread = || unsupported("the page does not read back with a typed character's face");
         let program = pdf_content::load_page_program_with_password(
             document,
@@ -308,15 +327,64 @@ impl<'p> NewFaces<'p> {
             b"",
         )
         .map_err(|_| unread())?;
+        named
+            .iter()
+            .map(|(name, reference)| {
+                let entry = program
+                    .resources
+                    .font(name.as_bytes())
+                    .filter(|entry| entry.reference() == Some(*reference))
+                    .ok_or_else(unread)?;
+                let font = entry.font().map_err(|_| unread())?;
+                Ok((entry.clone(), font))
+            })
+            .collect()
+    }
+
+    fn fonts_alone(
+        &self,
+        source: &ByteStore,
+        writes: &[PlannedWrite],
+        named: &[(String, Reference)],
+    ) -> Result<Vec<(pdf_content::ResourceEntry, pdf_content::Font)>, SpikeError> {
+        let unread = || unsupported("a typed character's face does not read on its own");
+        let objects = crate::incremental::objects_alone(
+            source,
+            &object_writes(writes),
+            ProtectionPolicy::Preserve {
+                credential: b"",
+                restrictions: self.restrictions,
+            },
+        )
+        .map_err(|_| unread())?;
+        named
+            .iter()
+            .map(|(name, reference)| {
+                let entry = self
+                    .program
+                    .resources
+                    .font_written_in(
+                        name.as_bytes(),
+                        *reference,
+                        &objects,
+                        PageContentLimits::default(),
+                    )
+                    .map_err(|_| unread())?;
+                let font = entry.font().map_err(|_| unread())?;
+                Ok((entry, font))
+            })
+            .collect()
+    }
+
+    fn add_runs(
+        &self,
+        read: Vec<(pdf_content::ResourceEntry, pdf_content::Font)>,
+        named: &[(String, Reference)],
+        style: &mut Style<'_>,
+    ) -> Result<Vec<pdf_content::ResourceEntry>, SpikeError> {
         let mut fonts = Vec::with_capacity(named.len());
-        for (face, (name, reference)) in self.faces.iter().zip(named) {
-            let entry = program
-                .resources
-                .font(name.as_bytes())
-                .filter(|entry| entry.reference() == Some(*reference))
-                .ok_or_else(unread)?;
-            let font = entry.font().map_err(|_| unread())?;
-            fonts.push(entry.clone());
+        for ((face, (name, reference)), (entry, font)) in self.faces.iter().zip(named).zip(read) {
+            fonts.push(entry);
             let caret = style.run(face.run);
             let mut text = caret.text.clone();
             let applied = text
@@ -529,38 +597,28 @@ pub(crate) fn commit_with(
     (credential, restrictions): (&[u8], crate::Restrictions),
     extras: crate::incremental::TrailerExtras,
 ) -> Result<ByteStore, SpikeError> {
-    let objects: Vec<ObjectWrite<'_>> = writes
-        .iter()
-        .map(|write| ObjectWrite {
-            reference: write.reference,
-            body: match &write.body {
-                PlannedBody::ReplacedStream { decoded } => ObjectBody::ReplacedStream { decoded },
-                PlannedBody::NewStream {
-                    dictionary,
-                    decoded,
-                } => ObjectBody::NewStream {
-                    dictionary,
-                    decoded,
-                },
-                PlannedBody::Direct { body } => ObjectBody::Direct { body },
-            },
-        })
-        .collect();
-    let bytes = crate::incremental::append_object_writes_bounded(
+    crate::incremental::append_revision(
         source,
-        &objects,
-        ProtectionPolicy::Preserve {
-            credential,
-            restrictions,
-        },
-        extras,
-        pdf_syntax::XrefLimits::default(),
-    )
-    .map_err(|_| unsupported("a typed character's face cannot be added to this document"))?;
-    Ok(ByteStore::owning(
+        &object_writes(writes),
+        (
+            ProtectionPolicy::Preserve {
+                credential,
+                restrictions,
+            },
+            extras,
+        ),
         SourceId::new(source.id().get().wrapping_add(1)),
-        bytes,
-    ))
+    )
+    .map_err(|_| unsupported("a typed character's face cannot be added to this document"))
+}
+
+fn object_writes(writes: &[PlannedWrite]) -> Vec<ObjectWrite<'_>> {
+    writes.iter().map(PlannedWrite::object_write).collect()
+}
+
+enum Written {
+    Alone,
+    Committed(ByteStore),
 }
 
 #[cfg(test)]

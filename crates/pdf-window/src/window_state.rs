@@ -986,6 +986,7 @@ pub(crate) struct Window {
     pub(crate) meter: Option<crate::meter::Meter>,
     pub(crate) speed: pdf_app::speed::Speed,
     pub(crate) show_speed: bool,
+    pub(crate) last_edit: Option<pdf_session::stages::Stages>,
     pub(crate) reveal_caret: bool,
     pub(crate) thumbs: BTreeMap<usize, crate::pages::Thumb>,
     pub(crate) thumbs_wanted: Vec<usize>,

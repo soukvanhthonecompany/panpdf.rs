@@ -811,6 +811,7 @@ pub struct EditOutcome {
     anchor: Option<(usize, usize)>,
     wrote_text: Option<String>,
     laid: Option<(usize, Overlay)>,
+    timed: Option<pdf_session::stages::Stages>,
 }
 
 impl EditOutcome {
@@ -825,6 +826,7 @@ pub struct Editor {
     paragraphs: Paragraphs,
     flowed: Flowed,
     session: Option<Session>,
+    last_edit: Option<pdf_session::stages::Stages>,
     fonts: Option<Arc<dyn pdf_content::FontProvider>>,
     credential: Vec<u8>,
     restricted: bool,
@@ -896,6 +898,7 @@ impl Editor {
         Ok(Self {
             fonts: session.font_provider().cloned(),
             session: Some(session),
+            last_edit: None,
             credential: credential.to_vec(),
             restricted,
             geometries,
@@ -1757,6 +1760,13 @@ impl Editor {
     }
 
     #[must_use]
+    pub fn opened(&self) -> Option<(pdf_bytes::SourceId, usize)> {
+        self.session
+            .as_ref()
+            .map(|session| session.history().opened())
+    }
+
+    #[must_use]
     pub fn last_region(&self) -> Option<[f64; 4]> {
         self.session.as_ref()?.history().last_region()
     }
@@ -1796,7 +1806,7 @@ impl Editor {
             placements += before.len();
         }
         Ok(Export {
-            bytes: bytes.as_bytes().to_vec(),
+            bytes: bytes.to_vec(),
             placements,
         })
     }
@@ -2211,11 +2221,21 @@ impl Editor {
         range: BlockRange,
         text: &str,
     ) -> Result<pdf_edit::LiveBlock, String> {
-        let command = self.typed_command(page, block, range, text)?;
-        let session = self.session.as_mut().ok_or("an edit is running")?;
-        session
-            .lay_out_live(&command)
-            .map_err(|error| error.to_string())
+        if let Some(session) = self.session.as_ref() {
+            session.begin_timing();
+        }
+        let laid = self
+            .typed_command(page, block, range, text)
+            .and_then(|command| {
+                let session = self.session.as_mut().ok_or("an edit is running")?;
+                session
+                    .lay_out_live(&command)
+                    .map_err(|error| error.to_string())
+            });
+        if let Some(session) = self.session.as_ref() {
+            self.last_edit = session.end_timing();
+        }
+        laid
     }
 
     fn typed_command(
@@ -2904,7 +2924,7 @@ impl Editor {
     #[must_use]
     pub fn bytes_now(&self) -> Option<std::sync::Arc<[u8]>> {
         Some(std::sync::Arc::from(
-            self.session.as_ref()?.source().as_bytes(),
+            self.session.as_ref()?.source().to_vec(),
         ))
     }
 
@@ -2919,7 +2939,7 @@ impl Editor {
 
     fn document_state(&self) -> Option<crate::ledger::DocumentState> {
         let session = self.session.as_ref()?;
-        let bytes = session.source().as_bytes();
+        let bytes = &session.source().to_vec();
         Some(crate::ledger::DocumentState {
             revision: session.revision().get(),
             bytes: bytes.len(),
@@ -3063,6 +3083,16 @@ impl Editor {
         self.adopt(job.run())
     }
 
+    pub fn set_clock(&mut self, clock: fn() -> f64) {
+        if let Some(session) = self.session.as_mut() {
+            session.set_clock(clock);
+        }
+    }
+
+    pub const fn take_last_edit(&mut self) -> Option<pdf_session::stages::Stages> {
+        self.last_edit.take()
+    }
+
     pub fn adopt(&mut self, outcome: EditOutcome) -> Applied {
         let EditOutcome {
             session,
@@ -3075,7 +3105,9 @@ impl Editor {
             anchor,
             wrote_text,
             laid,
+            timed,
         } = outcome;
+        self.last_edit = timed;
         self.paragraphs = paragraphs;
         self.flowed = flowed;
         self.wrote_text = wrote_text.filter(|_| matches!(applied, Applied::Changed { .. }));
@@ -3641,8 +3673,10 @@ type Dispatched = (
 impl EditJob {
     #[must_use]
     pub fn run(mut self) -> EditOutcome {
+        self.session.begin_timing();
         let dispatched =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_dispatch()));
+        let timed = self.session.end_timing();
         let (applied, status, caret, anchor) = dispatched.unwrap_or_else(|_| {
             let (applied, status) = refused(PANICKED);
             (applied, status, None, None)
@@ -3658,6 +3692,7 @@ impl EditJob {
             anchor,
             wrote_text: self.wrote_text,
             laid: self.laid,
+            timed,
         }
     }
 

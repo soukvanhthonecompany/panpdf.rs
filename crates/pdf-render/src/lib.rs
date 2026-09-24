@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use pdf_paint::MulAdd as _;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -142,6 +143,15 @@ impl Canvas {
     }
 
     #[must_use]
+    pub fn to_rgba8(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.pixels.len() * 4);
+        for [red, green, blue] in &self.pixels {
+            bytes.extend_from_slice(&[to_byte(*red), to_byte(*green), to_byte(*blue), u8::MAX]);
+        }
+        bytes
+    }
+
+    #[must_use]
     pub fn to_ppm(&self) -> Vec<u8> {
         let mut bytes = format!("P6\n{} {}\n255\n", self.width, self.height).into_bytes();
         for pixel in &self.pixels {
@@ -200,19 +210,9 @@ fn ratio(part: usize, total: usize) -> f64 {
     part / total
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn to_byte(channel: f32) -> u8 {
-    let scaled = (channel.clamp(0.0, 1.0) * 255.0) + 0.5;
-    let mut low = 0_u8;
-    let mut high = u8::MAX;
-    while low < high {
-        let middle = low + (high - low).div_ceil(2);
-        if f32::from(middle) <= scaled {
-            low = middle;
-        } else {
-            high = middle - 1;
-        }
-    }
-    low
+    ((channel.clamp(0.0, 1.0) * 255.0) + 0.5) as u8
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1273,6 +1273,14 @@ impl Renderer<'_> {
             window = narrowed;
         }
         let (wx0, wy0, wx1, wy1) = window;
+        let own_space = match &paint.geometry {
+            ShadingGeometry::Function { matrix, .. } => match invert(matrix.value) {
+                Some(inverse) => Some(inverse),
+                None => return outcome,
+            },
+            ShadingGeometry::Axial(_) | ShadingGeometry::Radial(_) => None,
+        };
+        let mut inputs = [0.0; 2];
         for y in wy0..wy1 {
             for x in wx0..wx1 {
                 let mut coverage = mask.map_or(1.0, |mask| mask.at(x, y));
@@ -1286,20 +1294,37 @@ impl Renderer<'_> {
                     }
                 }
                 let user = apply(inverse, [f64::from(x) + 0.5, f64::from(y) + 0.5]);
-                let parameter = match &paint.geometry {
+                let [low, high] = paint.domain.value;
+                let taken = match &paint.geometry {
+                    ShadingGeometry::Function { domain, .. } => {
+                        let [px, py] = own_space.map_or(user, |back| apply(back, user));
+                        let [x0, x1, y0, y1] = domain.value;
+                        if !(x0..=x1).contains(&px) || !(y0..=y1).contains(&py) {
+                            continue;
+                        }
+                        inputs = [px, py];
+                        2
+                    }
                     ShadingGeometry::Axial(coords) => {
-                        shading::axial_parameter(coords.value, user, paint.extend.value)
+                        let Some(parameter) =
+                            shading::axial_parameter(coords.value, user, paint.extend.value)
+                        else {
+                            continue;
+                        };
+                        inputs[0] = (high - low).madd(parameter, low);
+                        1
                     }
                     ShadingGeometry::Radial(coords) => {
-                        shading::radial_parameter(coords.value, user, paint.extend.value)
+                        let Some(parameter) =
+                            shading::radial_parameter(coords.value, user, paint.extend.value)
+                        else {
+                            continue;
+                        };
+                        inputs[0] = (high - low).madd(parameter, low);
+                        1
                     }
                 };
-                let Some(parameter) = parameter else {
-                    continue;
-                };
-                let [low, high] = paint.domain.value;
-                let t = (high - low).mul_add(parameter, low);
-                let Some(components) = paint.function.evaluate(&[t]) else {
+                let Some(components) = paint.function.evaluate(&inputs[..taken]) else {
                     outcome.unevaluated = true;
                     continue;
                 };
@@ -1390,7 +1415,7 @@ impl Renderer<'_> {
                 let source = offscreen.pixels[from];
                 let pixel = &mut canvas.pixels[into];
                 for (channel, value) in pixel.iter_mut().zip(source) {
-                    *channel = coverage.mul_add(value - *channel, *channel);
+                    *channel = coverage.madd(value - *channel, *channel);
                 }
             }
         }
@@ -1688,9 +1713,9 @@ impl Renderer<'_> {
         let mut coverage = Vec::with_capacity(width as usize * height as usize);
         for (over_white, over_black) in over_first.pixels.iter().zip(&over_second.pixels) {
             let value = if luminosity {
-                0.212_67_f32.mul_add(
+                0.212_67_f32.madd(
                     over_white[0],
-                    0.715_16_f32.mul_add(over_white[1], 0.072_17 * over_white[2]),
+                    0.715_16_f32.madd(over_white[1], 0.072_17 * over_white[2]),
                 )
             } else {
                 1.0 - over_white
@@ -1728,12 +1753,12 @@ fn dash_is_usable(dash: &pdf_paint::DashPattern) -> bool {
 }
 
 fn matrix_scale(matrix: Matrix) -> f64 {
-    let determinant = matrix.a.mul_add(matrix.d, -(matrix.b * matrix.c));
+    let determinant = matrix.a.madd(matrix.d, -(matrix.b * matrix.c));
     determinant.abs().sqrt()
 }
 
 fn invert(matrix: Matrix) -> Option<Matrix> {
-    let determinant = matrix.a.mul_add(matrix.d, -(matrix.b * matrix.c));
+    let determinant = matrix.a.madd(matrix.d, -(matrix.b * matrix.c));
     if !determinant.is_finite() || determinant == 0.0 {
         return None;
     }
@@ -1742,8 +1767,8 @@ fn invert(matrix: Matrix) -> Option<Matrix> {
         b: -matrix.b / determinant,
         c: -matrix.c / determinant,
         d: matrix.a / determinant,
-        e: matrix.c.mul_add(matrix.f, -(matrix.d * matrix.e)) / determinant,
-        f: matrix.b.mul_add(matrix.e, -(matrix.a * matrix.f)) / determinant,
+        e: matrix.c.madd(matrix.f, -(matrix.d * matrix.e)) / determinant,
+        f: matrix.b.madd(matrix.e, -(matrix.a * matrix.f)) / determinant,
     })
 }
 
@@ -1859,10 +1884,10 @@ fn push_cubic(
             along * along * along,
         ];
         points.push([
-            basis[0].mul_add(start[0], basis[1] * control_1[0])
-                + basis[2].mul_add(control_2[0], basis[3] * end[0]),
-            basis[0].mul_add(start[1], basis[1] * control_1[1])
-                + basis[2].mul_add(control_2[1], basis[3] * end[1]),
+            basis[0].madd(start[0], basis[1] * control_1[0])
+                + basis[2].madd(control_2[0], basis[3] * end[0]),
+            basis[0].madd(start[1], basis[1] * control_1[1])
+                + basis[2].madd(control_2[1], basis[3] * end[1]),
         ]);
     }
 }
@@ -2164,12 +2189,8 @@ fn scaled_index(fraction: f64, extent: u32) -> Option<u32> {
 
 fn apply(matrix: Matrix, point: [f64; 2]) -> [f64; 2] {
     [
-        matrix
-            .a
-            .mul_add(point[0], matrix.c.mul_add(point[1], matrix.e)),
-        matrix
-            .b
-            .mul_add(point[0], matrix.d.mul_add(point[1], matrix.f)),
+        matrix.a.madd(point[0], matrix.c.madd(point[1], matrix.e)),
+        matrix.b.madd(point[0], matrix.d.madd(point[1], matrix.f)),
     ]
 }
 
@@ -2244,7 +2265,7 @@ impl Blend {
     fn separable(self, backdrop: f32, source: f32) -> f32 {
         match self {
             Self::Multiply => backdrop * source,
-            Self::Screen => source.mul_add(-backdrop, backdrop + source),
+            Self::Screen => source.madd(-backdrop, backdrop + source),
             Self::Overlay => Self::HardLight.separable(source, backdrop),
             Self::Darken => backdrop.min(source),
             Self::Lighten => backdrop.max(source),
@@ -2270,7 +2291,7 @@ impl Blend {
                 if source <= 0.5 {
                     Self::Multiply.separable(backdrop, 2.0 * source)
                 } else {
-                    Self::Screen.separable(backdrop, source.mul_add(2.0, -1.0))
+                    Self::Screen.separable(backdrop, source.madd(2.0, -1.0))
                 }
             }
             Self::SoftLight => {
@@ -2281,14 +2302,14 @@ impl Blend {
                 };
                 if source <= 0.5 {
                     source
-                        .mul_add(-2.0, 1.0)
-                        .mul_add(-(backdrop * (1.0 - backdrop)), backdrop)
+                        .madd(-2.0, 1.0)
+                        .madd(-(backdrop * (1.0 - backdrop)), backdrop)
                 } else {
-                    source.mul_add(2.0, -1.0).mul_add(d - backdrop, backdrop)
+                    source.madd(2.0, -1.0).madd(d - backdrop, backdrop)
                 }
             }
             Self::Difference => (backdrop - source).abs(),
-            Self::Exclusion => (backdrop * source).mul_add(-2.0, backdrop + source),
+            Self::Exclusion => (backdrop * source).madd(-2.0, backdrop + source),
             _ => source,
         }
     }
@@ -2315,7 +2336,7 @@ fn channel_or(slot: &mut f32) -> &mut f32 {
 }
 
 fn luminosity(colour: [f32; 3]) -> f32 {
-    0.3_f32.mul_add(colour[0], 0.59_f32.mul_add(colour[1], 0.11 * colour[2]))
+    0.3_f32.madd(colour[0], 0.59_f32.madd(colour[1], 0.11 * colour[2]))
 }
 
 fn clip_colour(colour: [f32; 3]) -> [f32; 3] {
@@ -2331,7 +2352,7 @@ fn clip_colour(colour: [f32; 3]) -> [f32; 3] {
     if highest > 1.0 {
         let scale = (1.0 - lum) / (highest - lum);
         for (slot, value) in out.iter_mut().zip(colour) {
-            *slot = (value - lum).mul_add(scale, lum);
+            *slot = (value - lum).madd(scale, lum);
         }
     }
     out
@@ -2417,7 +2438,7 @@ fn blend_pixel(canvas: &mut Canvas, x: u32, y: u32, rgb: [f64; 3], coverage: f32
         source = blend.apply(*pixel, source);
     }
     for (channel, value) in pixel.iter_mut().zip(source) {
-        *channel = coverage.mul_add(value - *channel, *channel);
+        *channel = coverage.madd(value - *channel, *channel);
     }
 }
 
@@ -2835,6 +2856,56 @@ mod tests {
     }
 
     #[test]
+    fn a_function_shading_colours_each_point_of_its_placed_rectangle() {
+        let content = b"/S1 sh";
+        let program = b"{ 0 exch }";
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for object in [
+            &b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"[..],
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R /MediaBox [0 0 100 100] \
+              /Resources << /Shading << /S1 << /ShadingType 1 /ColorSpace /DeviceRGB \
+              /Matrix [50 0 0 50 25 25] /Function 5 0 R >> >> >> >>\nendobj\n",
+        ] {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(object);
+        }
+        for (number, entries, data) in [
+            (4, &b""[..], &content[..]),
+            (
+                5,
+                b" /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1]",
+                &program[..],
+            ),
+        ] {
+            offsets.push(bytes.len());
+            bytes
+                .extend_from_slice(format!("{number} 0 obj\n<< /Length {}", data.len()).as_bytes());
+            bytes.extend_from_slice(entries);
+            bytes.extend_from_slice(b" >>\nstream\n");
+            bytes.extend_from_slice(data);
+            bytes.extend_from_slice(b"\nendstream\nendobj\n");
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        let (canvas, report) =
+            render_source(&ByteStore::new(SourceId::new(91), Arc::<[u8]>::from(bytes)));
+        assert_pixel(&canvas, 30, 69, [0.11, 0.0, 0.11], 0.01);
+        assert_pixel(&canvas, 70, 30, [0.91, 0.0, 0.89], 0.01);
+        assert_pixel(&canvas, 10, 10, [1.0, 1.0, 1.0], 0.0);
+        assert_pixel(&canvas, 90, 50, [1.0, 1.0, 1.0], 0.0);
+        assert_eq!(report.drawn, 1);
+        assert!(report.skipped.is_empty());
+    }
+
+    #[test]
     fn raw_images_map_rows_masks_and_stencils_to_known_pixels() {
         let source = image_page_fixture(
             b"/Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8",
@@ -3089,6 +3160,55 @@ mod tests {
         assert!((canvas.ink_fraction() - 0.1).abs() < f64::EPSILON);
         assert_pixel(&canvas, 5, 50, [0.0, 0.0, 0.0], 0.0);
         assert_pixel(&canvas, 50, 50, [1.0, 1.0, 1.0], 0.0);
+    }
+
+    #[test]
+    fn a_channel_rounds_to_the_byte_the_search_found() {
+        fn searched(channel: f32) -> u8 {
+            let scaled = (channel.clamp(0.0, 1.0) * 255.0) + 0.5;
+            let mut low = 0_u8;
+            let mut high = u8::MAX;
+            while low < high {
+                let middle = low + (high - low).div_ceil(2);
+                if f32::from(middle) <= scaled {
+                    low = middle;
+                } else {
+                    high = middle - 1;
+                }
+            }
+            low
+        }
+        let mut tried = 0_u32;
+        for byte in 0..=255_u16 {
+            let boundary = (f32::from(byte) + 0.5) / 255.0;
+            for channel in [
+                f32::from_bits(boundary.to_bits() - 1),
+                boundary,
+                f32::from_bits(boundary.to_bits() + 1),
+                f32::from(byte) / 255.0,
+            ] {
+                assert_eq!(to_byte(channel), searched(channel), "{channel}");
+                tried += 1;
+            }
+        }
+        for bits in (0..=1.0_f32.to_bits()).step_by(997) {
+            let channel = f32::from_bits(bits);
+            assert_eq!(to_byte(channel), searched(channel), "{channel}");
+            tried += 1;
+        }
+        for channel in [f32::NAN, -0.0, -1.0, 1.5, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(to_byte(channel), searched(channel), "{channel}");
+        }
+        assert!(tried > 1_000_000);
+        let mut canvas = Canvas::blank(3, 1);
+        canvas.pixels[0] = [0.0, 0.5, 1.0];
+        canvas.pixels[1] = [0.2, 0.4, 0.6];
+        let rgba: Vec<u8> = canvas
+            .to_rgb8()
+            .chunks_exact(3)
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+            .collect();
+        assert_eq!(canvas.to_rgba8(), rgba);
     }
 
     #[test]

@@ -712,6 +712,7 @@ pub enum Message {
     Control(Control),
     Quiet,
     DrawingSpeed(crate::speed::Summary),
+    EditSpeed(pdf_session::stages::Stages),
 
     Plain(String),
 
@@ -1955,6 +1956,14 @@ impl Message {
                 speed.slow,
                 speed.frames,
                 crate::speed::A_FRAME_MS,
+            ),
+            Self::EditSpeed(edit) => format!(
+                "last edit {:.0} ms  ·  reading {:.0}  ·  planning {:.0}  ·  writing {:.0}  ·  the rest {:.0}",
+                edit.total,
+                edit.read,
+                edit.plan,
+                edit.write,
+                edit.rest(),
             ),
             Self::Plain(said) => said.clone(),
             Self::DropToAttach => "Let go here to attach them to your question".to_owned(),

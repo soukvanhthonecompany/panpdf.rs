@@ -188,13 +188,21 @@ pub fn read_block_faces(
         &turned
     };
     let reading = Reading::of(program, (graph, None), rows, frame, edges, breaks)?;
+    let requests: std::cell::RefCell<BTreeMap<Vec<u8>, Option<pdf_content::FontRequest>>> =
+        std::cell::RefCell::default();
     let face_of = |piece: &Piece| {
         let run = reading.style.run(piece.style);
         let request = run.text.font.as_ref().and_then(|applied| {
-            program
-                .resources
-                .font(&applied.value.name)
-                .and_then(|resource| resource.face_request().ok().flatten())
+            requests
+                .borrow_mut()
+                .entry(applied.value.name.clone())
+                .or_insert_with(|| {
+                    program
+                        .resources
+                        .font(&applied.value.name)
+                        .and_then(|resource| resource.face_request().ok().flatten())
+                })
+                .clone()
         });
         ClusterFace {
             bold: run.stroke_like_fill

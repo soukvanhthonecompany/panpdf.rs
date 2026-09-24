@@ -6,12 +6,41 @@ pub fn line_break_opportunities(text: &str, boundaries: &[usize]) -> Vec<usize> 
     let mut starts: Vec<usize> = boundaries.to_vec();
     starts.sort_unstable();
     starts.dedup();
-    LineSegmenter::new_auto(LineBreakOptions::default())
-        .segment_str(text)
+    segmented(text)
+        .iter()
+        .copied()
         .filter(|offset| *offset > 0 && *offset < text.len())
         .filter(|offset| starts.binary_search(offset).is_ok())
         .filter(|offset| !between_hangul(text, *offset))
         .collect()
+}
+
+const MOST_SEGMENTED: usize = 8;
+
+fn segmented(text: &str) -> std::sync::Arc<Vec<usize>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Kept = Vec<(String, Arc<Vec<usize>>)>;
+    static KEPT: OnceLock<Mutex<Kept>> = OnceLock::new();
+    let kept = KEPT.get_or_init(Mutex::default);
+    if let Some(found) = kept.lock().ok().and_then(|held| {
+        held.iter()
+            .find(|(seen, _)| seen == text)
+            .map(|(_, offsets)| Arc::clone(offsets))
+    }) {
+        return found;
+    }
+    let offsets = Arc::new(
+        LineSegmenter::new_auto(LineBreakOptions::default())
+            .segment_str(text)
+            .collect::<Vec<usize>>(),
+    );
+    if let Ok(mut held) = kept.lock() {
+        if held.len() >= MOST_SEGMENTED {
+            held.remove(0);
+        }
+        held.push((text.to_owned(), Arc::clone(&offsets)));
+    }
+    offsets
 }
 
 fn between_hangul(text: &str, offset: usize) -> bool {

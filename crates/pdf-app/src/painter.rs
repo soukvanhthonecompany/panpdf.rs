@@ -38,6 +38,17 @@ enum Task {
         needle: String,
         epoch: u64,
     },
+    #[cfg(target_arch = "wasm32")]
+    Far(FarTile),
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Debug)]
+pub struct FarTile {
+    pub id: TileId,
+    pub scale: f64,
+    pub window: [u32; 4],
+    pub epoch: u64,
 }
 
 impl Task {
@@ -45,6 +56,8 @@ impl Task {
         match self {
             Self::Read { page, epoch, .. } => Some((Wanted::Page(*page), *epoch)),
             Self::Tile { id, epoch, .. } => Some((Wanted::Tile(*id), *epoch)),
+            #[cfg(target_arch = "wasm32")]
+            Self::Far(far) => Some((Wanted::Tile(far.id), far.epoch)),
             Self::Search { .. } => None,
         }
     }
@@ -114,6 +127,8 @@ pub struct Painter {
     #[cfg(not(target_arch = "wasm32"))]
     workers: Vec<std::thread::JoinHandle<()>>,
     outstanding: BTreeSet<(Wanted, u64)>,
+    #[cfg(target_arch = "wasm32")]
+    far: bool,
 }
 
 impl Painter {
@@ -150,6 +165,8 @@ impl Painter {
             #[cfg(not(target_arch = "wasm32"))]
             workers,
             outstanding: BTreeSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            far: false,
         }
     }
 
@@ -237,6 +254,16 @@ impl Painter {
         if !self.outstanding.insert((Wanted::Tile(id), epoch)) {
             return;
         }
+        #[cfg(target_arch = "wasm32")]
+        if self.far {
+            self.push(Task::Far(FarTile {
+                id,
+                scale,
+                window,
+                epoch,
+            }));
+            return;
+        }
         self.push(Task::Tile {
             id,
             view,
@@ -254,6 +281,8 @@ impl Painter {
             .unwrap_or_else(PoisonError::into_inner);
         queue.tasks.retain(|task| match task {
             Task::Tile { id, .. } => keep(*id),
+            #[cfg(target_arch = "wasm32")]
+            Task::Far(far) => keep(far.id),
             Task::Read { .. } | Task::Search { .. } => true,
         });
         let queued: BTreeSet<(Wanted, u64)> =
@@ -263,18 +292,65 @@ impl Painter {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub const JOBS_A_FRAME: usize = 2;
-
-    pub fn collect(&mut self) -> Vec<Done> {
-        #[cfg(target_arch = "wasm32")]
-        for _ in 0..Self::JOBS_A_FRAME {
-            let Some(task) = take(&self.shared) else {
-                break;
+    pub fn work_while(&mut self, reading: bool, mut more: impl FnMut() -> bool) {
+        loop {
+            let Some(task) = take(&self.shared, reading) else {
+                return;
             };
-            if !self.shared.answer(perform(task)) {
-                break;
+            if !self.shared.answer(perform(task)) || !more() {
+                return;
             }
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn send_tiles_elsewhere(&mut self) {
+        self.far = true;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub const fn tiles_go_elsewhere(&self) -> bool {
+        self.far
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn draw_far(&mut self, id: TileId, scale: f64, window: [u32; 4], epoch: u64) {
+        if !self.outstanding.insert((Wanted::Tile(id), epoch)) {
+            return;
+        }
+        self.push(Task::Far(FarTile {
+            id,
+            scale,
+            window,
+            epoch,
+        }));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn take_far(&mut self) -> Option<FarTile> {
+        let mut queue = self
+            .shared
+            .queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let at = queue
+            .tasks
+            .iter()
+            .rposition(|task| matches!(task, Task::Far(_)))?;
+        let Task::Far(far) = queue.tasks.remove(at) else {
+            return None;
+        };
+        queue.in_flight.insert((Wanted::Tile(far.id), far.epoch));
+        Some(far)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn answer_far(&mut self, id: TileId, epoch: u64, pixels: Result<TilePixels, String>) {
+        let _ = self.shared.answer(Done::Tile { id, pixels, epoch });
+    }
+
+    pub fn collect(&mut self) -> Vec<Done> {
         let mut taken = Vec::new();
         let mut answered = Vec::new();
         while let Ok(done) = self.answers.try_recv() {
@@ -378,12 +454,17 @@ fn work(shared: &Shared) {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn take(shared: &Shared) -> Option<Task> {
+fn take(shared: &Shared, reading: bool) -> Option<Task> {
     let mut queue = shared.queue.lock().unwrap_or_else(PoisonError::into_inner);
     if queue.closed {
         return None;
     }
-    let task = queue.tasks.pop()?;
+    let at = queue.tasks.iter().rposition(|task| match task {
+        Task::Tile { .. } => true,
+        Task::Read { .. } | Task::Search { .. } => reading,
+        Task::Far(_) => false,
+    })?;
+    let task = queue.tasks.remove(at);
     if let Some(key) = task.tracked() {
         queue.in_flight.insert(key);
     }
@@ -421,6 +502,12 @@ fn perform(task: Task) -> Done {
             let pixels = draw_tile(&view, scale, window);
             Done::Tile { id, pixels, epoch }
         }
+        #[cfg(target_arch = "wasm32")]
+        Task::Far(far) => Done::Tile {
+            id: far.id,
+            pixels: Err("this tile is drawn by a worker".to_owned()),
+            epoch: far.epoch,
+        },
         Task::Search {
             page,
             source,
@@ -483,13 +570,7 @@ fn draw_tile(view: &PageView, scale: f64, window: [u32; 4]) -> Result<TilePixels
 
 #[must_use]
 pub fn rgba(canvas: &pdf_render::Canvas) -> Vec<u8> {
-    let rgb = canvas.to_rgb8();
-    let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
-    for pixel in rgb.chunks_exact(3) {
-        out.extend_from_slice(pixel);
-        out.push(255);
-    }
-    out
+    canvas.to_rgba8()
 }
 
 #[cfg(test)]
@@ -509,6 +590,8 @@ mod tests {
             #[cfg(not(target_arch = "wasm32"))]
             workers: Vec::new(),
             outstanding: BTreeSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            far: false,
         }
     }
 

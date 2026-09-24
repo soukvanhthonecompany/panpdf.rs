@@ -1591,3 +1591,112 @@ fn only_the_lines_being_edited_are_read_by_their_glyphs() {
         provider.as_ref()
     ));
 }
+
+fn origins(graph: &PaintGraph) -> Vec<f64> {
+    runs(graph)
+        .iter()
+        .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.matrix.e))
+        .collect()
+}
+
+#[test]
+fn a_font_written_again_under_its_number_is_not_the_font_kept() {
+    let content = "BT /F1 10 Tf 0 0 Td (A) Tj /F2 10 Tf (A) Tj /F1 10 Tf (A) Tj (A) Tj ET";
+    let old = page_with(content, WIN_ANSI_FONT, None);
+    let rewritten = old
+        .as_bytes()
+        .to_vec()
+        .replace_all(b"/F1 5 0 R", b"/F2 5 0 R")
+        .replace_all(b"[500 500 500]", b"[900 900 900]");
+    let rewritten = ByteStore::new(SourceId::new(77), Arc::<[u8]>::from(rewritten));
+    let limits = PageContentLimits::default();
+    let page = load_page_program_strict(&old, 0, limits).expect("fixture page");
+    let theirs = load_page_program_strict(&rewritten, 0, limits).expect("rewritten page");
+    let written = theirs
+        .resources
+        .font(b"/F2")
+        .expect("the rewritten font")
+        .clone();
+    let kept = page.resources.font(b"/F1").expect("the page's font");
+    assert_eq!(written.reference(), kept.reference());
+    assert!(!written.is_same_object(kept));
+    assert!(kept.is_same_object(&kept.clone()));
+    let again = load_page_program_strict(&page_with(content, WIN_ANSI_FONT, None), 0, limits)
+        .expect("the same bytes, read again");
+    assert!(
+        !kept.is_same_object(again.resources.font(b"/F1").expect("font")),
+        "equal bytes in another allocation are not proved the same"
+    );
+
+    let resources = page.resources.with_fonts([written]);
+    let operations = parse_operations_strict(&page.streams[0].bytes, ContentLimits::default())
+        .expect("fixture operations");
+    let graph = interpret_stream_sequence_with_fonts(
+        &[PaintStream {
+            source: &page.streams[0].bytes,
+            reference: page.streams[0].reference,
+            operations: &operations,
+        }],
+        page.page,
+        &[],
+        &resources,
+        PaintLimits::default(),
+        None,
+    )
+    .expect("interprets");
+
+    let placed = origins(&graph);
+    assert_eq!(placed.len(), 4);
+    for (got, want) in placed.iter().zip([0.0, 5.0, 14.0, 19.0]) {
+        assert!((got - want).abs() < 1e-9, "{placed:?}");
+    }
+}
+
+trait ReplaceAll {
+    fn replace_all(self, from: &[u8], to: &[u8]) -> Vec<u8>;
+}
+
+impl ReplaceAll for Vec<u8> {
+    fn replace_all(self, from: &[u8], to: &[u8]) -> Vec<u8> {
+        assert_eq!(from.len(), to.len(), "a replacement must keep every offset");
+        let mut out = self;
+        let mut at = 0;
+        let mut found = false;
+        while let Some(position) = out[at..]
+            .windows(from.len())
+            .position(|window| window == from)
+        {
+            let start = at + position;
+            out[start..start + from.len()].copy_from_slice(to);
+            at = start + from.len();
+            found = true;
+        }
+        assert!(found, "the fixture holds what is replaced");
+        out
+    }
+}
+
+#[test]
+fn a_remembered_glyph_drawing_belongs_to_its_program() {
+    use pdf_content::decipher::Features;
+    use pdf_content::outline_match::Raster;
+
+    let large = sfnt_face(&[triangle_of(200)], 1, &[(0x41, 1)]);
+    let small = sfnt_face(&[triangle_of(40)], 1, &[(0x41, 1)]);
+    let direct = |program: &GlyphProgram| {
+        Raster::of(program, 1).map(|raster| (raster.ink_box(), Features::of(&raster)))
+    };
+    let (large_digest, small_digest) = (
+        crate::decipher_fonts::program_digest(&large),
+        crate::decipher_fonts::program_digest(&small),
+    );
+    assert_ne!(large_digest, small_digest);
+    for _ in 0..2 {
+        let large_drawing = crate::decipher_fonts::drawing_of(&large, large_digest, 1);
+        let small_drawing = crate::decipher_fonts::drawing_of(&small, small_digest, 1);
+        assert!(large_drawing.is_some() && small_drawing.is_some());
+        assert_eq!(large_drawing, direct(&large));
+        assert_eq!(small_drawing, direct(&small));
+        assert_ne!(large_drawing, small_drawing);
+    }
+}

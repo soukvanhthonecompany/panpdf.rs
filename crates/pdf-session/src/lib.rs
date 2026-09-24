@@ -4,6 +4,7 @@ pub mod extract;
 pub mod gesture;
 pub mod pictures;
 pub mod select;
+pub mod stages;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -341,6 +342,7 @@ pub struct Session {
     revision: RevisionId,
     last_pages: Option<pdf_edit::PageChange>,
     last_spread: Vec<usize>,
+    watch: std::sync::Mutex<stages::Stopwatch>,
 }
 
 fn spread_of(pages: &[usize]) -> Vec<usize> {
@@ -370,6 +372,12 @@ impl Clone for Session {
             revision: self.revision,
             last_pages: self.last_pages.clone(),
             last_spread: self.last_spread.clone(),
+            watch: std::sync::Mutex::new(
+                self.watch
+                    .lock()
+                    .map(|watch| watch.clone())
+                    .unwrap_or_default(),
+            ),
         }
     }
 }
@@ -404,6 +412,7 @@ impl Session {
             revision: RevisionId::first(),
             last_pages: None,
             last_spread: Vec::new(),
+            watch: std::sync::Mutex::default(),
         }
     }
 
@@ -512,13 +521,16 @@ impl Session {
         if let Some(held) = self.recall((index, Door::Editing)) {
             return Ok(held);
         }
-        let view = Arc::new(interpret_page_fully(
+        self.timing(stages::Stage::Read);
+        let read = interpret_page_fully(
             self.history.source(),
             index,
             &self.credential,
             self.groupings.get(&index).map(AsRef::as_ref),
             self.fonts.clone(),
-        )?);
+        );
+        self.timed();
+        let view = Arc::new(read?);
         self.name_new_blocks(index, &view);
         self.hold((index, Door::Editing), &view);
         Ok(view)
@@ -611,6 +623,13 @@ impl Session {
     }
 
     pub fn plan(&mut self, command: &Command) -> Result<Plan, PlanError> {
+        self.timing(stages::Stage::Plan);
+        let plan = self.plan_untimed(command);
+        self.timed();
+        plan
+    }
+
+    fn plan_untimed(&mut self, command: &Command) -> Result<Plan, PlanError> {
         let view = self.page(command.page_index()).map_err(PlanError::Page)?;
         plan_command_in(
             self.history.source(),
@@ -633,6 +652,16 @@ impl Session {
     }
 
     pub fn lay_out_live(&mut self, command: &Command) -> Result<pdf_edit::LiveBlock, PlanError> {
+        self.timing(stages::Stage::Plan);
+        let laid = self.lay_out_live_untimed(command);
+        self.timed();
+        laid
+    }
+
+    fn lay_out_live_untimed(
+        &mut self,
+        command: &Command,
+    ) -> Result<pdf_edit::LiveBlock, PlanError> {
         let view = self.page(command.page_index()).map_err(PlanError::Page)?;
         lay_out_live(
             self.history.source(),
@@ -678,7 +707,9 @@ impl Session {
         let (credential, fonts) = (self.credential.clone(), self.fonts.clone());
         let restrictions = self.history.restrictions();
         let mut said: Vec<Said> = Vec::new();
-        self.history
+        self.timing(stages::Stage::Write);
+        let applied = self
+            .history
             .apply_together_with(commands.len(), |source, at| {
                 let plan = pdf_edit::spike_move_text::plan_command_under(
                     source,
@@ -692,7 +723,9 @@ impl Session {
                     plan.inserted().to_vec(),
                 ));
                 Ok(plan)
-            })?;
+            });
+        self.timed();
+        applied?;
         let regrouped = self.carry_groupings(&said);
         self.last_pages = None;
         self.last_spread = spread_of(&spread);
@@ -759,7 +792,10 @@ impl Session {
                 Arc::new(grouping.remapped_with_insertions(mapping, plan.inserted()))
             });
         let pages = plan.pages().cloned();
-        self.history.apply(plan)?;
+        self.timing(stages::Stage::Write);
+        let applied = self.history.apply(plan);
+        self.timed();
+        applied?;
         self.last_pages.clone_from(&pages);
         self.last_spread.clear();
         if let Some(change) = pages {
@@ -813,26 +849,60 @@ impl Session {
 
     pub fn preview(&self, plan: &Plan) -> Result<PageView, String> {
         let page = plan.effect().page_index;
-        let bytes = self
-            .history
-            .preview(plan)
-            .map_err(|error| error.to_string())?;
+        self.timing(stages::Stage::Write);
+        let bytes = self.history.preview(plan);
+        self.timed();
+        let bytes = bytes.map_err(|error| error.to_string())?;
         let grouping = self
             .grouping(page)
             .zip(plan.correspondence())
             .map(|(grouping, mapping)| grouping.remapped_with_insertions(mapping, plan.inserted()));
-        interpret_page_fully(
+        self.timing(stages::Stage::Read);
+        let read = interpret_page_fully(
             &bytes,
             page,
             &self.credential,
             grouping.as_ref(),
             self.fonts.clone(),
-        )
-        .map_err(|error| error.to_string())
+        );
+        self.timed();
+        read.map_err(|error| error.to_string())
+    }
+
+    pub fn set_clock(&mut self, clock: fn() -> f64) {
+        if let Ok(mut watch) = self.watch.lock() {
+            *watch = stages::Stopwatch::reading(clock);
+        }
+    }
+
+    pub fn begin_timing(&self) {
+        if let Ok(mut watch) = self.watch.lock() {
+            watch.begin();
+        }
+    }
+
+    #[must_use]
+    pub fn end_timing(&self) -> Option<stages::Stages> {
+        self.watch.lock().ok().and_then(|mut watch| watch.end())
+    }
+
+    fn timing(&self, stage: stages::Stage) {
+        if let Ok(mut watch) = self.watch.lock() {
+            watch.enter(stage);
+        }
+    }
+
+    fn timed(&self) {
+        if let Ok(mut watch) = self.watch.lock() {
+            watch.leave();
+        }
     }
 
     pub fn undo(&mut self) -> Result<bool, SpikeError> {
-        let walked = self.history.undo()?;
+        self.timing(stages::Stage::Write);
+        let walked = self.history.undo();
+        self.timed();
+        let walked = walked?;
         if walked {
             self.last_pages = None;
             self.last_spread.clear();
@@ -861,7 +931,10 @@ impl Session {
     }
 
     pub fn redo(&mut self) -> Result<bool, SpikeError> {
-        let walked = self.history.redo()?;
+        self.timing(stages::Stage::Write);
+        let walked = self.history.redo();
+        self.timed();
+        let walked = walked?;
         if walked {
             self.last_pages = None;
             self.last_spread.clear();
@@ -1192,6 +1265,80 @@ mod tests {
                 b"",
             )
             .expect("the page has a run to move")
+    }
+
+    #[test]
+    fn an_edit_says_where_its_time_went() {
+        thread_local! {
+            static TICKS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+        }
+        fn tick() -> f64 {
+            TICKS.with(|ticks| {
+                ticks.set(ticks.get() + 1.0);
+                ticks.get()
+            })
+        }
+        let mut session = Session::new(two_page_fixture(), b"");
+        assert!(session.end_timing().is_none(), "nothing timed yet");
+        session.set_clock(tick);
+        session.begin_timing();
+        let plan = session
+            .plan(&Command::MoveTextRun {
+                page_index: 0,
+                selection: TextRunSelection::Last,
+                dx: 4.0,
+                dy: 0.0,
+            })
+            .expect("planned");
+        session.preview(&plan).expect("previewed");
+        session.apply(plan).expect("committed");
+        let stages = session.end_timing().expect("timed");
+        assert!(stages.read > 0.0, "{stages:?}");
+        assert!(stages.plan > 0.0, "{stages:?}");
+        assert!(stages.write > 0.0, "{stages:?}");
+        assert!(
+            stages.read + stages.plan + stages.write <= stages.total,
+            "{stages:?}"
+        );
+    }
+
+    #[test]
+    fn an_edit_never_copies_the_document() {
+        let opened = two_page_fixture();
+        let mut session = Session::new(opened.clone(), b"");
+        session.page(0).expect("the page reads");
+        let copies = pdf_bytes::whole_copies();
+        let plan = session
+            .plan(&Command::MoveTextRun {
+                page_index: 0,
+                selection: TextRunSelection::Last,
+                dx: 4.0,
+                dy: 0.0,
+            })
+            .expect("planned");
+        session.preview(&plan).expect("previewed");
+        session.apply(plan).expect("committed");
+        session.page(0).expect("the edited page reads");
+        assert!(session.undo().expect("undone"));
+        session.page(0).expect("the page reads after the undo");
+        assert!(session.redo().expect("redone"));
+        session.page(1).expect("the other page reads");
+        assert_eq!(
+            pdf_bytes::whole_copies(),
+            copies,
+            "an edit copied the document"
+        );
+        let start = session
+            .source()
+            .prefix(opened.id(), opened.len())
+            .expect("longer than the file opened");
+        assert!(
+            start.is_same(&opened),
+            "the opened file is shared, not copied"
+        );
+
+        let _ = session.source().as_bytes();
+        assert_eq!(pdf_bytes::whole_copies(), copies + 1);
     }
 
     #[test]

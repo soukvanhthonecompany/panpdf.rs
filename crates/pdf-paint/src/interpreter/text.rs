@@ -464,17 +464,33 @@ impl Interpreter {
         Ok(())
     }
 
-    pub(super) fn current_font(&self, operation: &Operation) -> Result<Font, InterpretError> {
+    pub(super) fn current_font(
+        &mut self,
+        operation: &Operation,
+    ) -> Result<Arc<Font>, InterpretError> {
         let applied =
             self.state.text.font.as_ref().ok_or_else(|| {
                 InterpretError::at(operation, InterpretErrorKind::TextFontMissing)
             })?;
-        self.resources
+        let resource = self
+            .resources
             .as_ref()
             .and_then(|resources| resources.font(&applied.value.name))
-            .ok_or_else(|| InterpretError::at(operation, InterpretErrorKind::ResourceNotFound))?
-            .font()
-            .map_err(|error| InterpretError::at(operation, InterpretErrorKind::FontDecode(error)))
+            .ok_or_else(|| InterpretError::at(operation, InterpretErrorKind::ResourceNotFound))?;
+        if let Some(reference) = resource.reference()
+            && let Some((parsed_from, font)) = self.parsed_fonts.get(&reference)
+            && parsed_from.is_same_object(resource)
+        {
+            return Ok(Arc::clone(font));
+        }
+        let font = Arc::new(resource.font().map_err(|error| {
+            InterpretError::at(operation, InterpretErrorKind::FontDecode(error))
+        })?);
+        if let Some(reference) = resource.reference() {
+            self.parsed_fonts
+                .insert(reference, (resource.clone(), Arc::clone(&font)));
+        }
+        Ok(font)
     }
 
     pub(super) fn decode_text_array(

@@ -2053,6 +2053,9 @@ fn place_objects(
         };
         let quad = match object.kind {
             pdf_semantics::ObjectKind::Image => object.quad,
+            pdf_semantics::ObjectKind::Form => object
+                .quad
+                .filter(|quad| quad_area(&device_quad(device, quad)) * 4.0 <= paper),
             pdf_semantics::ObjectKind::Path => drawing_quad(page, object)
                 .or_else(|| {
                     object.bounds.map(|bounds| {

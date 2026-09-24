@@ -394,7 +394,7 @@ fn spike_command(
     let moved =
         move_last_text_run_with_fonts(source, 0, offset, 0.0, b"", pdf_cli::font_provider())?;
     if let Some(output) = output {
-        std::fs::write(output, moved.source.as_bytes())?;
+        std::fs::write(output, moved.source.to_vec())?;
         println!("wrote: {}", output.display());
     }
     println!("file: {}", path.display());
@@ -414,7 +414,7 @@ fn spike_command(
     let mut tally = Tally::default();
     let check = &mut tally;
 
-    let prefix_intact = moved.source.as_bytes()[..moved.original_length] == *source.as_bytes();
+    let prefix_intact = moved.source.get(0..moved.original_length) == Some(source.as_bytes());
     check.held(
         "original bytes unchanged",
         prefix_intact,
@@ -611,7 +611,7 @@ fn check_cluster_edit(
     output: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
     if let Some(output) = output {
-        std::fs::write(output, moved.source.as_bytes())?;
+        std::fs::write(output, moved.source.to_vec())?;
         println!("wrote: {}", output.display());
     }
     println!("file: {}", path.display());
@@ -626,8 +626,7 @@ fn check_cluster_edit(
     let check = &mut tally;
     check.held(
         "original bytes unchanged",
-        moved.source.as_bytes().len() >= moved.original_length
-            && moved.source.as_bytes()[..moved.original_length] == source.as_bytes()[..],
+        moved.source.get(0..moved.original_length) == Some(source.as_bytes()),
         &format!("first {} bytes compared", moved.original_length),
     );
 

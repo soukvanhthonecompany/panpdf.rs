@@ -58,32 +58,59 @@ impl Token {
 
 pub struct Lexer<'a> {
     source: &'a ByteStore,
+    bytes: &'a [u8],
+    base: usize,
     offset: usize,
     limits: LexLimits,
 }
 
+const LOOKAHEAD: usize = 2;
+
 impl<'a> Lexer<'a> {
     #[must_use]
-    pub const fn new(source: &'a ByteStore, offset: usize, limits: LexLimits) -> Self {
+    pub fn new(source: &'a ByteStore, offset: usize, limits: LexLimits) -> Self {
+        let (base, bytes) = source.run_at(offset);
         Self {
             source,
-            offset,
+            bytes,
+            base,
+            offset: offset - base,
             limits,
         }
     }
 
     #[must_use]
     pub const fn offset(&self) -> usize {
-        self.offset
+        self.base + self.offset
     }
 
     pub fn next_token(&mut self) -> Result<Option<Token>, LexError> {
-        let bytes = self.source.as_bytes();
+        let from = self.offset();
+        let read = self.read_token();
+        let ends_here = self.base + self.bytes.len() >= self.source.len();
+        if ends_here || self.offset + LOOKAHEAD < self.bytes.len() {
+            return read;
+        }
+        self.bytes = self.source.as_bytes();
+        self.base = 0;
+        self.offset = from;
+        self.read_token()
+    }
+
+    fn read_token(&mut self) -> Result<Option<Token>, LexError> {
+        let found = self.scan_token();
+        let base = self.base;
+        found.map_err(|error| Self::error(base + error.offset, error.kind))
+    }
+
+    fn scan_token(&mut self) -> Result<Option<Token>, LexError> {
+        let bytes = self.bytes;
         if self.offset > bytes.len() {
             return Err(Self::error(self.offset, LexErrorKind::OffsetOutOfBounds));
         }
 
         self.skip_trivia();
+        let bytes = self.bytes;
         if self.offset == bytes.len() {
             return Ok(None);
         }
@@ -123,34 +150,44 @@ impl<'a> Lexer<'a> {
 
         let span = self
             .source
-            .span(start..self.offset)
+            .span(self.base + start..self.base + self.offset)
             .map_err(|_| Self::error(start, LexErrorKind::OffsetOutOfBounds))?;
         Ok(Some(Token { kind, span }))
     }
 
     fn skip_trivia(&mut self) {
-        let bytes = self.source.as_bytes();
+        let mut in_comment = false;
         loop {
-            while bytes
-                .get(self.offset)
-                .is_some_and(|byte| is_whitespace(*byte))
-            {
-                self.offset += 1;
-            }
-            if bytes.get(self.offset) != Some(&b'%') {
-                break;
-            }
-            while let Some(byte) = bytes.get(self.offset) {
-                if matches!(byte, b'\r' | b'\n') {
-                    break;
+            let bytes = self.bytes;
+            while let Some(&byte) = bytes.get(self.offset) {
+                if in_comment {
+                    if matches!(byte, b'\r' | b'\n') {
+                        in_comment = false;
+                    } else {
+                        self.offset += 1;
+                    }
+                } else if is_whitespace(byte) {
+                    self.offset += 1;
+                } else if byte == b'%' {
+                    in_comment = true;
+                    self.offset += 1;
+                } else {
+                    return;
                 }
-                self.offset += 1;
             }
+            let end = self.base + bytes.len();
+            if self.offset != bytes.len() || end >= self.source.len() {
+                return;
+            }
+            let (base, next) = self.source.run_at(end);
+            self.base = base;
+            self.bytes = next;
+            self.offset = end - base;
         }
     }
 
     fn scan_name(&mut self, start: usize) -> Result<TokenKind, LexError> {
-        let bytes = self.source.as_bytes();
+        let bytes = self.bytes;
         self.offset += 1;
         while let Some(byte) = bytes.get(self.offset).copied() {
             if is_whitespace(byte) || is_delimiter(byte) {
@@ -172,7 +209,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_literal_string(&mut self, start: usize) -> Result<TokenKind, LexError> {
-        let bytes = self.source.as_bytes();
+        let bytes = self.bytes;
         let mut depth = 1_usize;
         self.offset += 1;
 
@@ -213,7 +250,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_hex_string(&mut self, start: usize) -> Result<TokenKind, LexError> {
-        let bytes = self.source.as_bytes();
+        let bytes = self.bytes;
         self.offset += 1;
         while let Some(byte) = bytes.get(self.offset).copied() {
             if byte == b'>' {
@@ -231,7 +268,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_number(&mut self, start: usize) -> Result<TokenKind, LexError> {
-        let bytes = self.source.as_bytes();
+        let bytes = self.bytes;
         if matches!(bytes.get(self.offset), Some(b'+' | b'-')) {
             self.offset += 1;
         }
@@ -265,7 +302,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_keyword(&mut self, start: usize) -> Result<TokenKind, LexError> {
-        let bytes = self.source.as_bytes();
+        let bytes = self.bytes;
         while let Some(byte) = bytes.get(self.offset).copied() {
             if is_whitespace(byte) || is_delimiter(byte) {
                 break;
@@ -391,6 +428,50 @@ mod tests {
             ));
         }
         found
+    }
+
+    #[test]
+    fn a_source_in_pieces_lexes_as_the_same_bytes_in_one() {
+        let bytes: &[u8] =
+            b"1 0 obj\n<< /Name#20x [ (a (nested) string) <4142> -1.5 ] >> % note\r\nendobj\n%%EOF";
+        let whole = ByteStore::new(SourceId::new(9), bytes);
+        let expected = lexed(&whole);
+        for cut in 1..bytes.len() {
+            let pieces = ByteStore::new(SourceId::new(9), &bytes[..cut])
+                .followed_by(SourceId::new(9), bytes[cut..].to_vec());
+            assert_eq!(lexed(&pieces), expected, "cut at {cut}");
+        }
+        let broken: &[u8] = b"(unterminated % and /Na#";
+        for cut in 1..broken.len() {
+            let pieces = ByteStore::new(SourceId::new(9), &broken[..cut])
+                .followed_by(SourceId::new(9), broken[cut..].to_vec());
+            assert_eq!(
+                lexed(&pieces),
+                lexed(&ByteStore::new(SourceId::new(9), broken)),
+                "cut at {cut}"
+            );
+        }
+    }
+
+    type Lexed = (TokenKind, usize, Vec<u8>);
+
+    fn lexed(source: &ByteStore) -> Vec<Result<Lexed, super::LexError>> {
+        let mut lexer = Lexer::new(source, 0, LexLimits::default());
+        let mut found = Vec::new();
+        loop {
+            match lexer.next_token() {
+                Ok(Some(token)) => found.push(Ok((
+                    token.kind(),
+                    lexer.offset(),
+                    source.resolve(token.span()).expect("its span").to_vec(),
+                ))),
+                Ok(None) => return found,
+                Err(error) => {
+                    found.push(Err(error));
+                    return found;
+                }
+            }
+        }
     }
 
     #[test]

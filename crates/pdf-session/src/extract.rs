@@ -24,7 +24,7 @@ pub fn extract_pages(document: &Arc<[u8]>, pages: &[usize]) -> Result<Vec<u8>, S
         },
         Command::RemovePages { pages: vec![0] },
     ])?;
-    Ok(session.source().as_bytes().to_vec())
+    Ok(session.source().to_vec())
 }
 
 pub fn blank_document(size: [f64; 2]) -> Result<Vec<u8>, SpikeError> {
@@ -46,7 +46,7 @@ pub fn blank_document(size: [f64; 2]) -> Result<Vec<u8>, SpikeError> {
         },
         Command::RemovePages { pages: vec![0] },
     ])?;
-    Ok(session.source().as_bytes().to_vec())
+    Ok(session.source().to_vec())
 }
 
 pub(crate) fn empty_document() -> Arc<[u8]> {

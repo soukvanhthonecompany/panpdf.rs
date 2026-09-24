@@ -235,3 +235,74 @@ fn shading_resolves_an_indirect_function_and_refuses_a_multi_input_one() {
     let error = interpret_color_page(&source).expect_err("multi-input shading function");
     assert_eq!(error.kind(), InterpretErrorKind::InvalidFunction);
 }
+
+#[test]
+fn a_function_shading_keeps_its_rectangle_matrix_and_two_input_function() {
+    let source = shading_function_stream_fixture(
+        b"<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [-1 1 -1 1] /Matrix [10 0 0 10 50 50] /Function 5 0 R >>",
+        b"/FunctionType 4 /Domain [-1 1 -1 1] /Range [0 1 0 1 0 1]",
+        b"{ 0 exch }",
+    );
+    let graph = interpret_color_page(&source).expect("function shading");
+    let PaintAtomKind::Shading(shading) = &graph.atoms[0].kind else {
+        panic!("expected a shading atom")
+    };
+    let ShadingGeometry::Function { domain, matrix } = &shading.geometry else {
+        panic!("expected a function shading")
+    };
+    assert_floats(&domain.value, &[-1.0, 1.0, -1.0, 1.0]);
+    assert_eq!(domain.provenance.len(), 1);
+    assert_floats(
+        &[
+            matrix.value.a,
+            matrix.value.d,
+            matrix.value.e,
+            matrix.value.f,
+        ],
+        &[10.0, 10.0, 50.0, 50.0],
+    );
+    assert_floats(
+        &shading
+            .function
+            .evaluate(&[0.25, 0.75])
+            .expect("two inputs"),
+        &[0.25, 0.0, 0.75],
+    );
+
+    let source = shading_function_stream_fixture(
+        b"<< /ShadingType 1 /ColorSpace /DeviceRGB /Function 5 0 R >>",
+        b"/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1]",
+        b"{ 0 exch }",
+    );
+    let graph = interpret_color_page(&source).expect("function shading with defaults");
+    let PaintAtomKind::Shading(shading) = &graph.atoms[0].kind else {
+        panic!("expected a shading atom")
+    };
+    let ShadingGeometry::Function { domain, matrix } = &shading.geometry else {
+        panic!("expected a function shading")
+    };
+    assert_floats(&domain.value, &[0.0, 1.0, 0.0, 1.0]);
+    assert!(domain.provenance.is_empty());
+    assert_eq!(matrix.value, crate::geometry::Matrix::IDENTITY);
+}
+
+#[test]
+fn a_function_shading_refuses_a_one_input_function_and_an_empty_rectangle() {
+    for (shading, entries, expected) in [
+        (
+            &b"<< /ShadingType 1 /ColorSpace /DeviceRGB /Function 5 0 R >>"[..],
+            &b"/FunctionType 0 /Domain [0 1] /Range [0 1 0 1 0 1] /Size [2] /BitsPerSample 8"[..],
+            InterpretErrorKind::InvalidFunction,
+        ),
+        (
+            &b"<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [1 1 0 1] /Function 5 0 R >>"[..],
+            &b"/FunctionType 0 /Domain [0 1 0 1] /Range [0 1 0 1 0 1] /Size [2 1] /BitsPerSample 8"
+                [..],
+            InterpretErrorKind::InvalidShadingEntry,
+        ),
+    ] {
+        let source = shading_function_stream_fixture(shading, entries, &[0, 0, 0, 255, 128, 0]);
+        let error = interpret_color_page(&source).expect_err("refused function shading");
+        assert_eq!(error.kind(), expected);
+    }
+}

@@ -76,7 +76,7 @@ pub fn pictures_into_pdf(pictures: &[Arc<[u8]>]) -> Result<Vec<u8>, SpikeError> 
     let starter = ByteStore::new(SourceId::new(0), crate::extract::empty_document());
     let mut session = Session::new(starter, b"");
     session.apply_each(&commands)?;
-    Ok(session.source().as_bytes().to_vec())
+    Ok(session.source().to_vec())
 }
 
 #[cfg(test)]

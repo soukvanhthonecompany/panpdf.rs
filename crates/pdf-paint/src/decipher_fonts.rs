@@ -135,7 +135,7 @@ fn verdict(
     })?;
     let shapes = shapes_for(provider, &request, model)?;
     let (cipher, drawn) = gather(graph, atoms);
-    let reading = decipher(&cipher, &shapes, model);
+    let reading = remembered_reading(&cipher, &shapes, model);
     if !reading.outweighs_the_file() {
         return None;
     }
@@ -225,6 +225,7 @@ fn gather_placed(graph: &PaintGraph, atoms: &[usize]) -> (Cipher, Vec<bool>, Vec
     let mut index_of: BTreeMap<Code, usize> = BTreeMap::new();
     let mut boxes: Vec<Option<[f64; 4]>> = Vec::new();
     let mut placed: Vec<(usize, usize, PlacedInk)> = Vec::new();
+    let mut digests: HashMap<*const pdf_content::GlyphProgram, u128> = HashMap::new();
     for at in atoms {
         let PaintAtomKind::Text(text) = &graph.atoms[*at].kind else {
             continue;
@@ -232,16 +233,19 @@ fn gather_placed(graph: &PaintGraph, atoms: &[usize]) -> (Cipher, Vec<bool>, Vec
         let Some(program) = &text.program else {
             continue;
         };
+        let digest = *digests
+            .entry(Arc::as_ptr(program))
+            .or_insert_with(|| program_digest(program));
         for glyph in &text.glyphs {
             let code = Code {
                 value: glyph.code.value,
                 byte_len: glyph.code.bytes.len(),
             };
             let index = *index_of.entry(code).or_insert_with(|| {
-                let raster = glyph.glyph.and_then(|id| Raster::of(program, id));
-                boxes.push(raster.as_ref().map(Raster::ink_box));
+                let drawing = glyph.glyph.and_then(|id| drawing_of(program, digest, id));
+                boxes.push(drawing.as_ref().map(|(ink, _)| *ink));
                 cipher.codes.push(code);
-                cipher.drawings.push(raster.as_ref().map(Features::of));
+                cipher.drawings.push(drawing.map(|(_, features)| features));
                 cipher
                     .claims
                     .push(text.text.declared_text_of(code).and_then(|meaning| {
@@ -283,6 +287,72 @@ fn gather_placed(graph: &PaintGraph, atoms: &[usize]) -> (Cipher, Vec<bool>, Vec
         .collect();
     let drawn = cipher.drawings.iter().map(Option::is_some).collect();
     (cipher, drawn, glyphs)
+}
+
+const MOST_DRAWINGS: usize = 16_384;
+
+const MOST_READINGS: usize = 8;
+
+pub(crate) fn program_digest(program: &pdf_content::GlyphProgram) -> u128 {
+    use std::hash::{Hash, Hasher};
+    let half = |salt: u8| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        salt.hash(&mut hasher);
+        program.program_bytes().hash(&mut hasher);
+        hasher.finish()
+    };
+    (u128::from(half(1)) << 64) | u128::from(half(2))
+}
+
+pub(crate) fn drawing_of(
+    program: &pdf_content::GlyphProgram,
+    digest: u128,
+    glyph: u16,
+) -> Option<([f64; 4], Features)> {
+    type Drawings = HashMap<(u128, u16), Option<([f64; 4], Features)>>;
+    static KEPT: OnceLock<Mutex<Drawings>> = OnceLock::new();
+    let kept = KEPT.get_or_init(Mutex::default);
+    if let Some(found) = kept
+        .lock()
+        .ok()
+        .and_then(|held| held.get(&(digest, glyph)).cloned())
+    {
+        return found;
+    }
+    let drawing =
+        Raster::of(program, glyph).map(|raster| (raster.ink_box(), Features::of(&raster)));
+    if let Ok(mut held) = kept.lock() {
+        if held.len() >= MOST_DRAWINGS {
+            held.clear();
+        }
+        held.insert((digest, glyph), drawing.clone());
+    }
+    drawing
+}
+
+fn remembered_reading(
+    cipher: &Cipher,
+    shapes: &Arc<Shapes>,
+    model: &'static pdf_content::decipher::CharModel,
+) -> pdf_content::decipher::Reading {
+    type Readings = Vec<(Arc<Shapes>, Cipher, pdf_content::decipher::Reading)>;
+    static KEPT: OnceLock<Mutex<Readings>> = OnceLock::new();
+    let kept = KEPT.get_or_init(Mutex::default);
+    if let Some(found) = kept.lock().ok().and_then(|held| {
+        held.iter()
+            .find(|(against, read, _)| Arc::ptr_eq(against, shapes) && read == cipher)
+            .map(|(_, _, reading)| reading.clone())
+    }) {
+        return found;
+    }
+    let reading = decipher(cipher, shapes, model);
+    if let Ok(mut held) = kept.lock() {
+        if held.len() >= MOST_READINGS {
+            held.remove(0);
+        }
+        held.push((Arc::clone(shapes), cipher.clone(), reading.clone()));
+    }
+    reading
 }
 
 fn shapes_for(

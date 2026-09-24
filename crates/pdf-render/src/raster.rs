@@ -1,4 +1,5 @@
 use pdf_paint::FillRule;
+use pdf_paint::MulAdd as _;
 
 use crate::geometry::Polygon;
 
@@ -236,7 +237,7 @@ fn snapped_fill(low: f64, high: f64) -> (f64, f64) {
     let near = f64::from(low as f32);
     let far = f64::from(high as f32);
     let extent = f64::from((far - near) as f32).ceil().max(1.0);
-    let start = (near + far - extent).mul_add(0.5, -0.5).ceil();
+    let start = (near + far - extent).madd(0.5, -0.5).ceil();
     (start, start + extent)
 }
 
@@ -375,7 +376,7 @@ fn accumulate(
     if exit <= entry {
         return;
     }
-    let mut x = slope.mul_add(entry - top, left);
+    let mut x = slope.madd(entry - top, left);
     let mut row = floor_index(entry, rows.saturating_sub(1));
     loop {
         #[allow(clippy::cast_precision_loss)]
@@ -385,7 +386,7 @@ fn accumulate(
         if band_bottom <= band_top {
             break;
         }
-        let next = slope.mul_add(band_bottom - band_top, x);
+        let next = slope.madd(band_bottom - band_top, x);
         let weight = (band_bottom - band_top) * direction;
         let cells_row = &mut cells[row * stride..(row + 1) * stride];
         clipped_band(cells_row, columns, x, next, weight);
@@ -426,8 +427,8 @@ fn clipped_band(cells_row: &mut [f64], columns: usize, from: f64, to: f64, weigh
         if end <= start {
             continue;
         }
-        let x0 = (to - from).mul_add(start, from).clamp(0.0, limit);
-        let x1 = (to - from).mul_add(end, from).clamp(0.0, limit);
+        let x0 = (to - from).madd(start, from).clamp(0.0, limit);
+        let x1 = (to - from).madd(end, from).clamp(0.0, limit);
         band(cells_row, columns, x0, x1, weight * (end - start));
     }
 }
@@ -441,7 +442,7 @@ fn band(cells_row: &mut [f64], columns: usize, from: f64, to: f64, weight: f64) 
     let last = floor_index(high, columns);
     if first == last {
         #[allow(clippy::cast_precision_loss)]
-        let inset = 0.5f64.mul_add(from + to, -(first as f64));
+        let inset = 0.5f64.madd(from + to, -(first as f64));
         cells_row[first] += weight * (1.0 - inset);
         cells_row[first + 1] += weight * inset;
         return;

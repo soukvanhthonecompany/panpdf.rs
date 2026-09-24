@@ -7,7 +7,7 @@ use crate::color::{
 };
 use crate::error::{InterpretError, InterpretErrorKind};
 use crate::function::{Function, FunctionParseState, parse_function};
-use crate::geometry::normalize_rectangle;
+use crate::geometry::{Matrix, normalize_rectangle};
 use crate::operand::{
     optional_boolean_pair, optional_component_array, optional_number_pair, resource_boolean,
     resource_integer,
@@ -18,6 +18,10 @@ use crate::state::{GraphicsState, PaintLimits};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShadingGeometry {
+    Function {
+        domain: Derived<[f64; 4]>,
+        matrix: Derived<Matrix>,
+    },
     Axial(Derived<[f64; 4]>),
     Radial(Derived<[f64; 6]>),
 }
@@ -60,34 +64,28 @@ pub(crate) fn parse_shading(
         ));
     };
     let ignored_entries = validate_shading_dictionary(entries, resource, operation)?;
-    if let Some(shading_type_name) = unique_resource_entry(
-        entries,
-        resource.source(),
-        b"/Type",
-        operation,
-        InterpretErrorKind::InvalidShadingEntry,
-    )? && !shading_type_name.name_equals(resource.source(), b"/Shading")
-    {
-        return Err(InterpretError::at(
-            operation,
-            InterpretErrorKind::InvalidShadingEntry,
-        ));
-    }
-    let shading_type_object =
-        required_shading_entry(entries, resource, b"/ShadingType", operation)?;
-    let shading_type = resource_integer(operation, resource.source(), shading_type_object)?;
-    if !matches!(shading_type, 2 | 3) {
-        return Err(InterpretError::at(
-            operation,
-            InterpretErrorKind::UnsupportedShadingType,
-        ));
-    }
+    let shading_type = shading_type(entries, resource, operation)?;
     let color_space_object = required_shading_entry(entries, resource, b"/ColorSpace", operation)?;
     let color_space =
         shading_color_space(operation, resource, resources, color_space_object, limits)?;
     let components = color_components(&color_space.value).ok_or_else(|| {
         InterpretError::at(operation, InterpretErrorKind::UnsupportedShadingColorSpace)
     })?;
+    if shading_type == 1 {
+        return parse_function_shading(
+            operation,
+            entries,
+            resource,
+            ShadingParts {
+                name,
+                color_space,
+                components,
+                ignored_entries,
+                state,
+                limits,
+            },
+        );
+    }
     let coords_object = required_shading_entry(entries, resource, b"/Coords", operation)?;
     let geometry = if shading_type == 2 {
         ShadingGeometry::Axial(Derived::assigned(
@@ -125,7 +123,7 @@ pub(crate) fn parse_shading(
     let common = parse_shading_common(entries, resource, operation, components)?;
     let function_object = required_shading_entry(entries, resource, b"/Function", operation)?;
     let function =
-        parse_shading_function(operation, resource, function_object, components, limits)?;
+        parse_shading_function(operation, resource, function_object, components, 1, limits)?;
     Ok(ShadingPaint {
         ignored_entries: ignored_entries.clone(),
         name,
@@ -143,11 +141,135 @@ pub(crate) fn parse_shading(
     })
 }
 
+fn shading_type(
+    entries: &[pdf_syntax::DictionaryEntry],
+    resource: &ResourceEntry,
+    operation: &Operation,
+) -> Result<i64, InterpretError> {
+    if let Some(shading_type_name) = unique_resource_entry(
+        entries,
+        resource.source(),
+        b"/Type",
+        operation,
+        InterpretErrorKind::InvalidShadingEntry,
+    )? && !shading_type_name.name_equals(resource.source(), b"/Shading")
+    {
+        return Err(InterpretError::at(
+            operation,
+            InterpretErrorKind::InvalidShadingEntry,
+        ));
+    }
+    let shading_type_object =
+        required_shading_entry(entries, resource, b"/ShadingType", operation)?;
+    let shading_type = resource_integer(operation, resource.source(), shading_type_object)?;
+    if !matches!(shading_type, 1..=3) {
+        return Err(InterpretError::at(
+            operation,
+            InterpretErrorKind::UnsupportedShadingType,
+        ));
+    }
+    Ok(shading_type)
+}
+
+struct ShadingParts {
+    name: Vec<u8>,
+    color_space: Derived<ColorSpace>,
+    components: usize,
+    ignored_entries: Vec<SourceSpan>,
+    state: GraphicsState,
+    limits: PaintLimits,
+}
+
+fn parse_function_shading(
+    operation: &Operation,
+    entries: &[pdf_syntax::DictionaryEntry],
+    resource: &ResourceEntry,
+    parts: ShadingParts,
+) -> Result<ShadingPaint, InterpretError> {
+    let domain = match unique_resource_entry(
+        entries,
+        resource.source(),
+        b"/Domain",
+        operation,
+        InterpretErrorKind::InvalidShadingEntry,
+    )? {
+        Some(value) => Derived::assigned(
+            resource_numbers::<4>(
+                operation,
+                resource.source(),
+                value,
+                InterpretErrorKind::InvalidShadingEntry,
+            )?,
+            value.span(),
+        ),
+        None => Derived::initial([0.0, 1.0, 0.0, 1.0]),
+    };
+    let [x0, x1, y0, y1] = domain.value;
+    if x0 >= x1 || y0 >= y1 {
+        return Err(InterpretError::at(
+            operation,
+            InterpretErrorKind::InvalidShadingEntry,
+        ));
+    }
+    let matrix = match unique_resource_entry(
+        entries,
+        resource.source(),
+        b"/Matrix",
+        operation,
+        InterpretErrorKind::InvalidShadingEntry,
+    )? {
+        Some(value) => {
+            let values = resource_numbers::<6>(
+                operation,
+                resource.source(),
+                value,
+                InterpretErrorKind::InvalidShadingEntry,
+            )?;
+            let matrix = Matrix {
+                a: values[0],
+                b: values[1],
+                c: values[2],
+                d: values[3],
+                e: values[4],
+                f: values[5],
+            };
+            Derived::assigned(matrix, value.span())
+        }
+        None => Derived::initial(Matrix::IDENTITY),
+    };
+    let common = parse_shading_common(entries, resource, operation, parts.components)?;
+    let function_object = required_shading_entry(entries, resource, b"/Function", operation)?;
+    let function = parse_shading_function(
+        operation,
+        resource,
+        function_object,
+        parts.components,
+        2,
+        parts.limits,
+    )?;
+    Ok(ShadingPaint {
+        name: parts.name,
+        reference: resource.reference(),
+        dictionary_span: resource.value().span(),
+        color_space: parts.color_space,
+        geometry: ShadingGeometry::Function { domain, matrix },
+        domain: Derived::initial([0.0, 1.0]),
+        extend: Derived::initial([false, false]),
+        background: common.background,
+        bbox: common.bbox,
+        anti_alias: common.anti_alias,
+        function,
+        state: parts.state,
+        ignored_entries: parts.ignored_entries,
+    })
+}
+
 fn parse_shading_function(
     operation: &Operation,
     resource: &ResourceEntry,
     value: &Object,
     components: usize,
+    inputs: usize,
     limits: PaintLimits,
 ) -> Result<Function, InterpretError> {
     let load_function = |reference, limit| resource.function(reference, limit);
@@ -164,7 +286,7 @@ fn parse_shading_function(
         0,
         &mut state,
     )?;
-    if function.inputs() == 1 {
+    if function.inputs() == inputs {
         Ok(function)
     } else {
         Err(InterpretError::at(
@@ -262,6 +384,7 @@ fn validate_shading_dictionary(
                 | b"/Domain"
                 | b"/Function"
                 | b"/Extend"
+                | b"/Matrix"
         ) {
             ignored.push(entry.value().span());
         }

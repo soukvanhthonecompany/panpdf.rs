@@ -109,7 +109,7 @@ fn read_signature(
     field: String,
     named_by_the_catalogue: Option<Kind>,
 ) -> Signature {
-    let length = source.as_bytes().len() as u64;
+    let length = source.len() as u64;
     let range = byte_range(reader, value);
     let text = |key: &[u8]| {
         reader
@@ -151,11 +151,14 @@ fn checked(
     let held = reader.entry(value, b"/Contents")?;
     let blob = Reader::written_bytes(&held)?;
     let [first, count, second, more] = range?;
-    let bytes = source.as_bytes();
     let stretch = |from: u64, many: u64| -> &[u8] {
-        let from = usize::try_from(from).unwrap_or(usize::MAX).min(bytes.len());
+        let from = usize::try_from(from)
+            .unwrap_or(usize::MAX)
+            .min(source.len());
         let many = usize::try_from(many).unwrap_or(usize::MAX);
-        &bytes[from..from.saturating_add(many).min(bytes.len())]
+        source
+            .get(from..from.saturating_add(many).min(source.len()))
+            .unwrap_or_default()
     };
     Some(pdf_security::check_signature(
         &blob,

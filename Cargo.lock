@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-agent"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "pdf-bytes",
  "pdf-cli",
@@ -2057,7 +2057,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "pdf-agent",
  "pdf-bytes",
@@ -2075,11 +2075,11 @@ dependencies = [
 
 [[package]]
 name = "pdf-bytes"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "pdf-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "pdf-bytes",
  "pdf-content",
@@ -2093,11 +2093,11 @@ dependencies = [
 
 [[package]]
 name = "pdf-compose"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "pdf-content"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "pdf-bytes",
  "pdf-font",
@@ -2107,7 +2107,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-desktop"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "pdf-app",
  "pdf-bytes",
@@ -2120,7 +2120,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-edit"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "icu_segmenter",
  "pdf-bytes",
@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-font"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "pdf-bytes",
  "pdf-syntax",
@@ -2142,11 +2142,11 @@ dependencies = [
 
 [[package]]
 name = "pdf-heap"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "pdf-ocr"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "pdf-bytes",
  "pdf-content",
@@ -2158,7 +2158,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-paint"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "hayro-jbig2",
  "jpeg-decoder",
@@ -2170,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-print"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "pdf-bytes",
  "pdf-content",
@@ -2181,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-render"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "pdf-bytes",
  "pdf-content",
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-security"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes",
  "cbc",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-semantics"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "icu_segmenter",
  "pdf-bytes",
@@ -2214,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-session"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "pdf-bytes",
  "pdf-content",
@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-syntax"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "flate2",
  "pdf-bytes",
@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-window"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "eframe",
  "js-sys",

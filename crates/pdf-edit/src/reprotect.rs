@@ -44,7 +44,7 @@ pub fn rewrite(
         .is_some()
         .then(|| Reference::new(Read::unused_number(&kept), 0));
 
-    let mut out = Vec::with_capacity(source.as_bytes().len());
+    let mut out = Vec::with_capacity(source.len());
     out.extend_from_slice(header(&read, made.is_some()).as_bytes());
     out.extend_from_slice(b"%\xe2\xe3\xcf\xd3\n");
 
@@ -332,7 +332,7 @@ fn signed(object: &Object) -> bool {
 }
 
 fn version_line(source: &ByteStore) -> String {
-    let bytes = source.as_bytes();
+    let bytes = source.ahead(0, 16);
     let end = bytes.iter().take(16).position(|byte| *byte == b'\n');
     match end {
         Some(end) if bytes.starts_with(b"%PDF-") => {

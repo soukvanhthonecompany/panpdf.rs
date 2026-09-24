@@ -37,7 +37,7 @@ pub use error::{InterpretError, InterpretErrorKind};
 pub use function::{
     ExponentialFunction, Function, PostScriptFunction, SampledFunction, StitchingFunction,
 };
-pub use geometry::{FillRule, Matrix, Path, PathSegment, Point, Shape};
+pub use geometry::{FillRule, Matrix, MulAdd, Path, PathSegment, Point, Shape};
 pub use graph::{
     FormInvocation, GroupBackdrop, InterpretRepair, MarkedContent, MarkedProperties, ObjectScope,
     PaintAtom, PaintAtomKind, PaintGraph, PaintId, PathPaint, PatternInvocation, PositionedGlyph,

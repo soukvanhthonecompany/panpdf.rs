@@ -100,7 +100,10 @@ impl PdfHeader {
 }
 
 pub fn parse_header_strict(source: &ByteStore) -> Result<PdfHeader, HeaderError> {
-    if !source.as_bytes().starts_with(HEADER_PREFIX) {
+    if !source
+        .ahead(0, HEADER_PREFIX.len())
+        .starts_with(HEADER_PREFIX)
+    {
         return Err(HeaderError::MissingAtByteZero);
     }
     parse_header_at(source, 0)
@@ -121,8 +124,10 @@ pub(crate) fn parse_header_at_ending(
     offset: usize,
     ending: LineEnding,
 ) -> Result<PdfHeader, HeaderError> {
-    let bytes = source.as_bytes();
-    let tail = bytes.get(offset..).ok_or(HeaderError::MissingAtByteZero)?;
+    if offset > source.len() {
+        return Err(HeaderError::MissingAtByteZero);
+    }
+    let tail = source.ahead(offset, HEADER_PREFIX.len() + 4);
     if !tail.starts_with(HEADER_PREFIX) {
         return Err(HeaderError::MissingAtByteZero);
     }

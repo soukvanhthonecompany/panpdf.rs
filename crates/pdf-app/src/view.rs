@@ -1,4 +1,5 @@
 use pdf_cli::{CaretStop, ObjectBox, TextBlockBox, TextClusterBox};
+use pdf_paint::MulAdd as _;
 
 use crate::document::RunBox;
 
@@ -55,7 +56,7 @@ impl Quad {
         for index in 0..4 {
             let (x0, y0) = self.corners[index];
             let (x1, y1) = self.corners[(index + 1) % 4];
-            twice += x0.mul_add(y1, -(x1 * y0));
+            twice += x0.madd(y1, -(x1 * y0));
         }
         (twice / 2.0).abs()
     }
@@ -74,7 +75,7 @@ impl Quad {
         for index in 0..4 {
             let (x0, y0) = self.corners[index];
             let (x1, y1) = self.corners[(index + 1) % 4];
-            let side = (x1 - x0).mul_add(point.1 - y0, -((y1 - y0) * (point.0 - x0)));
+            let side = (x1 - x0).madd(point.1 - y0, -((y1 - y0) * (point.0 - x0)));
             positive |= side > 0.0;
             negative |= side < 0.0;
         }
@@ -101,7 +102,7 @@ impl Quad {
         for index in 0..4 {
             let (x0, y0) = self.corners[index];
             let (x1, y1) = self.corners[(index + 1) % 4];
-            twice += x0.mul_add(y1, -(x1 * y0));
+            twice += x0.madd(y1, -(x1 * y0));
         }
         if twice.abs() <= f64::EPSILON {
             return *self;
@@ -122,14 +123,14 @@ impl Quad {
         for index in 0..4 {
             let (n1x, n1y) = normals[(index + 3) % 4];
             let (n2x, n2y) = normals[index];
-            let along = n1x.mul_add(n2x, n1y * n2y);
+            let along = n1x.madd(n2x, n1y * n2y);
             if (1.0 + along).abs() <= 1e-12 {
                 return *self;
             }
             let scale = by / (1.0 + along);
             corners[index] = (
-                scale.mul_add(n1x + n2x, self.corners[index].0),
-                scale.mul_add(n1y + n2y, self.corners[index].1),
+                scale.madd(n1x + n2x, self.corners[index].0),
+                scale.madd(n1y + n2y, self.corners[index].1),
             );
         }
         Self { corners }
@@ -187,7 +188,7 @@ impl Quad {
         let slack = 1e-6 * long.max(tall);
         (far.0 - self.corners[2].0).abs() <= slack
             && (far.1 - self.corners[2].1).abs() <= slack
-            && along.0.mul_add(across.0, along.1 * across.1).abs() <= slack * long.max(tall)
+            && along.0.madd(across.0, along.1 * across.1).abs() <= slack * long.max(tall)
     }
 }
 
@@ -227,7 +228,7 @@ fn nearest_row(stops: &[CaretStop], rows: &[usize], point: (f64, f64)) -> Option
         let distance = if height <= 1e-9 {
             (anchor.at[0] - point.0).hypot(anchor.at[1] - point.1)
         } else {
-            let across = (point.0 - anchor.at[0]).mul_add(
+            let across = (point.0 - anchor.at[0]).madd(
                 anchor.up[0] / height,
                 (point.1 - anchor.at[1]) * (anchor.up[1] / height),
             );
@@ -253,14 +254,14 @@ fn along_row_distance(stop: &CaretStop, point: (f64, f64)) -> f64 {
     }
     let along = (-stop.up[1] / height, stop.up[0] / height);
     (point.0 - stop.at[0])
-        .mul_add(along.0, (point.1 - stop.at[1]) * along.1)
+        .madd(along.0, (point.1 - stop.at[1]) * along.1)
         .abs()
 }
 
 fn caret_distance(stop: &CaretStop, point: (f64, f64)) -> f64 {
     let middle = (
-        stop.up[0].mul_add(0.5, stop.at[0]),
-        stop.up[1].mul_add(0.5, stop.at[1]),
+        stop.up[0].madd(0.5, stop.at[0]),
+        stop.up[1].madd(0.5, stop.at[1]),
     );
     (middle.0 - point.0).hypot(middle.1 - point.1)
 }
@@ -581,8 +582,8 @@ pub fn selection_quad(
     let mut extent: Option<[f64; 4]> = None;
     let hold = |x: f64, y: f64, extent: &mut Option<[f64; 4]>| {
         let (dx, dy) = (x - origin.0, y - origin.1);
-        let a = dx.mul_add(along.0, dy * along.1);
-        let b = dx.mul_add(up.0, dy * up.1);
+        let a = dx.madd(along.0, dy * along.1);
+        let b = dx.madd(up.0, dy * up.1);
         *extent = Some(match *extent {
             None => [a, b, a, b],
             Some(had) => [had[0].min(a), had[1].min(b), had[2].max(a), had[3].max(b)],
@@ -619,8 +620,8 @@ pub fn selection_quad(
     }
     let corner = |a: f64, b: f64| {
         (
-            a.mul_add(along.0, b.mul_add(up.0, origin.0)),
-            a.mul_add(along.1, b.mul_add(up.1, origin.1)),
+            a.madd(along.0, b.madd(up.0, origin.0)),
+            a.madd(along.1, b.madd(up.1, origin.1)),
         )
     };
     Some(Quad {
@@ -756,10 +757,10 @@ pub fn zoom_anchor(
         let area = strip.max(view.0);
         ((area - strip) / 2.0, area)
     };
-    let down = |strip: f32| (margin, (2.0f32.mul_add(margin, strip)).max(view.1));
+    let down = |strip: f32| (margin, (2.0f32.madd(margin, strip)).max(view.1));
     let axis = |offset: f32, pointer: f32, before: (f32, f32), after: (f32, f32), view: f32| {
         let on_strip = offset + pointer - before.0;
-        let wanted = on_strip.mul_add(ratio, after.0 - pointer);
+        let wanted = on_strip.madd(ratio, after.0 - pointer);
         wanted.clamp(0.0, (after.1 - view).max(0.0))
     };
     (
@@ -964,7 +965,7 @@ pub fn dashes(length: f64) -> Vec<(f64, f64)> {
         return vec![(0.0, 1.0)];
     }
     let count = ((length + GAP) / (DASH + GAP)).round().max(1.0);
-    let unscaled = count.mul_add(DASH, (count - 1.0) * GAP);
+    let unscaled = count.madd(DASH, (count - 1.0) * GAP);
     let scale = length / unscaled;
     let (dash, gap) = (DASH * scale / length, GAP * scale / length);
     let mut found = Vec::new();
@@ -1016,8 +1017,8 @@ pub fn travel_along(quad: &Quad, travel: (f64, f64)) -> (f64, f64) {
         return travel;
     };
     (
-        travel.0.mul_add(along.0, travel.1 * along.1),
-        travel.0.mul_add(across.0, travel.1 * across.1),
+        travel.0.madd(along.0, travel.1 * along.1),
+        travel.0.madd(across.0, travel.1 * across.1),
     )
 }
 
@@ -1060,7 +1061,7 @@ pub fn rotate_stem(quad: &Quad) -> ((f64, f64), (f64, f64)) {
     for index in 0..4 {
         let (x0, y0) = frame[index];
         let (x1, y1) = frame[(index + 1) % 4];
-        twice += x0.mul_add(y1, -(x1 * y0));
+        twice += x0.madd(y1, -(x1 * y0));
     }
     let (foot, head) = if twice < 0.0 {
         (side(2, 3), side(1, 0))
@@ -1075,8 +1076,8 @@ pub fn rotate_stem(quad: &Quad) -> ((f64, f64), (f64, f64)) {
     (
         foot,
         (
-            ROTATE_REACH_OUT.mul_add(dx / length, foot.0),
-            ROTATE_REACH_OUT.mul_add(dy / length, foot.1),
+            ROTATE_REACH_OUT.madd(dx / length, foot.0),
+            ROTATE_REACH_OUT.madd(dy / length, foot.1),
         ),
     )
 }
@@ -1173,11 +1174,11 @@ pub fn shaped(
     let (now_u, now_v) = (now.x, now.y);
     let (mut sx, mut sy) = match handle {
         0..=3 if proportions == Proportions::Kept => {
-            let square = was_u.mul_add(was_u, was_v * was_v);
+            let square = was_u.madd(was_u, was_v * was_v);
             if square <= f64::EPSILON {
                 return None;
             }
-            let factor = now_u.mul_add(was_u, now_v * was_v) / square;
+            let factor = now_u.madd(was_u, now_v * was_v) / square;
             (factor, factor)
         }
         0..=3 => (ratio(was_u, now_u)?, ratio(was_v, now_v)?),
@@ -1504,12 +1505,12 @@ pub fn shown_caret(
         .iter()
         .find(|other| other.line == stop.line && other.offset == ink)
         .map_or(f64::NEG_INFINITY, |end| {
-            (end.at[0] - stop.at[0]).mul_add(along.0, (end.at[1] - stop.at[1]) * along.1)
+            (end.at[0] - stop.at[0]).madd(along.0, (end.at[1] - stop.at[1]) * along.1)
         });
     let back = reach.max(word_end).min(0.0);
     stop.at = [
-        back.mul_add(along.0, stop.at[0]),
-        back.mul_add(along.1, stop.at[1]),
+        back.madd(along.0, stop.at[0]),
+        back.madd(along.1, stop.at[1]),
     ];
     Some(stop)
 }

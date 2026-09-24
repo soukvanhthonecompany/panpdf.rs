@@ -1,6 +1,9 @@
 use pdf_content::PageGeometry;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub const TILE: u32 = 512;
+#[cfg(target_arch = "wasm32")]
+pub const TILE: u32 = 256;
 
 pub const GAP: f64 = 12.0;
 

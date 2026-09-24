@@ -5,9 +5,7 @@ use pdf_paint::Matrix;
 use pdf_syntax::Reference;
 
 use crate::copied::Copied;
-use crate::incremental::{
-    ObjectBody, ObjectWrite, ProtectionPolicy, Restrictions, append_object_writes_bounded,
-};
+use crate::incremental::{ObjectBody, ObjectWrite, ProtectionPolicy, Restrictions};
 use crate::spike_move_text::SpikeError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -627,6 +625,23 @@ pub struct PlannedWrite {
 }
 
 impl PlannedWrite {
+    pub(crate) fn object_write(&self) -> ObjectWrite<'_> {
+        ObjectWrite {
+            reference: self.reference,
+            body: match &self.body {
+                PlannedBody::ReplacedStream { decoded } => ObjectBody::ReplacedStream { decoded },
+                PlannedBody::NewStream {
+                    dictionary,
+                    decoded,
+                } => ObjectBody::NewStream {
+                    dictionary,
+                    decoded,
+                },
+                PlannedBody::Direct { body } => ObjectBody::Direct { body },
+            },
+        }
+    }
+
     #[must_use]
     pub fn bytes(&self) -> usize {
         match &self.body {
@@ -1018,53 +1033,47 @@ impl Plan {
     }
 
     pub fn commit(&self, source: &ByteStore, credential: &[u8]) -> Result<ByteStore, SpikeError> {
-        self.commit_bounded(
+        Ok(crate::incremental::append_revision(
             source,
-            (credential, Restrictions::Respect),
-            pdf_syntax::XrefLimits::default(),
-        )
+            &self.object_writes(),
+            (
+                ProtectionPolicy::Preserve {
+                    credential,
+                    restrictions: Restrictions::Respect,
+                },
+                self.trailer,
+            ),
+            Self::committed_id(source),
+        )?)
     }
 
-    pub(crate) fn commit_bounded(
+    pub(crate) fn commit_folded(
         &self,
+        original: &ByteStore,
         source: &ByteStore,
         (credential, restrictions): (&[u8], Restrictions),
-        limits: pdf_syntax::XrefLimits,
     ) -> Result<ByteStore, SpikeError> {
-        let writes: Vec<ObjectWrite<'_>> = self
-            .writes
-            .iter()
-            .map(|write| ObjectWrite {
-                reference: write.reference,
-                body: match &write.body {
-                    PlannedBody::ReplacedStream { decoded } => {
-                        ObjectBody::ReplacedStream { decoded }
-                    }
-                    PlannedBody::NewStream {
-                        dictionary,
-                        decoded,
-                    } => ObjectBody::NewStream {
-                        dictionary,
-                        decoded,
-                    },
-                    PlannedBody::Direct { body } => ObjectBody::Direct { body },
-                },
-            })
-            .collect();
-        let bytes = append_object_writes_bounded(
+        Ok(crate::incremental::fold_object_writes(
+            original,
             source,
-            &writes,
-            ProtectionPolicy::Preserve {
-                credential,
-                restrictions,
-            },
-            self.trailer,
-            limits,
-        )?;
-        Ok(ByteStore::owning(
-            pdf_bytes::SourceId::new(source.id().get().wrapping_add(1)),
-            bytes,
-        ))
+            &self.object_writes(),
+            (
+                ProtectionPolicy::Preserve {
+                    credential,
+                    restrictions,
+                },
+                self.trailer,
+            ),
+            Self::committed_id(source),
+        )?)
+    }
+
+    fn committed_id(source: &ByteStore) -> pdf_bytes::SourceId {
+        pdf_bytes::SourceId::new(source.id().get().wrapping_add(1))
+    }
+
+    fn object_writes(&self) -> Vec<ObjectWrite<'_>> {
+        self.writes.iter().map(PlannedWrite::object_write).collect()
     }
 }
 

@@ -267,13 +267,12 @@ pub(crate) fn parse_indirect_stream_prefix_strict(
     };
     let length_reference = *length_reference;
     let length_offset = length.value().span().start();
-    let data_start = consume_required_eol(source.as_bytes(), stream_keyword.span().end())
-        .ok_or_else(|| {
-            IndirectObjectError::new(
-                stream_keyword.span().end(),
-                IndirectObjectErrorKind::MissingStreamLineEnding,
-            )
-        })?;
+    let data_start = eol_after(source, stream_keyword.span().end()).ok_or_else(|| {
+        IndirectObjectError::new(
+            stream_keyword.span().end(),
+            IndirectObjectErrorKind::MissingStreamLineEnding,
+        )
+    })?;
 
     Ok(IndirectStreamPrefix {
         reference: Reference::new(object_number_value, generation_value),
@@ -426,6 +425,16 @@ fn record(
     }
 }
 
+fn endstream_in(source: &ByteStore, from: usize) -> Option<(usize, usize)> {
+    let run = source.bytes_from(from);
+    let found = endstream_after(run, 0).map(|(end, at)| (from + end, from + at));
+    if found.is_some() || from + run.len() >= source.len() {
+        found
+    } else {
+        endstream_after(source.as_bytes(), from)
+    }
+}
+
 fn endstream_after(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
     const KEYWORD: &[u8] = b"endstream";
     let at = from
@@ -458,13 +467,12 @@ fn parse_stream(
         ));
     };
 
-    let data_start = consume_required_eol(source.as_bytes(), stream_keyword.span().end())
-        .ok_or_else(|| {
-            IndirectObjectError::new(
-                stream_keyword.span().end(),
-                IndirectObjectErrorKind::MissingStreamLineEnding,
-            )
-        })?;
+    let data_start = eol_after(source, stream_keyword.span().end()).ok_or_else(|| {
+        IndirectObjectError::new(
+            stream_keyword.span().end(),
+            IndirectObjectErrorKind::MissingStreamLineEnding,
+        )
+    })?;
 
     let mut lengths = entries
         .iter()
@@ -510,13 +518,12 @@ fn declared_length(
 ) -> Result<Option<(usize, usize)>, IndirectObjectError> {
     Ok(match length {
         None => {
-            let (data_end, keyword_at) = endstream_after(source.as_bytes(), data_start)
-                .ok_or_else(|| {
-                    IndirectObjectError::new(
-                        dictionary.span().start(),
-                        IndirectObjectErrorKind::MissingStreamLength,
-                    )
-                })?;
+            let (data_end, keyword_at) = endstream_in(source, data_start).ok_or_else(|| {
+                IndirectObjectError::new(
+                    dictionary.span().start(),
+                    IndirectObjectErrorKind::MissingStreamLength,
+                )
+            })?;
             record(
                 repairs,
                 IndirectRepair::StreamLengthFromEndStream {
@@ -587,7 +594,7 @@ fn stream_boundary(
     repairs: &mut Option<&mut Vec<IndirectRepair>>,
 ) -> Result<(usize, SourceSpan), IndirectObjectError> {
     let searched = |repairs: &mut Option<&mut Vec<IndirectRepair>>| {
-        let (found_end, _) = endstream_after(source.as_bytes(), data_start).ok_or_else(|| {
+        let (found_end, _) = endstream_in(source, data_start).ok_or_else(|| {
             IndirectObjectError::new(data_start, IndirectObjectErrorKind::MissingEndStreamKeyword)
         })?;
         let keyword = keyword_at(source, found_end, limits).ok_or_else(|| {
@@ -619,12 +626,16 @@ fn stream_boundary(
 }
 
 fn keyword_at(source: &ByteStore, data_end: usize, limits: ParseLimits) -> Option<SourceSpan> {
-    let start = consume_required_eol(source.as_bytes(), data_end).unwrap_or(data_end);
+    let start = eol_after(source, data_end).unwrap_or(data_end);
     let mut parser = ObjectParser::new(source, start, limits);
     let token = parser.take_token().ok()??;
     parser
         .token_equals(token, b"endstream")
         .then(|| token.span())
+}
+
+fn eol_after(source: &ByteStore, offset: usize) -> Option<usize> {
+    consume_required_eol(source.ahead(offset, 2), 0).map(|len| offset + len)
 }
 
 fn consume_required_eol(bytes: &[u8], offset: usize) -> Option<usize> {

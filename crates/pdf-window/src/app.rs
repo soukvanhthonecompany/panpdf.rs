@@ -294,6 +294,7 @@ impl Window {
             meter: None,
             speed: pdf_app::speed::Speed::default(),
             show_speed: false,
+            last_edit: None,
             reveal_caret: false,
             thumbs: BTreeMap::new(),
             thumbs_wanted: Vec::new(),
@@ -768,6 +769,12 @@ impl Window {
     fn gather(&mut self, ctx: &egui::Context) {
         let epoch = self.editor.epoch();
         let mut uploaded = 0_usize;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let began = js_sys::Date::now();
+            self.painter
+                .work_while(true, || js_sys::Date::now() - began < 4.0);
+        }
         for done in self.painter.collect() {
             match done {
                 Done::Read {

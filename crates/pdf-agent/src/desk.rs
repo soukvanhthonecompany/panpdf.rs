@@ -142,7 +142,7 @@ impl Desk {
 
     pub fn close(&mut self, handle: &str) -> Result<bool, Refused> {
         let open = self.open.remove(handle).ok_or_else(|| unknown(handle))?;
-        Ok(open.revision != 0 && open.session.source().as_bytes() != &*open.original)
+        Ok(open.revision != 0 && !open.session.source().same_bytes_as(&open.original))
     }
 
     #[must_use]
@@ -154,7 +154,7 @@ impl Desk {
                     handle.clone(),
                     open.path.clone(),
                     open.session.page_count().unwrap_or(0),
-                    open.session.source().as_bytes() != &*open.original,
+                    !open.session.source().same_bytes_as(&open.original),
                 )
             })
             .collect()
@@ -425,7 +425,7 @@ impl Desk {
         } else if exists && !destination.is_file() {
             return Err(format!("{} is not a file", destination.display()));
         }
-        let bytes = open.session.source().as_bytes();
+        let source = open.session.source().clone();
         let directory = destination
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -443,7 +443,9 @@ impl Desk {
                 .write(true)
                 .create_new(true)
                 .open(&temporary)?;
-            file.write_all(bytes)?;
+            for run in source.runs() {
+                file.write_all(run)?;
+            }
             file.sync_all()?;
             std::fs::rename(&temporary, destination)
         })();
@@ -455,9 +457,9 @@ impl Desk {
             ));
         }
         if same_file {
-            open.original = Arc::from(bytes);
+            open.original = Arc::from(source.to_vec());
         }
-        Ok(bytes.len() as u64)
+        Ok(source.len() as u64)
     }
 
     pub fn restrictions_set_aside(&mut self, handle: &str) -> Result<bool, Refused> {

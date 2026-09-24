@@ -45,6 +45,24 @@ impl Moment {
     }
 }
 
+pub(crate) fn millis() -> f64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        ORIGIN
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_secs_f64()
+            * 1e3
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|window| window.performance())
+            .map_or(0.0, |performance| performance.now())
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::Moment;

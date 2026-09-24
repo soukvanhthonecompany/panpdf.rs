@@ -214,6 +214,41 @@ impl PageResources {
         self.fonts.iter().find(|resource| resource.name == name)
     }
 
+    pub fn font_written_in(
+        &self,
+        name: &[u8],
+        reference: Reference,
+        objects: &ByteStore,
+        limits: PageContentLimits,
+    ) -> Result<ResourceEntry, PageContentError> {
+        let binding = self
+            .binding
+            .as_deref()
+            .ok_or_else(|| PageContentError::new(PageContentErrorKind::MissingRevision))?;
+        let chain = parse_revision_chain_strict(objects, limits.xref)
+            .map_err(|error| PageContentError::new(PageContentErrorKind::Revisions(error)))?;
+        let index = Arc::new(
+            RevisionIndex::from_chain(&chain)
+                .map_err(|error| PageContentError::new(PageContentErrorKind::Resolve(error)))?,
+        );
+        let resolved = index
+            .resolve_object(objects, reference, limits.resolve)
+            .map_err(|error| PageContentError::new(PageContentErrorKind::Resolve(error)))?;
+        Ok(ResourceEntry {
+            name: name.to_vec(),
+            reference: Some(reference),
+            source: resolved.source().clone(),
+            value: resolved.value().clone(),
+            form: None,
+            form_error: None,
+            document: objects.clone(),
+            index,
+            security: binding.security.clone(),
+            optional_content: Arc::clone(&self.optional_content),
+            limits,
+        })
+    }
+
     #[must_use]
     pub fn fonts(&self) -> &[ResourceEntry] {
         &self.fonts
@@ -318,6 +353,23 @@ impl ResourceEntry {
     #[must_use]
     pub const fn form_unavailable(&self) -> Option<PageContentErrorKind> {
         self.form_error
+    }
+
+    #[must_use]
+    pub fn is_same_object(&self, other: &Self) -> bool {
+        let same_security = match (&self.security, &other.security) {
+            (None, None) => true,
+            (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, theirs),
+            _ => false,
+        };
+        self.reference.is_some()
+            && self.reference == other.reference
+            && same_security
+            && self.limits == other.limits
+            && Arc::ptr_eq(&self.index, &other.index)
+            && self.document.is_same(&other.document)
+            && self.source.is_same(&other.source)
+            && self.value == other.value
     }
 
     pub fn simple_font(&self) -> Result<SimpleFont, FontError> {

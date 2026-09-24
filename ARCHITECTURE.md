@@ -28,6 +28,14 @@ validated source patch ---> new PDF revision
 The semantic index points to paint atoms. It owns no pixels and no independent
 transforms. The browser owns zoom and presentation only.
 
+A revision is held as pieces: the file as it was opened, shared by every
+revision after it, and what the session appended. Readers take the bytes a
+piece at a time (`ByteStore::run_at`, `resolve`, `get`, `ahead`), so an edit
+costs what it writes rather than a copy of the file. `ByteStore::as_bytes`
+still answers with one slice, joining the pieces once and keeping the join;
+nothing on an edit's path asks for it, and `pdf_bytes::whole_copies` counts
+the joins so tests can say so.
+
 ## Dependency direction
 
 The workspace has these responsibilities. Every direct dependency one of them is permitted on another is listed at the

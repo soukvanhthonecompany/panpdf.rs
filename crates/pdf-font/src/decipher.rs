@@ -365,7 +365,7 @@ impl CharModel {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Cipher {
     pub codes: Vec<Code>,
     pub drawings: Vec<Option<Features>>,

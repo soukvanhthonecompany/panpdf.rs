@@ -1,3 +1,4 @@
+use pdf_paint::MulAdd as _;
 use pdf_paint::{DashPattern, LineCap, LineJoin};
 
 use crate::geometry::Polygon;
@@ -74,14 +75,14 @@ fn add_run(outline: &mut Polygon, run: &[[f64; 2]], half: f64, style: StrokeStyl
         if matches!(style.cap, LineCap::ProjectingSquare) && !closed {
             if index == 0 {
                 start = [
-                    direction[0].mul_add(-half, start[0]),
-                    direction[1].mul_add(-half, start[1]),
+                    direction[0].madd(-half, start[0]),
+                    direction[1].madd(-half, start[1]),
                 ];
             }
             if index == last {
                 end = [
-                    direction[0].mul_add(half, end[0]),
-                    direction[1].mul_add(half, end[1]),
+                    direction[0].madd(half, end[0]),
+                    direction[1].madd(half, end[1]),
                 ];
             }
         }
@@ -120,9 +121,9 @@ fn add_join(
     half: f64,
     style: StrokeStyle,
 ) {
-    let cross = incoming[0].mul_add(outgoing[1], -(incoming[1] * outgoing[0]));
+    let cross = incoming[0].madd(outgoing[1], -(incoming[1] * outgoing[0]));
     if cross.abs() <= f64::EPSILON * 8.0 {
-        let dot = incoming[0].mul_add(outgoing[0], incoming[1] * outgoing[1]);
+        let dot = incoming[0].madd(outgoing[0], incoming[1] * outgoing[1]);
         if dot > 0.0 {
             return;
         }
@@ -145,7 +146,7 @@ fn add_join(
         LineJoin::Round => outline.contours.push(disc(joint, half)),
         LineJoin::Bevel => outline.contours.push(vec![joint, from, to]),
         LineJoin::Miter => {
-            let cos_phi = (-incoming[0]).mul_add(outgoing[0], -incoming[1] * outgoing[1]);
+            let cos_phi = (-incoming[0]).madd(outgoing[0], -incoming[1] * outgoing[1]);
             let half_sin = ((1.0 - cos_phi.clamp(-1.0, 1.0)) / 2.0).sqrt();
             let limit = if style.miter_limit.is_finite() && style.miter_limit >= 1.0 {
                 style.miter_limit
@@ -181,8 +182,8 @@ fn disc(centre: [f64; 2], radius: f64) -> Vec<[f64; 2]> {
             #[allow(clippy::cast_precision_loss)]
             let angle = std::f64::consts::TAU * (step as f64) / (JOIN_VERTICES as f64);
             [
-                radius.mul_add(angle.cos(), centre[0]),
-                radius.mul_add(angle.sin(), centre[1]),
+                radius.madd(angle.cos(), centre[0]),
+                radius.madd(angle.sin(), centre[1]),
             ]
         })
         .collect()
@@ -235,8 +236,8 @@ fn dashed_runs(points: &[[f64; 2]], dash: &DashPattern, scale: f64) -> Vec<Vec<[
         while segment - travelled > remaining {
             travelled += remaining;
             let at = [
-                (travelled / segment).mul_add(end[0] - start[0], start[0]),
-                (travelled / segment).mul_add(end[1] - start[1], start[1]),
+                (travelled / segment).madd(end[0] - start[0], start[0]),
+                (travelled / segment).madd(end[1] - start[1], start[1]),
             ];
             if painting {
                 current.push(at);

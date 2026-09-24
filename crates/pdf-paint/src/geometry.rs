@@ -1,5 +1,38 @@
 use pdf_bytes::SourceSpan;
 
+pub trait MulAdd: Sized {
+    #[must_use]
+    fn madd(self, a: Self, b: Self) -> Self;
+}
+
+impl MulAdd for f64 {
+    #[inline]
+    fn madd(self, a: Self, b: Self) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self * a + b
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.mul_add(a, b)
+        }
+    }
+}
+
+impl MulAdd for f32 {
+    #[inline]
+    fn madd(self, a: Self, b: Self) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self * a + b
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.mul_add(a, b)
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
     pub x: f64,
@@ -32,8 +65,8 @@ impl Shape {
         Matrix {
             a: self.along * cos,
             b: self.along * sin,
-            c: shear.mul_add(cos, -(self.across * sin)),
-            d: shear.mul_add(sin, self.across * cos),
+            c: shear.madd(cos, -(self.across * sin)),
+            d: shear.madd(sin, self.across * cos),
             e: 0.0,
             f: 0.0,
         }
@@ -53,24 +86,24 @@ impl Matrix {
     #[must_use]
     pub fn multiply(self, right: Self) -> Self {
         Self {
-            a: self.a.mul_add(right.a, self.c * right.b),
-            b: self.b.mul_add(right.a, self.d * right.b),
-            c: self.a.mul_add(right.c, self.c * right.d),
-            d: self.b.mul_add(right.c, self.d * right.d),
-            e: self.a.mul_add(right.e, self.c.mul_add(right.f, self.e)),
-            f: self.b.mul_add(right.e, self.d.mul_add(right.f, self.f)),
+            a: self.a.madd(right.a, self.c * right.b),
+            b: self.b.madd(right.a, self.d * right.b),
+            c: self.a.madd(right.c, self.c * right.d),
+            d: self.b.madd(right.c, self.d * right.d),
+            e: self.a.madd(right.e, self.c.madd(right.f, self.e)),
+            f: self.b.madd(right.e, self.d.madd(right.f, self.f)),
         }
     }
 
     #[must_use]
     pub fn shape(self) -> Option<Shape> {
         let along = self.a.hypot(self.b);
-        let determinant = self.a.mul_add(self.d, -(self.b * self.c));
+        let determinant = self.a.madd(self.d, -(self.b * self.c));
         if !along.is_finite() || along == 0.0 || !determinant.is_finite() || determinant == 0.0 {
             return None;
         }
         let across = determinant / along;
-        let shear = self.a.mul_add(self.c, self.b * self.d) / determinant;
+        let shear = self.a.madd(self.c, self.b * self.d) / determinant;
         let shape = Shape {
             along,
             across,
@@ -85,7 +118,7 @@ impl Matrix {
 
     #[must_use]
     pub fn inverse(self) -> Option<Self> {
-        let determinant = self.a.mul_add(self.d, -(self.b * self.c));
+        let determinant = self.a.madd(self.d, -(self.b * self.c));
         if !determinant.is_finite() || determinant == 0.0 {
             return None;
         }
@@ -94,8 +127,8 @@ impl Matrix {
             b: -self.b / determinant,
             c: -self.c / determinant,
             d: self.a / determinant,
-            e: self.c.mul_add(self.f, -(self.d * self.e)) / determinant,
-            f: self.b.mul_add(self.e, -(self.a * self.f)) / determinant,
+            e: self.c.madd(self.f, -(self.d * self.e)) / determinant,
+            f: self.b.madd(self.e, -(self.a * self.f)) / determinant,
         };
         [
             inverted.a, inverted.b, inverted.c, inverted.d, inverted.e, inverted.f,
@@ -108,8 +141,8 @@ impl Matrix {
     #[must_use]
     pub fn transform(self, point: Point) -> Point {
         Point {
-            x: self.a.mul_add(point.x, self.c.mul_add(point.y, self.e)),
-            y: self.b.mul_add(point.x, self.d.mul_add(point.y, self.f)),
+            x: self.a.madd(point.x, self.c.madd(point.y, self.e)),
+            y: self.b.madd(point.x, self.d.madd(point.y, self.f)),
         }
     }
 }

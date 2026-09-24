@@ -329,14 +329,34 @@ impl RevisionChain {
 }
 
 pub fn find_startxref_strict(source: &ByteStore, limits: XrefLimits) -> Result<usize, XrefError> {
-    let bytes = source.as_bytes();
-    let tail_start = bytes.len().saturating_sub(limits.max_tail_scan_bytes);
-    let tail = &bytes[tail_start..];
+    let (at, last) = source.run_at(source.len().saturating_sub(1));
+    match find_startxref_in(source, (at, last), limits) {
+        Err(error)
+            if at > 0
+                && matches!(
+                    error.kind,
+                    XrefErrorKind::MissingEofMarker | XrefErrorKind::MissingStartXref
+                ) =>
+        {
+            find_startxref_in(source, (0, source.as_bytes()), limits)
+        }
+        found => found,
+    }
+}
+
+fn find_startxref_in(
+    source: &ByteStore,
+    (base, bytes): (usize, &[u8]),
+    limits: XrefLimits,
+) -> Result<usize, XrefError> {
+    let tail_start = source.len().saturating_sub(limits.max_tail_scan_bytes);
+    let from = tail_start.max(base);
+    let tail = &bytes[from - base..];
     let eof_relative = rfind(tail, END_OF_FILE)
         .ok_or_else(|| XrefError::new(tail_start, XrefErrorKind::MissingEofMarker))?;
-    let eof = tail_start + eof_relative;
+    let eof = from + eof_relative;
 
-    if !bytes[eof + END_OF_FILE.len()..]
+    if !bytes[eof - base + END_OF_FILE.len()..]
         .iter()
         .all(|byte| is_whitespace(*byte))
     {
@@ -346,9 +366,9 @@ pub fn find_startxref_strict(source: &ByteStore, limits: XrefLimits) -> Result<u
         ));
     }
 
-    let start_relative = rfind(&bytes[tail_start..eof], STARTXREF)
+    let start_relative = rfind(&bytes[from - base..eof - base], STARTXREF)
         .ok_or_else(|| XrefError::new(tail_start, XrefErrorKind::MissingStartXref))?;
-    let start = tail_start + start_relative;
+    let start = from + start_relative;
     let mut lexer = Lexer::new(source, start, limits.objects.lex);
     let marker = required_lex_token(&mut lexer)?;
     if !token_equals(source, marker, STARTXREF) {
@@ -370,7 +390,7 @@ pub fn find_startxref_strict(source: &ByteStore, limits: XrefLimits) -> Result<u
             XrefErrorKind::StartXrefOutOfBounds,
         ));
     }
-    if !bytes[offset_token.span().end()..eof]
+    if !bytes[offset_token.span().end() - base..eof - base]
         .iter()
         .all(|byte| is_whitespace(*byte))
     {
@@ -432,7 +452,7 @@ pub fn parse_revision_chain_strict(
         if !seen.insert(offset) {
             return Err(XrefError::new(offset, XrefErrorKind::PreviousRevisionLoop));
         }
-        let section = if source.as_bytes()[offset..].starts_with(b"xref") {
+        let section = if source.ahead(offset, 4).starts_with(b"xref") {
             let classic = parse_classic_section(source, offset, limits)?;
             if let Some(stream_offset) = classic.xref_stream_byte_offset() {
                 let supplemental = parse_xref_stream_section_strict(source, stream_offset, limits)?;
@@ -742,8 +762,8 @@ fn validate_entry_layout(
         .map_err(|_| XrefError::new(generation.span().start(), XrefErrorKind::SourceSpanFailure))?;
     if offset_bytes.len() != 10
         || generation_bytes.len() != 5
-        || &source.as_bytes()[offset.span().end()..generation.span().start()] != b" "
-        || &source.as_bytes()[generation.span().end()..flag.span().start()] != b" "
+        || source.get(offset.span().end()..generation.span().start()) != Some(b" ")
+        || source.get(generation.span().end()..flag.span().start()) != Some(b" ")
     {
         return Err(XrefError::new(
             offset.span().start(),
@@ -751,7 +771,7 @@ fn validate_entry_layout(
         ));
     }
 
-    let after_flag = &source.as_bytes()[flag.span().end()..];
+    let after_flag = source.ahead(flag.span().end(), 2);
     if !(after_flag.starts_with(b"\n")
         || after_flag.starts_with(b"\r")
         || after_flag.starts_with(b" \n")

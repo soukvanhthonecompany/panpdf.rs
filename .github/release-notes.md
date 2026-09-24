@@ -17,21 +17,19 @@ you did not touch.
 
 ## What's new
 
-- **Lighter and quicker.** One open document costs about half the memory it
-  did, closing a document gives its memory back, the undo history has a
-  budget, and on Linux the window opens in a fifth of the time.
-- **Crowded pages edit better.** Blocks, pictures and frames on top of one
-  another move, resize and take typing without ink escaping their frames.
-- **Copy and paste** of a block, a picture or a group lands under the pointer,
-  and a copy can go to another document.
-- **The assistant is a chat beside the document.** Each document keeps its own
-  chat; answers arrive as they are written; it takes attached files, can ask
-  you to choose, says what it is doing, and can write a whole new document
-  with tables, charts and mathematics.
-- **Printing** shows the sheet, and the page can be pushed around on it.
-- **Reading scanned pages** offers every language Tesseract publishes.
-- **Windows** draws non-Latin letters in the interface and remembers recent
-  files and settings between runs.
+- **Big documents edit faster.** An edit now writes what it changed instead
+  of copying the whole file. On a 70 MB textbook a preview takes a quarter of
+  the time it did, and undo and redo under half, with no more memory. A page
+  reads each of its fonts once, and a paragraph in an old Lao or Thai font is
+  worked out once instead of on every key.
+- **See-through pictures can be moved.** A picture printed with an opacity
+  could not be chosen before.
+- **Pages with a smooth colour blend can be edited.** One such blend, which
+  Chrome writes for a chosen option in a form, stopped the whole page from
+  being read.
+- **A slow edit says why.** Any edit that takes more than a tenth of a second
+  is written to the session log with the time it spent reading, planning and
+  writing.
 
 ## Download
 

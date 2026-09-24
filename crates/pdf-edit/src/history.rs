@@ -45,6 +45,35 @@ pub struct History {
     last_region: Option<[f64; 4]>,
     budget: usize,
     forgotten: usize,
+    previewed: Previewed,
+}
+
+#[derive(Default)]
+struct Previewed(std::sync::Mutex<Option<(ByteStore, Plan, ByteStore)>>);
+
+impl Previewed {
+    fn keep(&self, on: &ByteStore, plan: &Plan, made: &ByteStore) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some((on.clone(), plan.clone(), made.clone()));
+        }
+    }
+
+    fn take(&self) -> Option<(ByteStore, Plan, ByteStore)> {
+        self.0.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
+impl Clone for Previewed {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for Previewed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let held = self.0.lock().is_ok_and(|slot| slot.is_some());
+        write!(formatter, "Previewed({held})")
+    }
 }
 
 impl History {
@@ -62,6 +91,7 @@ impl History {
             last_region: None,
             budget: MOST_HISTORY_BYTES,
             forgotten: 0,
+            previewed: Previewed::default(),
         }
     }
 
@@ -98,6 +128,7 @@ impl History {
     }
 
     pub fn set_aside_restrictions(&mut self) {
+        self.previewed.take();
         self.restrictions = Restrictions::SetAside;
     }
 
@@ -162,10 +193,14 @@ impl History {
         let mut source = self.source.clone();
         let mut plans = Vec::with_capacity(count);
         let mut inverses = Vec::with_capacity(count);
+        let mut previewed = self.previewed.take();
         for at in 0..count {
             let plan = make(&source, at)?;
             inverses.push(plan.inverse(&source, &self.credential)?);
-            source = self.committed(&source, &plan)?;
+            source = match previewed.take() {
+                Some((on, planned, revision)) if on.is_same(&source) && planned == plan => revision,
+                _ => self.committed(&source, &plan)?,
+            };
             plans.push(plan);
         }
         inverses.reverse();
@@ -180,6 +215,7 @@ impl History {
     }
 
     pub fn undo(&mut self) -> Result<bool, SpikeError> {
+        self.previewed.take();
         let Some(entry) = self.done.pop() else {
             return Ok(false);
         };
@@ -199,6 +235,7 @@ impl History {
     }
 
     pub fn redo(&mut self) -> Result<bool, SpikeError> {
+        self.previewed.take();
         let Some(entry) = self.undone.pop() else {
             return Ok(false);
         };
@@ -226,7 +263,14 @@ impl History {
     }
 
     pub fn preview(&self, plan: &Plan) -> Result<ByteStore, SpikeError> {
-        self.committed(&self.source, plan)
+        let made = self.committed(&self.source, plan)?;
+        self.previewed.keep(&self.source, plan, &made);
+        Ok(made)
+    }
+
+    #[must_use]
+    pub const fn opened(&self) -> (SourceId, usize) {
+        (self.original_id, self.original_len)
     }
 
     fn original_of(&self, source: &ByteStore) -> Result<ByteStore, SpikeError> {
@@ -239,17 +283,7 @@ impl History {
 
     fn committed(&self, source: &ByteStore, plan: &Plan) -> Result<ByteStore, SpikeError> {
         let original = self.original_of(source)?;
-        let candidate = plan.commit_bounded(
-            source,
-            (&self.credential, self.restrictions),
-            crate::incremental::session_write_limits(),
-        )?;
-        if !candidate.as_bytes().starts_with(source.as_bytes()) {
-            return Err(SpikeError::RetypeUnsupported(
-                "a commit that rewrote the revision it was committed against",
-            ));
-        }
-        Ok(crate::incremental::compact_session(&original, &candidate)?)
+        plan.commit_folded(&original, source, (&self.credential, self.restrictions))
     }
 }
 
@@ -395,5 +429,89 @@ mod budget_tests {
             "four steps hold more than two: {two} then {}",
             history.held_bytes()
         );
+    }
+
+    fn plan_of(history: &History, command: &Command) -> crate::plan::Plan {
+        crate::spike_move_text::plan_command_under(
+            history.source(),
+            command,
+            b"",
+            (None, crate::Restrictions::Respect),
+        )
+        .expect("the command plans")
+    }
+
+    #[test]
+    fn a_step_shares_the_opened_file_and_copies_nothing() {
+        let opened = fixture();
+        let mut history = History::new(opened.clone(), b"");
+        let copies = pdf_bytes::whole_copies();
+        drew(&mut history, 3);
+        turned(&mut history, 2);
+        let plan = plan_of(&history, &a_line(90.0));
+        history.preview(&plan).expect("previews");
+        history.apply(plan).expect("applies");
+        assert!(history.undo().expect("undoes"));
+        assert!(history.redo().expect("redoes"));
+        assert_eq!(
+            pdf_bytes::whole_copies(),
+            copies,
+            "a step copied the document"
+        );
+        let start = history
+            .source()
+            .prefix(opened.id(), opened.len())
+            .expect("a revision is longer than the file it began from");
+        assert!(
+            start.is_same(&opened),
+            "the opened file is shared, not copied"
+        );
+
+        let _ = history.source().as_bytes();
+        assert_eq!(pdf_bytes::whole_copies(), copies + 1);
+    }
+
+    #[test]
+    fn the_plan_just_previewed_is_committed_as_previewed() {
+        let mut fresh = History::new(fixture(), b"");
+        let mut history = History::new(fixture(), b"");
+        for step in 0..4_i32 {
+            let command = if step % 2 == 0 {
+                a_turn()
+            } else {
+                a_line(20.0 + f64::from(step))
+            };
+            let plan = plan_of(&history, &command);
+            let previewed = history.preview(&plan).expect("previews");
+            history.apply(plan.clone()).expect("applies");
+            fresh.apply(plan).expect("applies");
+            assert!(
+                history.source().is_same(&previewed),
+                "step {step} wrote again"
+            );
+            assert_eq!(history.source().as_bytes(), fresh.source().as_bytes());
+        }
+    }
+
+    #[test]
+    fn a_preview_is_used_only_for_its_plan_on_its_revision() {
+        let mut history = History::new(fixture(), b"");
+        let line = plan_of(&history, &a_line(30.0));
+        let turn = plan_of(&history, &a_turn());
+        let previewed = history.preview(&line).expect("previews");
+        history.apply(turn).expect("applies");
+        assert!(
+            !history.source().is_same(&previewed),
+            "another plan took it"
+        );
+
+        let line = plan_of(&history, &a_line(40.0));
+        let previewed = history.preview(&line).expect("previews");
+        history.undo().expect("undoes");
+        history.redo().expect("redoes");
+        let before = history.source().clone();
+        history.apply(line).expect("applies");
+        assert!(!history.source().is_same(&previewed), "taken after an undo");
+        assert!(!history.source().is_same(&before));
     }
 }

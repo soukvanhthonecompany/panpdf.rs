@@ -1,4 +1,5 @@
 use pdf_content::PageGeometry;
+use pdf_paint::MulAdd as _;
 use pdf_paint::{Matrix, Path, PathSegment, Point};
 
 use crate::{RenderError, RenderLimits};
@@ -193,7 +194,7 @@ fn signed_area(contour: &[[f64; 2]]) -> f64 {
     for index in 0..contour.len() {
         let [x0, y0] = contour[index];
         let [x1, y1] = contour[(index + 1) % contour.len()];
-        total += x0.mul_add(y1, -(x1 * y0));
+        total += x0.madd(y1, -(x1 * y0));
     }
     total / 2.0
 }
@@ -352,7 +353,7 @@ fn distance_to_chord(point: [f64; 2], start: [f64; 2], end: [f64; 2]) -> f64 {
     if length <= f64::EPSILON {
         return (point[0] - start[0]).hypot(point[1] - start[1]);
     }
-    let cross = dx.mul_add(point[1] - start[1], -(dy * (point[0] - start[0])));
+    let cross = dx.madd(point[1] - start[1], -(dy * (point[0] - start[0])));
     cross.abs() / length
 }
 

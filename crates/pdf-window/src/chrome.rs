@@ -33,7 +33,10 @@ pub(crate) fn open_bytes(source: ByteStore, credential: &[u8]) -> Opened {
         return Opened::Locked(source);
     }
     match Editor::open_with(source, credential) {
-        Ok(editor) => Opened::Document(Box::new(editor)),
+        Ok(mut editor) => {
+            editor.set_clock(crate::moment::millis);
+            Opened::Document(Box::new(editor))
+        }
         Err(reason) => Opened::Refused(reason),
     }
 }

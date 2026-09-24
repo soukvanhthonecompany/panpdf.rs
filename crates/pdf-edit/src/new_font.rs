@@ -532,7 +532,7 @@ pub(crate) mod tests {
     use pdf_syntax::Reference;
 
     use super::{add_font_resource, embed_truetype, show_codes, to_unicode};
-    use crate::incremental::{ObjectBody, ObjectWrite, ProtectionPolicy, append_object_writes};
+    use crate::incremental::{ObjectWrite, ProtectionPolicy, append_object_writes};
     use crate::plan::{PlannedBody, PlannedWrite};
 
     fn document(page: &str, extra: &[&str]) -> ByteStore {
@@ -739,6 +739,13 @@ pub(crate) mod tests {
     fn text_runs(source: &ByteStore) -> Vec<pdf_paint::TextShowPaint> {
         let program =
             load_page_program_strict(source, 0, PageContentLimits::default()).expect("a page");
+        text_runs_in(&program, &program.resources)
+    }
+
+    fn text_runs_in(
+        program: &pdf_content::PageProgram,
+        resources: &pdf_content::PageResources,
+    ) -> Vec<pdf_paint::TextShowPaint> {
         let sources: Vec<&ByteStore> = program.streams.iter().map(|stream| &stream.bytes).collect();
         let operations =
             parse_operation_sequence_strict(&sources, ContentLimits::default()).expect("parses");
@@ -757,7 +764,7 @@ pub(crate) mod tests {
             &streams,
             program.page,
             &[],
-            &program.resources,
+            resources,
             PaintLimits::default(),
         )
         .expect("paints")
@@ -797,25 +804,7 @@ pub(crate) mod tests {
                 decoded: content.into_bytes(),
             },
         });
-        let objects: Vec<ObjectWrite<'_>> = writes
-            .iter()
-            .map(|write| ObjectWrite {
-                reference: write.reference,
-                body: match &write.body {
-                    PlannedBody::ReplacedStream { decoded } => {
-                        ObjectBody::ReplacedStream { decoded }
-                    }
-                    PlannedBody::NewStream {
-                        dictionary,
-                        decoded,
-                    } => ObjectBody::NewStream {
-                        dictionary,
-                        decoded,
-                    },
-                    PlannedBody::Direct { body } => ObjectBody::Direct { body },
-                },
-            })
-            .collect();
+        let objects: Vec<ObjectWrite<'_>> = writes.iter().map(PlannedWrite::object_write).collect();
         let bytes = append_object_writes(
             &source,
             &objects,
@@ -864,6 +853,84 @@ pub(crate) mod tests {
         let second = run.outline_bounds_in(1..2).expect("a rectangle");
         assert!(close(first, [10.0, 50.0, 20.0, 60.0]), "{first:?}");
         assert!(close(second, [22.0, 50.0, 28.0, 64.0]), "{second:?}");
+    }
+
+    fn objects(writes: &[PlannedWrite]) -> Vec<ObjectWrite<'_>> {
+        writes.iter().map(PlannedWrite::object_write).collect()
+    }
+
+    #[test]
+    fn a_face_read_from_its_own_objects_paints_as_the_committed_one() {
+        let source = document(
+            &format!(
+                "<< {PAGE} /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 \
+                 /BaseFont /Helvetica >> >> >> >>"
+            ),
+            &[],
+        );
+        let text = BTreeMap::from([(1, "ລ".to_owned()), (2, "A".to_owned())]);
+        let font = embed_truetype(
+            &face(),
+            &text,
+            (super::FontObjects::numbered_from(5), "test-0", false),
+        )
+        .expect("embedded");
+        let (name, page) =
+            add_font_resource(&source, Reference::new(3, 0), font.font).expect("named");
+        let content = format!("BT /{name} 20 Tf 10 50 Td {} Tj ET", show_codes(&[1, 2]));
+        let mut face_writes = font.writes.clone();
+        face_writes.push(page);
+        let mut writes = face_writes.clone();
+        writes.push(PlannedWrite {
+            reference: Reference::new(4, 0),
+            body: PlannedBody::ReplacedStream {
+                decoded: content.into_bytes(),
+            },
+        });
+        let policy = ProtectionPolicy::Preserve {
+            credential: b"",
+            restrictions: crate::incremental::Restrictions::Respect,
+        };
+        let committed = ByteStore::new(
+            SourceId::new(2),
+            append_object_writes(&source, &objects(&writes), policy).expect("commits"),
+        );
+        let alone = crate::incremental::objects_alone(&source, &objects(&face_writes), policy)
+            .expect("written alone");
+        assert!(alone.len() < committed.len() - source.len() + 64);
+
+        let limits = PageContentLimits::default();
+        let before = load_page_program_strict(&source, 0, limits).expect("the page");
+        let entry = before
+            .resources
+            .font_written_in(format!("/{name}").as_bytes(), font.font, &alone, limits)
+            .expect("the font reads from its own objects");
+        let after = load_page_program_strict(&committed, 0, limits).expect("the page");
+        let read_alone = text_runs_in(&after, &after.resources.with_fonts([entry]));
+        let read_whole = text_runs(&committed);
+        let [run] = read_alone.as_slice() else {
+            panic!("one run, found {}", read_alone.len());
+        };
+        let [whole] = read_whole.as_slice() else {
+            panic!("one run, found {}", read_whole.len());
+        };
+        assert_eq!(run.glyphs.len(), whole.glyphs.len());
+        for (one, other) in run.glyphs.iter().zip(&whole.glyphs) {
+            assert_eq!(one.code, other.code);
+            assert_eq!(one.glyph, other.glyph);
+            assert_eq!(one.matrix, other.matrix);
+            let code = Code {
+                value: one.code.value,
+                byte_len: 2,
+            };
+            assert_eq!(run.text.text_of(code), whole.text.text_of(code));
+        }
+        assert_eq!(
+            run.program.as_ref().map(|program| program.units_per_em()),
+            whole.program.as_ref().map(|program| program.units_per_em())
+        );
+        let second = run.outline_bounds_in(1..2).expect("a rectangle");
+        assert!((second[0] - 22.0).abs() < 1e-6, "{second:?}");
     }
 
     #[test]
@@ -962,25 +1029,7 @@ pub(crate) mod tests {
     }
 
     fn commit(source: &ByteStore, writes: &[PlannedWrite]) -> ByteStore {
-        let objects: Vec<ObjectWrite<'_>> = writes
-            .iter()
-            .map(|write| ObjectWrite {
-                reference: write.reference,
-                body: match &write.body {
-                    PlannedBody::ReplacedStream { decoded } => {
-                        ObjectBody::ReplacedStream { decoded }
-                    }
-                    PlannedBody::NewStream {
-                        dictionary,
-                        decoded,
-                    } => ObjectBody::NewStream {
-                        dictionary,
-                        decoded,
-                    },
-                    PlannedBody::Direct { body } => ObjectBody::Direct { body },
-                },
-            })
-            .collect();
+        let objects: Vec<ObjectWrite<'_>> = writes.iter().map(PlannedWrite::object_write).collect();
         let bytes = append_object_writes(
             source,
             &objects,
