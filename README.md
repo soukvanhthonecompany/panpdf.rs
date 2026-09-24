@@ -6,7 +6,7 @@
 
 **A free PDF editor that changes only what you edit.**
 
-### [Try it in your browser &rarr; panpdf.org](https://panpdf.org/edit/)
+### [Try it free in your browser &rarr; panpdf.org](https://panpdf.org)
 
 No account &middot; nothing uploaded &middot; the file stays on your computer
 
@@ -33,8 +33,8 @@ No account &middot; nothing uploaded &middot; the file stays on your computer
 
 ## Get it
 
-- **In the browser:** [panpdf.org/edit](https://panpdf.org/edit/) -- on a
-  computer; phones are not supported yet.
+- **In the browser:** [panpdf.org](https://panpdf.org) -- on a computer;
+  phones are not supported yet.
 - **On the desktop:** Windows, Linux and macOS from the
   [latest release](../../releases/latest). The installers are not signed yet,
   so your system will warn you before it runs them.
