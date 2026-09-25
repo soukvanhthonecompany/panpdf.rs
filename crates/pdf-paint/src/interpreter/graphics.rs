@@ -68,6 +68,12 @@ impl Interpreter {
         } else {
             None
         };
+        let (actual_text, written_here) = if with_properties {
+            self.actual_text(operation)
+                .map_or((None, false), |(text, ours)| (Some(text), ours))
+        } else {
+            (None, false)
+        };
         if tag == b"/OC" {
             let hidden = self.optional_content_hidden(operation, with_properties)?;
             if hidden {
@@ -79,6 +85,8 @@ impl Interpreter {
             tag_span,
             operator_span: operation.operator_span(),
             properties,
+            actual_text,
+            written_here,
         });
         Ok(())
     }
@@ -246,6 +254,30 @@ impl Interpreter {
         let tag = decode_name(self.operand_source(object), object)
             .map_err(|_| InterpretError::at(operation, InterpretErrorKind::OperandType))?;
         Ok((tag, object.span()))
+    }
+
+    fn actual_text(&self, operation: &Operation) -> Option<(String, bool)> {
+        let object = &operation.operands()[1];
+        let (source, value) = match object.kind() {
+            ObjectKind::Dictionary(_) => (self.operand_source(object).clone(), object.clone()),
+            ObjectKind::Name => {
+                let name = decode_name(self.operand_source(object), object).ok()?;
+                let resource = self.resources.as_ref()?.property_list(&name)?;
+                (resource.source().clone(), resource.value().clone())
+            }
+            _ => return None,
+        };
+        let ObjectKind::Dictionary(entries) = value.kind() else {
+            return None;
+        };
+        let entry = entries
+            .iter()
+            .find(|entry| entry.key_equals(&source, b"/ActualText"))?;
+        let bytes = pdf_syntax::decode_string(&source, entry.value(), 64 * 1024).ok()?;
+        let ours = entries
+            .iter()
+            .any(|entry| entry.key_equals(&source, b"/PanPDF"));
+        Some((text_string(&bytes), ours))
     }
 
     pub(super) fn marked_properties(
@@ -833,4 +865,17 @@ impl Interpreter {
         }
         Ok(names)
     }
+}
+
+fn text_string(bytes: &[u8]) -> String {
+    if let Some(units) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = units
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        return char::decode_utf16(units)
+            .map(|character| character.unwrap_or('\u{FFFD}'))
+            .collect();
+    }
+    bytes.iter().copied().map(char::from).collect()
 }

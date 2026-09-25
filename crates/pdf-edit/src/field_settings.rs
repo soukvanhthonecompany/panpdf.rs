@@ -74,17 +74,12 @@ const fn flags_of_kind(kind: FieldKind) -> u32 {
 }
 
 fn field_on_page(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     page: &PlannerPage<'_>,
     widget: Reference,
 ) -> Result<(Reader, FormField), SpikeError> {
-    let reader = Reader::open(source, b"")?;
-    if reader.is_protected() {
-        return Err(refused(
-            "this document is protected, and a field cannot be changed in it yet",
-        ));
-    }
-    let field = crate::form::fields_of_page(source, page.program.page, b"")?
+    let reader = Reader::open(source, credential)?;
+    let field = crate::form::fields_of_page(source, page.program.page, credential)?
         .into_iter()
         .find(|field| field.widget == widget)
         .ok_or_else(|| refused("this is not a field of the document's form"))?;
@@ -124,8 +119,9 @@ pub(crate) fn plan_set_field_box(
     page_index: usize,
     (widget, rect): (Reference, [f64; 4]),
 ) -> Result<Plan, SpikeError> {
+    let credential = page.credential;
     let rect = crate::new_field::checked_box(rect)?;
-    let (_, field) = field_on_page(source, &page, widget)?;
+    let (_, field) = field_on_page((source, credential), &page, widget)?;
     let resized = ((field.rect[2] - field.rect[0]) - (rect[2] - rect[0])).abs() > SAME_SIZE
         || ((field.rect[3] - field.rect[1]) - (rect[3] - rect[1])).abs() > SAME_SIZE;
     let placed: Entry = (
@@ -150,11 +146,14 @@ pub(crate) fn plan_set_field_box(
             &field.value,
         )?
     } else {
-        vec![set_entries(source, widget, &[placed])?]
+        vec![set_entries((source, credential), widget, &[placed])?]
     };
-    let document =
-        crate::block_rewrite::commit_writes(source, &writes, crate::Restrictions::SetAside)?;
-    let back = crate::form::fields_of_page(&document, page.program.page, b"")?;
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        &writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    let back = crate::form::fields_of_page(&document, page.program.page, credential)?;
     let landed = back
         .iter()
         .find(|found| found.widget == widget)
@@ -183,10 +182,11 @@ pub(crate) fn plan_set_field_settings(
     page_index: usize,
     (widget, settings): (Reference, &FieldSettings),
 ) -> Result<Plan, SpikeError> {
+    let credential = page.credential;
     if settings.is_empty() {
         return Err(refused("nothing about the field was changed"));
     }
-    let (reader, field) = field_on_page(source, &page, widget)?;
+    let (reader, field) = field_on_page((source, credential), &page, widget)?;
     let mut change = Change::of(&field);
     general(&reader, &field, settings, &mut change)?;
     appearance(&field, settings, &mut change)?;
@@ -226,11 +226,16 @@ pub(crate) fn plan_set_field_settings(
             &FieldValue::Text(change.wanted.caption.clone()),
         )?
     } else if field.kind.is_a_button() && change.redraw {
-        pressed(source, &field, &mut change)?
+        pressed((source, credential), &field, &mut change)?
     } else {
-        change.plain_writes(source, &field)?
+        change.plain_writes((source, credential), &field)?
     };
-    prove_settings(source, &writes, (page.program.page, widget), &change.wanted)?;
+    prove_settings(
+        (source, credential),
+        &writes,
+        (page.program.page, widget),
+        &change.wanted,
+    )?;
     Ok(plan_of(&page, page_index, writes, field.rect))
 }
 
@@ -255,7 +260,7 @@ impl Change {
 
     fn plain_writes(
         &self,
-        source: &ByteStore,
+        (source, credential): (&ByteStore, &[u8]),
         field: &FormField,
     ) -> Result<Vec<PlannedWrite>, SpikeError> {
         if field.field == field.widget {
@@ -265,14 +270,22 @@ impl Change {
                 .chain(&self.on_widget)
                 .cloned()
                 .collect();
-            return Ok(vec![set_entries(source, field.field, &both)?]);
+            return Ok(vec![set_entries((source, credential), field.field, &both)?]);
         }
         let mut writes = Vec::new();
         if !self.on_field.is_empty() {
-            writes.push(set_entries(source, field.field, &self.on_field)?);
+            writes.push(set_entries(
+                (source, credential),
+                field.field,
+                &self.on_field,
+            )?);
         }
         if !self.on_widget.is_empty() {
-            writes.push(set_entries(source, field.widget, &self.on_widget)?);
+            writes.push(set_entries(
+                (source, credential),
+                field.widget,
+                &self.on_widget,
+            )?);
         }
         Ok(writes)
     }
@@ -683,7 +696,7 @@ fn dates(
 }
 
 fn pressed(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     field: &FormField,
     change: &mut Change,
 ) -> Result<Vec<PlannedWrite>, SpikeError> {
@@ -738,19 +751,22 @@ fn pressed(
         },
     ));
     change.wanted.shown_state = Some(if was_on { state } else { "Off".to_owned() });
-    writes.extend(change.plain_writes(source, field)?);
+    writes.extend(change.plain_writes((source, credential), field)?);
     Ok(writes)
 }
 
 fn prove_settings(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     writes: &[PlannedWrite],
     (page, widget): (Reference, Reference),
     wanted: &FormField,
 ) -> Result<(), SpikeError> {
-    let document =
-        crate::block_rewrite::commit_writes(source, writes, crate::Restrictions::SetAside)?;
-    let back = crate::form::fields_of_page(&document, page, b"")?;
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    let back = crate::form::fields_of_page(&document, page, credential)?;
     let found = back
         .iter()
         .find(|found| found.widget == widget)
@@ -850,7 +866,11 @@ mod tests {
             b"",
             Some(crate::new_text::tests::provider()),
         )?;
-        crate::block_rewrite::commit_writes(source, plan.writes(), crate::Restrictions::Respect)
+        crate::block_rewrite::commit_writes(
+            source,
+            plan.writes(),
+            (b"", crate::Restrictions::Respect),
+        )
     }
 
     fn fields(source: &ByteStore) -> Vec<FormField> {

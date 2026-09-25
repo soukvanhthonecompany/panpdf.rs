@@ -221,6 +221,24 @@ pub enum Message {
     OcrEngineFailed(String),
     OcrEngineElsewhere,
     OcrThisPage,
+    OcrNotMeasured(String),
+    OcrMoreLanguages(usize),
+    OcrSearchLanguages,
+    OcrNoLanguageMatches,
+    OcrSize(u64),
+    OcrDownloadModel {
+        code: String,
+        bytes: u64,
+    },
+    OcrRemoveModel {
+        code: String,
+        bytes: u64,
+    },
+    OcrRemoveFailed(String),
+    OcrFromTheSystem,
+    OcrNotLanguages,
+    OcrHelperWhy,
+    OcrNotInOnePlace(Vec<String>),
     PrintWhy,
     AllPages,
     PrintCurrentPage,
@@ -1139,11 +1157,12 @@ impl Message {
                              copied. It runs on this computer; nothing is sent anywhere."
                 .to_owned(),
             Self::OcrLanguages => "Languages on the pages (each one more takes longer)".to_owned(),
-            Self::OcrLanguage(code) => match code.as_str() {
-                "lao" => "Lao (\u{0ea5}\u{0eb2}\u{0ea7})".to_owned(),
-                "tha" => "Thai (\u{0e44}\u{0e17}\u{0e22})".to_owned(),
-                "eng" => "English".to_owned(),
-                other => other.to_owned(),
+            Self::OcrLanguage(code) => match crate::ocr_languages::Language::of(code) {
+                Some(language) => match language.shown_autonym() {
+                    Some(own) => format!("{} ({own})", language.english),
+                    None => language.english.to_owned(),
+                },
+                None => code.clone(),
             },
             Self::OcrSkipText => "Skip pages that already have text".to_owned(),
             Self::OcrStart(1) => "Read 1 page".to_owned(),
@@ -1186,6 +1205,39 @@ impl Message {
                                         macOS, run: brew install tesseract"
                 .to_owned(),
             Self::OcrThisPage => "This page".to_owned(),
+            Self::OcrNotMeasured(code) => format!(
+                "{}: not measured",
+                Self::OcrLanguage(code.clone()).say(Lang::English)
+            ),
+            Self::OcrMoreLanguages(count) => format!("More languages ({count})"),
+            Self::OcrSearchLanguages => "Search by name or code".to_owned(),
+            Self::OcrNoLanguageMatches => "No language matches".to_owned(),
+            Self::OcrSize(bytes) => megabytes(*bytes),
+            Self::OcrDownloadModel { code, bytes } => format!(
+                "Download {} ({}) to read pages in it",
+                Self::OcrLanguage(code.clone()).say(Lang::English),
+                megabytes(*bytes)
+            ),
+            Self::OcrRemoveModel { code, bytes } => format!(
+                "Remove {} from this computer to free {}. It can be downloaded again.",
+                Self::OcrLanguage(code.clone()).say(Lang::English),
+                megabytes(*bytes)
+            ),
+            Self::OcrRemoveFailed(said) => format!("The model could not be removed: {said}"),
+            Self::OcrFromTheSystem => "From the system".to_owned(),
+            Self::OcrNotLanguages => "Not languages".to_owned(),
+            Self::OcrHelperWhy => "Tesseract publishes this file to lay pages out with its \
+                                   older engine. It does not read words, and this program \
+                                   does not use it."
+                .to_owned(),
+            Self::OcrNotInOnePlace(codes) => format!(
+                "Download {} too: the recogniser reads every language from one place",
+                codes
+                    .iter()
+                    .map(|code| Self::OcrLanguage(code.clone()).say(Lang::English))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Self::PrintWhy => "Choose the pages, the paper and how they go on it. The preview \
                                shows each sheet as it will print."
                 .to_owned(),
@@ -2009,6 +2061,29 @@ impl From<Refusal> for Message {
 mod tests {
     use super::{Lang, LinkKind, Message, PrintScalingKind, megabytes};
 
+    fn languages() -> Vec<Message> {
+        vec![
+            Message::OcrNotMeasured("fra".to_owned()),
+            Message::OcrMoreLanguages(125),
+            Message::OcrSearchLanguages,
+            Message::OcrNoLanguageMatches,
+            Message::OcrSize(2_652_786),
+            Message::OcrDownloadModel {
+                code: "fra".to_owned(),
+                bytes: 3_972_115,
+            },
+            Message::OcrRemoveModel {
+                code: "fra".to_owned(),
+                bytes: 3_972_115,
+            },
+            Message::OcrRemoveFailed("permission denied".to_owned()),
+            Message::OcrFromTheSystem,
+            Message::OcrNotLanguages,
+            Message::OcrHelperWhy,
+            Message::OcrNotInOnePlace(vec!["lao".to_owned(), "eng".to_owned()]),
+        ]
+    }
+
     fn earlier() -> Vec<Message> {
         vec![
             Message::LinkToPage(7),
@@ -2248,7 +2323,7 @@ mod tests {
 
     #[test]
     fn every_language_answers_every_message_and_answers_differently() {
-        let every = [earlier(), later(), latest(), newest()].concat();
+        let every = [earlier(), later(), latest(), newest(), languages()].concat();
         for message in &every {
             for lang in Lang::ALL {
                 let said = message.say(*lang);
@@ -2272,7 +2347,11 @@ mod tests {
     fn same_in_every_language(message: &Message) -> bool {
         matches!(
             message,
-            Message::ZoomPercent(_) | Message::Plain(_) | Message::Quiet | Message::OcrLanguage(_)
+            Message::ZoomPercent(_)
+                | Message::Plain(_)
+                | Message::Quiet
+                | Message::OcrLanguage(_)
+                | Message::OcrSize(_)
         )
     }
 
@@ -2427,6 +2506,26 @@ mod tests {
                 assert!(said.contains(rate), "{said}");
             }
         }
+    }
+
+    #[test]
+    fn every_language_is_named_in_words() {
+        let say = |code: &str| Message::OcrLanguage(code.to_owned()).say(Lang::English);
+        assert_eq!(say("lao"), "Lao (\u{0ea5}\u{0eb2}\u{0ea7})");
+        assert_eq!(say("tha"), "Thai (\u{0e44}\u{0e17}\u{0e22})");
+        assert_eq!(say("eng"), "English");
+        assert_eq!(say("fra"), "French (fran\u{e7}ais)");
+        assert_eq!(say("ara"), "Arabic");
+        assert_eq!(say("frk"), "frk");
+        for code in pdf_ocr::models::every_language() {
+            assert_ne!(say(code), code, "{code} is named by its code");
+        }
+        let split =
+            Message::OcrNotInOnePlace(vec!["lao".to_owned(), "eng".to_owned()]).say(Lang::English);
+        assert!(
+            split.contains("Lao (") && split.contains("English"),
+            "{split}"
+        );
     }
 
     #[test]

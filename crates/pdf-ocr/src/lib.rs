@@ -1,3 +1,4 @@
+pub mod autonyms;
 mod catalogue;
 pub mod models;
 pub mod names;

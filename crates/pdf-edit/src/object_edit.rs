@@ -12,13 +12,47 @@ fn malformed() -> SpikeError {
 pub(crate) struct ObjectEdit {
     pub(crate) body: Body,
     edits: Vec<(usize, usize, String)>,
+    cipher: Option<std::sync::Arc<pdf_security::AuthenticatedSecurity>>,
 }
 
 impl ObjectEdit {
-    pub(crate) fn of(source: &ByteStore, reference: Reference) -> Result<Self, SpikeError> {
+    pub(crate) fn of(
+        source: &ByteStore,
+        reference: Reference,
+        credential: &[u8],
+    ) -> Result<Self, SpikeError> {
+        let (index, security) = crate::previous::readable_index(source, credential)
+            .ok_or(SpikeError::RetypeUnsupported("this object cannot be read"))?;
+        let cipher = security.filter(|_| !crate::incremental::strings_are_plain(&index, reference));
         Ok(Self {
-            body: resolve(source, reference)?,
+            body: resolve(source, reference, credential)?,
             edits: Vec::new(),
+            cipher,
+        })
+    }
+
+    pub(crate) fn of_planned(write: &PlannedWrite) -> Result<Self, SpikeError> {
+        let PlannedBody::Direct { body } = &write.body else {
+            return Err(malformed());
+        };
+        let source = ByteStore::new(
+            pdf_bytes::SourceId::new(0),
+            std::sync::Arc::<[u8]>::from(body.as_slice()),
+        );
+        let value = pdf_syntax::ObjectParser::new(&source, 0, pdf_syntax::ParseLimits::default())
+            .parse_next()
+            .map_err(|_| malformed())?
+            .ok_or_else(malformed)?;
+        Ok(Self {
+            body: Body {
+                source,
+                value,
+                reference: write.reference,
+                bytes: body.clone(),
+                offset: 0,
+            },
+            edits: Vec::new(),
+            cipher: None,
         })
     }
 
@@ -133,7 +167,17 @@ impl ObjectEdit {
         let mut at = 0;
         for (from, to, text) in &self.edits {
             bytes.extend_from_slice(&self.body.bytes[at..*from]);
-            bytes.extend_from_slice(text.as_bytes());
+            match &self.cipher {
+                Some(security) if text.contains(['(', '<']) => bytes.extend_from_slice(
+                    &crate::incremental::with_strings_encrypted(
+                        security,
+                        self.body.reference,
+                        text.as_bytes(),
+                    )
+                    .map_err(SpikeError::Write)?,
+                ),
+                _ => bytes.extend_from_slice(text.as_bytes()),
+            }
             at = *to;
         }
         bytes.extend_from_slice(&self.body.bytes[at..]);

@@ -965,12 +965,23 @@ impl Window {
             from: target.from,
             to: target.to,
         };
-        let job = match self.typing.next.take() {
-            Some((_, style)) if target.from == target.to => {
+        let collapsed = target.from == target.to;
+        let carried = self.typing.carry.take();
+        let style = match self.typing.next.take() {
+            Some((_, style)) if collapsed => Some(style),
+            _ => carried.filter(|_| collapsed),
+        };
+        if let Some(style) = &style
+            && text.chars().all(char::is_whitespace)
+        {
+            self.typing.carry = Some(style.clone());
+        }
+        let job = match style {
+            Some(style) => {
                 self.editor
                     .begin_edit_in_style(target.page, target.block, range, text, style)
             }
-            _ => self
+            None => self
                 .editor
                 .begin_edit(target.page, target.block, range, text),
         };

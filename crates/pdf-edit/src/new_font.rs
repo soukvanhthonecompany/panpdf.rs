@@ -309,9 +309,13 @@ pub(crate) struct Body {
     pub(crate) offset: usize,
 }
 
-pub(crate) fn resolve(source: &ByteStore, reference: Reference) -> Result<Body, SpikeError> {
+pub(crate) fn resolve(
+    source: &ByteStore,
+    reference: Reference,
+    credential: &[u8],
+) -> Result<Body, SpikeError> {
     let unreadable = || refused("the page's font resources cannot be read");
-    let (index, _) = crate::previous::readable_index(source, b"").ok_or_else(unreadable)?;
+    let (index, _) = crate::previous::readable_index(source, credential).ok_or_else(unreadable)?;
     let resolved = index
         .resolve_object(source, reference, pdf_syntax::ResolveLimits::default())
         .map_err(|_| unreadable())?;
@@ -368,6 +372,7 @@ fn inserted(body: &Body, dictionary: &Object, text: &str) -> Result<PlannedWrite
 fn inherited_resources(
     source: &ByteStore,
     page: &Body,
+    credential: &[u8],
 ) -> Result<Option<(Body, Object)>, SpikeError> {
     const DEEPEST: usize = 100;
     let named = |body: &Body| match entry(body, &body.value, b"/Parent").map(Object::kind) {
@@ -378,7 +383,7 @@ fn inherited_resources(
         return Ok(None);
     };
     for _ in 0..DEEPEST {
-        let body = resolve(source, parent)?;
+        let body = resolve(source, parent, credential)?;
         if let Some(resources) = entry(&body, &body.value, b"/Resources").cloned() {
             return Ok(Some((body, resources)));
         }
@@ -394,6 +399,7 @@ pub(crate) fn embedded_face(
     source: &ByteStore,
     font: Reference,
     mark: &str,
+    credential: &[u8],
 ) -> Option<FontObjects> {
     let referenced =
         |body: &Body, dictionary: &Object, key: &[u8]| match entry(body, dictionary, key)?.kind() {
@@ -407,7 +413,7 @@ pub(crate) fn embedded_face(
             },
             _ => None,
         };
-    let top = resolve(source, font).ok()?;
+    let top = resolve(source, font, credential).ok()?;
     let base = entry(&top, &top.value, b"/BaseFont")?;
     let base = pdf_syntax::decode_name(&top.source, base).ok()?;
     let tag = format!("/{}+", subset_tag(mark, font.object_number()));
@@ -416,9 +422,9 @@ pub(crate) fn embedded_face(
     }
     let descendant = referenced(&top, &top.value, b"/DescendantFonts")?;
     let unicode = referenced(&top, &top.value, b"/ToUnicode")?;
-    let cid = resolve(source, descendant).ok()?;
+    let cid = resolve(source, descendant, credential).ok()?;
     let descriptor = referenced(&cid, &cid.value, b"/FontDescriptor")?;
-    let described = resolve(source, descriptor).ok()?;
+    let described = resolve(source, descriptor, credential).ok()?;
     let program = referenced(&described, &described.value, b"/FontFile2")
         .or_else(|| referenced(&described, &described.value, b"/FontFile3"))?;
     Some(FontObjects {
@@ -434,8 +440,9 @@ pub(crate) fn add_font_resource(
     source: &ByteStore,
     page: Reference,
     font: Reference,
+    credential: &[u8],
 ) -> Result<(String, PlannedWrite), SpikeError> {
-    add_resource(source, page, (b"/Font", "F"), font)
+    add_resource(source, page, (b"/Font", "F"), font, credential)
 }
 
 pub(crate) fn add_resource(
@@ -443,14 +450,15 @@ pub(crate) fn add_resource(
     page: Reference,
     (category, prefix): (&[u8], &str),
     object: Reference,
+    credential: &[u8],
 ) -> Result<(String, PlannedWrite), SpikeError> {
-    let page_body = resolve(source, page)?;
+    let page_body = resolve(source, page, credential)?;
     let reference = format!("{} {} R", object.object_number(), object.generation());
     let category_text = String::from_utf8_lossy(category);
     let own = entry(&page_body, &page_body.value, b"/Resources").cloned();
     let found = match own {
         Some(value) => Some((None, value)),
-        None => inherited_resources(source, &page_body)?
+        None => inherited_resources(source, &page_body, credential)?
             .map(|(ancestor, value)| (Some(ancestor), value)),
     };
     let Some((ancestor, resources)) = found else {
@@ -466,7 +474,7 @@ pub(crate) fn add_resource(
     let (holder, resources) = match resources.kind() {
         ObjectKind::Dictionary(_) => (holder, resources),
         ObjectKind::Reference(reference) => {
-            let body = resolve(source, *reference)?;
+            let body = resolve(source, *reference, credential)?;
             let value = body.value.clone();
             (body, value)
         }
@@ -489,7 +497,7 @@ pub(crate) fn add_resource(
             let (holder, fonts) = match fonts.kind() {
                 ObjectKind::Dictionary(_) => (holder, fonts),
                 ObjectKind::Reference(reference) => {
-                    let body = resolve(source, *reference)?;
+                    let body = resolve(source, *reference, credential)?;
                     let value = body.value.clone();
                     (body, value)
                 }
@@ -580,7 +588,7 @@ pub(crate) mod tests {
 
     fn written(source: &ByteStore, font: u32) -> (String, u32, String) {
         let (name, write) =
-            add_font_resource(source, Reference::new(3, 0), Reference::new(font, 0))
+            add_font_resource(source, Reference::new(3, 0), Reference::new(font, 0), b"")
                 .expect("named");
         let PlannedBody::Direct { body } = write.body else {
             panic!("a dictionary is written directly");
@@ -671,7 +679,9 @@ pub(crate) mod tests {
             &format!("<< {PAGE} >>"),
             &[],
         );
-        assert!(add_font_resource(&source, Reference::new(3, 0), Reference::new(9, 0)).is_err());
+        assert!(
+            add_font_resource(&source, Reference::new(3, 0), Reference::new(9, 0), b"").is_err()
+        );
     }
 
     fn rectangle(width: i16, height: i16) -> Vec<u8> {
@@ -794,7 +804,7 @@ pub(crate) mod tests {
         )
         .expect("embedded");
         let (name, page) =
-            add_font_resource(&source, Reference::new(3, 0), font.font).expect("named");
+            add_font_resource(&source, Reference::new(3, 0), font.font, b"").expect("named");
         let content = format!("BT /{name} 20 Tf 10 50 Td {} Tj ET", show_codes(&[1, 2]));
         let mut writes = font.writes.clone();
         writes.push(page);
@@ -876,7 +886,7 @@ pub(crate) mod tests {
         )
         .expect("embedded");
         let (name, page) =
-            add_font_resource(&source, Reference::new(3, 0), font.font).expect("named");
+            add_font_resource(&source, Reference::new(3, 0), font.font, b"").expect("named");
         let content = format!("BT /{name} 20 Tf 10 50 Td {} Tj ET", show_codes(&[1, 2]));
         let mut face_writes = font.writes.clone();
         face_writes.push(page);
@@ -988,7 +998,7 @@ pub(crate) mod tests {
             )
             .expect("embedded");
             let (name, page) =
-                add_font_resource(&source, Reference::new(3, 0), font.font).expect("named");
+                add_font_resource(&source, Reference::new(3, 0), font.font, b"").expect("named");
             let em = f64::from(face.units_per_em());
             for (glyph, x, y) in placed {
                 let x = 10.0 + 12.0 * f64::from(x) / em;

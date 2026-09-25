@@ -17,8 +17,6 @@ pub(crate) const MOST_ROUNDS: usize = 16;
 
 const MOST_SEARCHED: usize = 120;
 
-const THUMBNAIL: f64 = 240.0;
-
 pub(crate) struct Pending {
     pub(crate) call: ToolCall,
     pub(crate) request: Request,
@@ -63,7 +61,6 @@ pub(crate) struct Tools {
     named: BTreeMap<(usize, usize), Named>,
     arranged: u64,
     pub(crate) called: BTreeMap<String, String>,
-    pub(crate) pictures: BTreeMap<String, egui::ColorImage>,
     pub(crate) question: Option<Question>,
 }
 
@@ -660,9 +657,6 @@ impl Window {
         };
         match desk::picture_of(&leaf.view, dpi) {
             Ok((png, width, height)) => {
-                if let Some(image) = thumbnail(&leaf.view) {
-                    self.ai.tools.pictures.insert(call.id.clone(), image);
-                }
                 let mut result = ToolResult::said(
                     &call.id,
                     format!("Page {} as shown, {width} x {height} pixels.", page + 1),
@@ -824,10 +818,14 @@ impl Window {
                     writing.left_out
                 )
             };
+            let family = if writing.family.is_empty() {
+                "the faces chosen for each script"
+            } else {
+                writing.family.as_str()
+            };
             let said = format!(
-                "Written: {pieces} pieces of text over {pages} page{} in {}, theme {}.{left_out}",
+                "Written: {pieces} pieces of text over {pages} page{} in {family}, theme {}.{left_out}",
                 if pages == 1 { "" } else { "s" },
-                writing.family,
                 writing.theme
             );
             self.ai.tools.writing = None;
@@ -1053,6 +1051,7 @@ impl Window {
             from,
             pages: chosen,
             after,
+            password,
         } = &request
         else {
             return Performed::Done(ToolResult::failed(&call.id, "this is not an insertion"));
@@ -1070,16 +1069,19 @@ impl Window {
         };
         let other =
             pdf_bytes::ByteStore::new(pdf_bytes::SourceId::new(1), std::sync::Arc::clone(&bytes));
-        if pdf_edit::info::lock(&other, b"") == pdf_edit::info::Lock::Refused {
-            let said = format!(
-                "{} is protected by a password, and pages cannot be taken out of a protected \
-                 file yet -- not even with the password. Open it in PanPDF, save an unprotected \
-                 copy, and take the pages from that.",
-                from.display()
-            );
+        let password = password.as_deref().unwrap_or_default().as_bytes().to_vec();
+        if pdf_edit::info::lock(&other, &password) == pdf_edit::info::Lock::Refused {
+            let said = if password.is_empty() {
+                format!(
+                    "{} is protected by a password: give it as `password`",
+                    from.display()
+                )
+            } else {
+                format!("the password given does not open {}", from.display())
+            };
             return Performed::Done(ToolResult::failed(&call.id, said));
         }
-        let available = match pdf_session::Session::new(other, b"").page_count() {
+        let available = match pdf_session::Session::new(other, &password).page_count() {
             Ok(available) => available,
             Err(error) => {
                 let said = format!("{} has no pages this can read: {error}", from.display());
@@ -1099,9 +1101,11 @@ impl Window {
             return Performed::Done(ToolResult::failed(&call.id, said));
         }
         let (beside, before) = tools::beside_after(*after);
-        let job = self
-            .editor
-            .begin_insert_pages((beside, before), bytes, &wanted);
+        let job = self.editor.begin_insert_pages(
+            (beside, before),
+            (bytes, pdf_edit::Password(password)),
+            &wanted,
+        );
         self.send_for(call, request, job, None)
     }
 
@@ -1311,25 +1315,6 @@ fn no_such_page(wanted: &[usize], pages: usize) -> Option<String> {
         .iter()
         .find(|page| **page >= pages)
         .map(|page| format!("there is no page {}: the document has {pages}", page + 1))
-}
-
-fn thumbnail(view: &pdf_session::PageView) -> Option<egui::ColorImage> {
-    let device = pdf_render::DeviceTransform::for_page(
-        &view.program.geometry,
-        1.0,
-        pdf_render::RenderLimits::default(),
-    )
-    .ok()?;
-    let longest = f64::from(device.width.max(device.height)).max(1.0);
-    let (canvas, _) =
-        pdf_cli::render_page_view(view, (THUMBNAIL / longest).clamp(0.02, 1.0)).ok()?;
-    let rgb = canvas.to_rgb8();
-    let size = [canvas.width as usize, canvas.height as usize];
-    let pixels: Vec<egui::Color32> = rgb
-        .chunks_exact(3)
-        .map(|pixel| egui::Color32::from_rgb(pixel[0], pixel[1], pixel[2]))
-        .collect();
-    (pixels.len() == size[0] * size[1]).then(|| egui::ColorImage::new(size, pixels))
 }
 
 fn plural(count: usize) -> &'static str {

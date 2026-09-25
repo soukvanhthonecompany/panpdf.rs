@@ -114,11 +114,12 @@ fn examples() -> Vec<(&'static str, &'static str, Request)> {
         ),
         (
             "insert_pages",
-            r#"{"document":"doc-1","from":"/tmp/other.pdf","pages":[1,2],"after_page":0}"#,
+            r#"{"document":"doc-1","from":"/tmp/other.pdf","pages":[1,2],"after_page":0,"password":"view"}"#,
             Request::InsertPages {
                 from: std::path::PathBuf::from("/tmp/other.pdf"),
                 pages: Some(vec![0, 1]),
                 after: 0,
+                password: Some("view".to_owned()),
             },
         ),
         ("undo", r#"{"document":"doc-1"}"#, Request::Undo),

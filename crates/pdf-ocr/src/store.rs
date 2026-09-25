@@ -86,7 +86,7 @@ pub fn languages_in(dir: &Path) -> Vec<String> {
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
             let code = name.strip_suffix(".traineddata")?;
-            (!code.is_empty() && code != "osd").then(|| code.to_owned())
+            (!code.is_empty() && crate::models::is_a_language(code)).then(|| code.to_owned())
         })
         .collect();
     codes.sort_unstable();
@@ -120,6 +120,14 @@ pub fn tessdata_for(
 pub fn have(dir: &Path, model: &Model) -> bool {
     let file = dir.join(model.file_name());
     std::fs::metadata(&file).is_ok_and(|about| about.len() == model.bytes)
+}
+
+pub fn remove(dir: &Path, model: &Model) -> Result<bool, std::io::Error> {
+    match std::fs::remove_file(dir.join(model.file_name())) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 pub fn install(dir: &Path, model: &Model, data: &[u8]) -> Result<PathBuf, FetchError> {
@@ -268,7 +276,7 @@ fn short(said: &str) -> String {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{curl_escape, holds, install, languages_in, tessdata_for};
+    use super::{curl_escape, holds, install, languages_in, remove, tessdata_for};
     use crate::models::{Model, Quality};
     use crate::sha1;
 
@@ -336,13 +344,30 @@ mod tests {
     }
 
     #[test]
+    fn a_model_is_removed_and_nothing_else_is() {
+        let scratch = Scratch::new("remove");
+        let dir = scratch.path();
+        let whole = b"a model to be removed".to_vec();
+        let model = pretend(&whole);
+        install(dir, &model, &whole).expect("installed");
+        std::fs::write(dir.join("tha.traineddata"), b"a neighbour").expect("written");
+        assert_eq!(languages_in(dir), vec!["lao".to_owned(), "tha".to_owned()]);
+
+        assert!(remove(dir, &model).expect("removed"));
+        assert!(!super::have(dir, &model));
+        assert_eq!(languages_in(dir), vec!["tha".to_owned()]);
+        assert!(dir.join("tha.traineddata").is_file());
+        assert!(!remove(dir, &model).expect("nothing to remove is not an error"));
+    }
+
+    #[test]
     fn the_programs_own_models_come_first() {
         let scratch = Scratch::new("locate");
         let own = scratch.path().join("own");
         let system = scratch.path().join("system");
         std::fs::create_dir_all(&own).expect("own");
         std::fs::create_dir_all(&system).expect("system");
-        for code in ["lao", "tha", "eng", "osd"] {
+        for code in ["lao", "tha", "eng", "osd", "equ"] {
             std::fs::write(system.join(format!("{code}.traineddata")), b"system").expect("written");
         }
         let want: Vec<String> = ["lao", "tha"].iter().map(|it| (*it).to_owned()).collect();

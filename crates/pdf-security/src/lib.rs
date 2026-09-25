@@ -9,6 +9,7 @@ mod der;
 mod digest;
 mod protect;
 mod rsa;
+mod seeded;
 mod sha1;
 mod sha2;
 mod trust;
@@ -16,6 +17,7 @@ mod x509;
 
 pub use cms::{Checked, Integrity, Trust, Who, check as check_signature};
 pub use protect::{Allowed, MadeProtection, Wanted, make_protection, random_identifier};
+pub use seeded::{SEED_BYTES, seed_random};
 pub use x509::Moment;
 
 use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
@@ -820,12 +822,25 @@ fn random_iv() -> Result<[u8; 16], SecurityError> {
 }
 
 fn random_bytes<const N: usize>() -> Result<[u8; N], SecurityError> {
-    use std::io::Read;
+    random_bytes_from(read_os_random)
+}
+
+fn random_bytes_from<const N: usize>(os: fn(&mut [u8]) -> bool) -> Result<[u8; N], SecurityError> {
     let mut bytes = [0_u8; N];
+    if os(&mut bytes) || seeded::draw(&mut bytes) {
+        Ok(bytes)
+    } else {
+        Err(SecurityError::new(
+            SecurityErrorKind::UnsupportedWriteCipher,
+        ))
+    }
+}
+
+fn read_os_random(bytes: &mut [u8]) -> bool {
+    use std::io::Read;
     std::fs::File::open("/dev/urandom")
-        .and_then(|mut source| source.read_exact(&mut bytes))
-        .map_err(|_| SecurityError::new(SecurityErrorKind::UnsupportedWriteCipher))?;
-    Ok(bytes)
+        .and_then(|mut source| source.read_exact(bytes))
+        .is_ok()
 }
 
 fn md5(input: &[u8]) -> [u8; 16] {
@@ -969,6 +984,7 @@ pub enum SecurityErrorKind {
     InvalidCipherKey,
     MalformedCiphertext,
     UnsupportedWriteCipher,
+    WeakRandomSeed,
     StreamSourceSpanFailure,
     Resolve(ResolveError),
     StreamDecode(StreamDecodeError),
@@ -1000,7 +1016,10 @@ impl fmt::Display for SecurityErrorKind {
                 Self::InvalidCipherKey => "encryption key has an invalid length",
                 Self::MalformedCiphertext => "encrypted object data or AES padding is malformed",
                 Self::UnsupportedWriteCipher => {
-                    "writing an AES-encrypted stream needs a random initialisation vector, and none could be read from the operating system"
+                    "writing with AES needs random bytes, and none could be read from the operating system and no seed was given"
+                }
+                Self::WeakRandomSeed => {
+                    "a random seed must be at least 48 bytes that are not all the same"
                 }
                 Self::StreamSourceSpanFailure => {
                     "encrypted stream span does not belong to the source"
@@ -1436,5 +1455,31 @@ mod tests {
             ),
             Ok(b"decrypt before Flate".to_vec())
         );
+    }
+
+    #[test]
+    fn with_no_operating_system_source_only_a_seed_gives_random_bytes() {
+        std::thread::spawn(|| {
+            let none: fn(&mut [u8]) -> bool = |_| false;
+            let refused = super::random_bytes_from::<16>(none).unwrap_err();
+            assert_eq!(refused.kind(), SecurityErrorKind::UnsupportedWriteCipher);
+            assert_eq!(
+                super::seed_random(&[0; 64]).unwrap_err().kind(),
+                SecurityErrorKind::WeakRandomSeed
+            );
+            assert!(super::random_bytes_from::<16>(none).is_err());
+            let seed: Vec<u8> = (0..64).map(|n: u8| n.wrapping_mul(37)).collect();
+            super::seed_random(&seed).unwrap();
+            let first = super::random_bytes_from::<16>(none).unwrap();
+            let second = super::random_bytes_from::<16>(none).unwrap();
+            assert_ne!(first, second);
+            let os: fn(&mut [u8]) -> bool = |bytes| {
+                bytes.fill(0xa5);
+                true
+            };
+            assert_eq!(super::random_bytes_from::<4>(os).unwrap(), [0xa5; 4]);
+        })
+        .join()
+        .unwrap();
     }
 }

@@ -190,6 +190,7 @@ pub enum Done {
         layout: Layout,
         overflow: bool,
         brought_in: Option<String>,
+        stood_in: Option<(String, String)>,
         drawn_from: Option<String>,
         cropped: bool,
     },
@@ -621,6 +622,7 @@ impl Done {
                 layout,
                 overflow,
                 brought_in,
+                stood_in,
                 drawn_from,
                 cropped,
             } => {
@@ -644,6 +646,14 @@ impl Done {
                         ", at the size and colour of the text it follows, because that text's \
                          own font has no letter for what you typed",
                     );
+                }
+                if let Some((chosen, used)) = stood_in {
+                    said.push_str(SEP);
+                    said.push_str("written in ");
+                    said.push_str(used);
+                    said.push_str(", because ");
+                    said.push_str(chosen);
+                    said.push_str(" has no letter for what you typed");
                 }
                 if let Some(family) = drawn_from {
                     said.push_str(SEP);
@@ -708,7 +718,7 @@ impl Refusal {
             Self::BlockNotRead => "This block is not on a page that has been read".to_owned(),
             Self::RowNotRead => "This line is not on a page that has been read".to_owned(),
             Self::NeedsANewGlyph { character, why } => format!(
-                "This text's font has no \u{201c}{character}\u{201d}, and no font can be added for it here \u{2014} {}",
+                "This text's font has no \u{201c}{character}\u{201d}, and a font that has it is added only by laying the block out again, which could not be done \u{2014} {}",
                 why.say(lang)
             ),
             Self::AmbiguousCode { character, codes } => format!(
@@ -981,6 +991,7 @@ mod tests {
                 layout: Layout::OnItsRow(Box::new(engine())),
                 overflow: true,
                 brought_in: Some("Noto Sans Thai".to_owned()),
+                stood_in: Some(("Liberation Serif".to_owned(), "Noto Serif Lao".to_owned())),
                 drawn_from: None,
                 cropped: true,
             },

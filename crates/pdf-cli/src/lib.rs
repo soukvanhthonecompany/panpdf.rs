@@ -1908,6 +1908,7 @@ pub fn page_overlay_view(page: &PageView, scale: f64) -> Result<PageOverlay, Str
             placement[*cluster] = Some((row, position));
         }
     }
+    let spoken = page.graph.actual_texts();
     let mut clusters = Vec::new();
     for (ordinal, cluster) in index.clusters.iter().enumerate() {
         let Some((line, index_in_line)) = placement[ordinal] else {
@@ -1936,7 +1937,10 @@ pub fn page_overlay_view(page: &PageView, scale: f64) -> Result<PageOverlay, Str
             stacked: cluster.is_stacked(),
             line,
             index_in_line,
-            text: cluster_text(&atom.kind, cluster.glyphs.clone()),
+            text: match spoken.get(&cluster.atom) {
+                Some(actual) => Some(actual.text.clone()),
+                None => cluster_text(&atom.kind, cluster.glyphs.clone()),
+            },
         });
     }
 

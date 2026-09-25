@@ -34,8 +34,9 @@ pub(crate) fn plan_set_tab_order(
     page_index: usize,
     (widgets, order): (&[Reference], TabOrder),
 ) -> Result<Plan, SpikeError> {
+    let credential = page.credential;
     let page_reference = page.program.page;
-    let listed = crate::form::fields_of_page(source, page_reference, b"")?;
+    let listed = crate::form::fields_of_page(source, page_reference, credential)?;
     for (at, widget) in widgets.iter().enumerate() {
         if widgets[..at].contains(widget) {
             return Err(refused("a field was named twice"));
@@ -45,7 +46,7 @@ pub(crate) fn plan_set_tab_order(
         }
     }
 
-    let page_edit = ObjectEdit::of(source, page_reference)?;
+    let page_edit = ObjectEdit::of(source, page_reference, credential)?;
     let dictionary = page_edit.value();
     let annots = crate::object_edit::entry(&page_edit.body, &dictionary, b"/Annots")
         .cloned()
@@ -58,7 +59,7 @@ pub(crate) fn plan_set_tab_order(
     let (array, array_edit) = match held {
         None => (annots.clone(), None),
         Some(held) => {
-            let edit = ObjectEdit::of(source, held)?;
+            let edit = ObjectEdit::of(source, held, credential)?;
             (edit.value(), Some(edit))
         }
     };
@@ -70,14 +71,14 @@ pub(crate) fn plan_set_tab_order(
             let whole = edit.value();
             edit.replace(&whole, &ordered)?;
             writes.push(edit.written()?);
-            let mut page_edit = ObjectEdit::of(source, page_reference)?;
+            let mut page_edit = ObjectEdit::of(source, page_reference, credential)?;
             let dictionary = page_edit.value();
             set_tabs(&mut page_edit, &dictionary, tabs.as_deref())?;
             writes.push(page_edit.written()?);
         }
     } else {
         {
-            let mut edit = ObjectEdit::of(source, page_reference)?;
+            let mut edit = ObjectEdit::of(source, page_reference, credential)?;
             let dictionary = edit.value();
             let annots = crate::object_edit::entry(&edit.body, &dictionary, b"/Annots")
                 .cloned()
@@ -88,18 +89,12 @@ pub(crate) fn plan_set_tab_order(
         }
     }
 
-    for write in &writes {
-        if let crate::plan::PlannedBody::Direct { body } = &write.body {
-            eprintln!(
-                "TABDEBUG {} -> {}",
-                write.reference.object_number(),
-                String::from_utf8_lossy(body)
-            );
-        }
-    }
-    let document =
-        crate::block_rewrite::commit_writes(source, &writes, crate::Restrictions::SetAside)?;
-    let back: Vec<Reference> = crate::form::fields_of_page(&document, page_reference, b"")?
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        &writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    let back: Vec<Reference> = crate::form::fields_of_page(&document, page_reference, credential)?
         .into_iter()
         .map(|field| field.widget)
         .collect();
@@ -225,8 +220,12 @@ mod tests {
                 options: Vec::new(),
             };
             let plan = plan_command_with_fonts(source, &command, b"", None).expect("planned");
-            crate::block_rewrite::commit_writes(source, plan.writes(), crate::Restrictions::Respect)
-                .expect("added")
+            crate::block_rewrite::commit_writes(
+                source,
+                plan.writes(),
+                (b"", crate::Restrictions::Respect),
+            )
+            .expect("added")
         };
         let one = add(&blank, [20.0, 300.0, 120.0, 320.0]);
         let two = add(&one, [200.0, 300.0, 300.0, 320.0]);
@@ -247,7 +246,7 @@ mod tests {
         let ordered = crate::block_rewrite::commit_writes(
             &three,
             plan.writes(),
-            crate::Restrictions::Respect,
+            (b"", crate::Restrictions::Respect),
         )
         .expect("ordered");
         let back: Vec<Reference> = fields_of_page(&ordered, page, b"")
@@ -273,7 +272,7 @@ mod tests {
         let rows = crate::block_rewrite::commit_writes(
             &ordered,
             plan.writes(),
-            crate::Restrictions::Respect,
+            (b"", crate::Restrictions::Respect),
         )
         .expect("rows");
         assert!(String::from_utf8_lossy(rows.as_bytes()).contains("/Tabs /R"));

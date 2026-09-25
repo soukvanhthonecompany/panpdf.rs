@@ -56,18 +56,21 @@ impl Interpreter {
         let load_icc = |reference, limit| resource.icc_profile(reference, limit);
         let load_indexed = |reference, limit| resource.indexed_lookup(reference, limit);
         let load_function = |reference, limit| resource.function(reference, limit);
-        let load_object = |reference| resource.resolve_object(reference);
+        let load_object = |reference| resource.resolve_protected_object(reference);
+        let string_plaintext = |strings, bytes| resource.string_plaintext(strings, bytes);
         let context = ColorSpaceParseContext {
             resources: Some(resources),
             load_icc: &load_icc,
             load_indexed: &load_indexed,
             load_function: &load_function,
             load_object: &load_object,
+            string_plaintext: &string_plaintext,
             limits: self.limits,
         };
         let space = parse_color_space_definition(
             operation,
             resource.source(),
+            resource.strings(),
             resource.value(),
             InterpretErrorKind::UnsupportedColorSpace,
             &context,
@@ -154,18 +157,21 @@ impl Interpreter {
             let load_icc = |reference, limit| resource.icc_profile(reference, limit);
             let load_indexed = |reference, limit| resource.indexed_lookup(reference, limit);
             let load_function = |reference, limit| resource.function(reference, limit);
-            let load_object = |reference| resource.resolve_object(reference);
+            let load_object = |reference| resource.resolve_protected_object(reference);
+            let string_plaintext = |strings, bytes| resource.string_plaintext(strings, bytes);
             let context = ColorSpaceParseContext {
                 resources: Some(resources),
                 load_icc: &load_icc,
                 load_indexed: &load_indexed,
                 load_function: &load_function,
                 load_object: &load_object,
+                string_plaintext: &string_plaintext,
                 limits: self.limits,
             };
             let space = parse_color_space_definition(
                 operation,
                 resource.source(),
+                resource.strings(),
                 resource.value(),
                 InterpretErrorKind::UnsupportedColorSpace,
                 &context,

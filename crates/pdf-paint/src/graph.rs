@@ -114,7 +114,78 @@ pub struct PaintGraph {
     pub object_scopes: Vec<ObjectScope>,
 }
 
+const fn right_to_left(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x1_0800..=0x1_0FFF | 0x1_E800..=0x1_EFFF
+    )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActualText {
+    pub text: String,
+    pub first: bool,
+}
+
 impl PaintGraph {
+    #[must_use]
+    pub fn actual_texts(&self) -> std::collections::BTreeMap<usize, ActualText> {
+        let mut spans: Vec<(SourceSpan, String, Vec<usize>)> = Vec::new();
+        for (index, atom) in self.atoms.iter().enumerate() {
+            let PaintAtomKind::Text(_) = &atom.kind else {
+                continue;
+            };
+            let Some(mark) = atom
+                .marks
+                .iter()
+                .rev()
+                .find(|mark| mark.actual_text.is_some() && mark.written_here)
+            else {
+                continue;
+            };
+            match spans
+                .iter_mut()
+                .find(|(key, ..)| *key == mark.operator_span)
+            {
+                Some((_, _, atoms)) => atoms.push(index),
+                None => spans.push((
+                    mark.operator_span,
+                    mark.actual_text.clone().unwrap_or_default(),
+                    vec![index],
+                )),
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        for (_, text, atoms) in spans {
+            let mut read = String::new();
+            for index in &atoms {
+                if let PaintAtomKind::Text(run) = &self.atoms[*index].kind {
+                    for glyph in &run.glyphs {
+                        if let Some(meaning) = run.text.text_of(pdf_content::Code {
+                            value: glyph.code.value,
+                            byte_len: glyph.code.bytes.len(),
+                        }) {
+                            read.push_str(&meaning.text);
+                        }
+                    }
+                }
+            }
+            if read == text && !text.chars().any(right_to_left) {
+                continue;
+            }
+            for (at, index) in atoms.into_iter().enumerate() {
+                out.insert(
+                    index,
+                    ActualText {
+                        text: if at == 0 { text.clone() } else { String::new() },
+                        first: at == 0,
+                    },
+                );
+            }
+        }
+        out
+    }
+
     #[must_use]
     pub fn footprint(&self) -> usize {
         let mut counted: std::collections::HashSet<*const u8> = std::collections::HashSet::new();
@@ -570,6 +641,8 @@ pub struct MarkedContent {
     pub tag_span: SourceSpan,
     pub operator_span: SourceSpan,
     pub properties: Option<MarkedProperties>,
+    pub actual_text: Option<String>,
+    pub written_here: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

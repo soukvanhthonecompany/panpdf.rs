@@ -140,3 +140,21 @@ fn nothing_is_nothing() {
     assert_eq!(lines.len(), 3);
     assert!(lines[1].is_empty());
 }
+
+#[test]
+fn every_part_of_an_arriving_answer_is_read() {
+    let answer = "- **S01 เอกสารทดสอบ** (หน้า 1): ย่อหน้าภาษาลาวและไทย, *ตัวเอียง*, ~~ขีดฆ่า~~, x²
+- **S02 หัวข้อ** (หน้า 1–2): หัวข้อระดับ 1–6
+  - หัวข้อย่อยซ้อน
+  - อีกระดับ
+- **S03 ภาษาต่างๆ**: ลาว, ไทย, อาหรับ (RTL), ฮีบรู, ฮินดี
+";
+    for (at, _) in answer.char_indices() {
+        let _ = crate::markup::blocks(&answer[..at]);
+    }
+    let _ = crate::markup::blocks(answer);
+    for mark in ["-", "*", "+", "1.", "- ", "-\n", "2)\n\n"] {
+        let read = crate::markup::blocks(mark);
+        assert_eq!(read.len(), 1, "{mark:?} read as {read:?}");
+    }
+}

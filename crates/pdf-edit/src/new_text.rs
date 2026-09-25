@@ -88,21 +88,24 @@ pub(crate) fn plan_new_text(
         .and(new.share_from);
     let (name, mut writes) = named_face(
         source,
-        page.program.page,
+        (page.program.page, page.credential),
         (embeddable, &mark, meaning),
         before,
     )?;
 
-    let document = crate::block_rewrite::commit_writes(source, &writes, page.restrictions)?;
+    let opened = (page.credential, page.restrictions);
+    let read = |document: &ByteStore, index| {
+        crate::spike_move_text::read_page(document, index, page.credential, page.fonts)
+    };
+    let document = crate::block_rewrite::commit_writes(source, &writes, opened)?;
     if let Some(other) = shared_with {
-        let was = crate::spike_move_text::read_page(source, other, b"", page.fonts)?;
-        let is = crate::spike_move_text::read_page(&document, other, b"", page.fonts)?;
+        let (was, is) = (read(source, other)?, read(&document, other)?);
         if was.graph.atoms.len() != is.graph.atoms.len() {
             return Err(SpikeError::MoveNotIsolated);
         }
         prove_untouched(&was.graph, &is.graph)?;
     }
-    let mut carrying = crate::spike_move_text::read_page(&document, page_index, b"", page.fonts)?;
+    let mut carrying = read(&document, page_index)?;
     let stream = carrying
         .program
         .streams
@@ -125,8 +128,8 @@ pub(crate) fn plan_new_text(
             writes.retain(|was| was.reference != write.reference);
             writes.push(write);
         }
-        let document = crate::block_rewrite::commit_writes(source, &writes, page.restrictions)?;
-        carrying = crate::spike_move_text::read_page(&document, page_index, b"", page.fonts)?;
+        let document = crate::block_rewrite::commit_writes(source, &writes, opened)?;
+        carrying = read(&document, page_index)?;
         state = Some(named);
     }
     let mut bytes = first;
@@ -221,11 +224,30 @@ fn face_in(
         .chars()
         .find(|letter| *letter != '\n')
         .ok_or_else(|| refused("there is no text to put on the page"))?;
-    let face = fonts
-        .primary_face(&request)
-        .filter(|face| draws(face, first))
-        .or_else(|| fonts.fallback_face(&request, first))
-        .ok_or_else(|| refused("no face on this machine draws what was typed"))?;
+    let lacking = |face: &pdf_content::SubstitutedFace| {
+        text.chars()
+            .filter(|letter| !letter.is_whitespace())
+            .find(|letter| !draws(face, *letter))
+    };
+    let primary = fonts.primary_face(&request);
+    let face = match primary {
+        Some(face) if lacking(&face).is_none() => Some(face),
+        primary => {
+            let wanted = primary.as_ref().and_then(lacking).unwrap_or(first);
+            let script = pdf_content::coverage_faces(wanted)
+                .iter()
+                .filter_map(|family| {
+                    fonts.primary_face(&pdf_content::FontRequest::for_family(family, request.style))
+                });
+            std::iter::once(fonts.fallback_face(&request, wanted))
+                .flatten()
+                .chain(script)
+                .find(|face| lacking(face).is_none())
+                .or_else(|| primary.filter(|face| draws(face, first)))
+                .or_else(|| fonts.fallback_face(&request, first))
+        }
+    }
+    .ok_or_else(|| refused("no face on this machine draws what was typed"))?;
     let found = face.identity.style;
     if (found.is_bold() && !bold) || (found.italic && !italic) {
         return Err(refused(
@@ -473,7 +495,7 @@ pub(crate) fn meanings(
 
 fn named_face(
     source: &ByteStore,
-    page: pdf_syntax::Reference,
+    (page, credential): (pdf_syntax::Reference, &[u8]),
     (embeddable, mark, mut meaning): (Embeddable<'_>, &str, BTreeMap<u16, String>),
     before: Option<Before>,
 ) -> Result<(String, Vec<PlannedWrite>), SpikeError> {
@@ -485,7 +507,7 @@ fn named_face(
     else {
         let objects = FontObjects::numbered_from(crate::block_rewrite::next_object_number(source)?);
         let mut writes = embed(embeddable, &meaning, (objects, mark, false))?.writes;
-        let (name, holder) = add_font_resource(source, page, objects.font)?;
+        let (name, holder) = add_font_resource(source, page, objects.font, credential)?;
         writes.push(holder);
         return Ok((name, writes));
     };
@@ -510,7 +532,7 @@ fn named_face(
             .to_owned();
         return Ok((name, writes));
     }
-    let (name, holder) = add_font_resource(source, page, objects.font)?;
+    let (name, holder) = add_font_resource(source, page, objects.font, credential)?;
     writes.push(holder);
     Ok((name, writes))
 }
@@ -529,7 +551,8 @@ fn embedded_before(
 ) -> Option<Before> {
     let found = |fonts: &[pdf_content::ResourceEntry], named_here| {
         fonts.iter().find_map(|entry| {
-            let objects = crate::new_font::embedded_face(source, entry.reference()?, mark)?;
+            let objects =
+                crate::new_font::embedded_face(source, entry.reference()?, mark, page.credential)?;
             Some(Before {
                 entry: entry.clone(),
                 objects,
@@ -542,7 +565,7 @@ fn embedded_before(
             source,
             share_from?,
             pdf_content::PageContentLimits::default(),
-            b"",
+            page.credential,
         )
         .ok()?;
         found(other.resources.fonts(), false)
@@ -713,7 +736,7 @@ fn see_through(
     let wanted = state_entries(new.opacity);
     let written = |entry: &pdf_content::ResourceEntry| {
         let reference = entry.reference()?;
-        let body = crate::new_font::resolve(source, reference).ok()?;
+        let body = crate::new_font::resolve(source, reference, page.credential).ok()?;
         (body.bytes == wanted.as_bytes()).then_some(reference)
     };
     if let Some(entry) = page
@@ -733,7 +756,7 @@ fn see_through(
             source,
             other,
             pdf_content::PageContentLimits::default(),
-            b"",
+            page.credential,
         )
         .ok()?;
         program.resources.ext_gstates().iter().find_map(written)
@@ -752,8 +775,13 @@ fn see_through(
         });
         object
     };
-    let (name, holder) =
-        crate::new_font::add_resource(document, page.program.page, (b"/ExtGState", "GS"), object)?;
+    let (name, holder) = crate::new_font::add_resource(
+        document,
+        page.program.page,
+        (b"/ExtGState", "GS"),
+        object,
+        page.credential,
+    )?;
     writes.push(holder);
     Ok((name, writes))
 }
@@ -890,6 +918,14 @@ pub(crate) mod tests {
     }
 
     fn face_of(entries: &[(u8, i16, bool)]) -> Arc<GlyphProgram> {
+        let codes: Vec<(u16, i16, bool)> = entries
+            .iter()
+            .map(|(letter, advance, ink)| (u16::from(*letter), *advance, *ink))
+            .collect();
+        face_of_codes(&codes)
+    }
+
+    fn face_of_codes(entries: &[(u16, i16, bool)]) -> Arc<GlyphProgram> {
         let mut glyf = Vec::new();
         let mut loca = Vec::new();
         let mut widths: Vec<u16> = vec![0, 0];
@@ -903,7 +939,7 @@ pub(crate) mod tests {
             loca.extend_from_slice(&u16::try_from(glyf.len() / 2).expect("loca").to_be_bytes());
             widths.push(advance.cast_unsigned());
             widths.push(0);
-            pairs.push((u16::from(*letter), u16::try_from(at + 1).expect("glyph")));
+            pairs.push((*letter, u16::try_from(at + 1).expect("glyph")));
         }
         let count = u16::try_from(entries.len() + 1).expect("glyph count");
         let mut head = vec![0_u8; 54];
@@ -962,14 +998,73 @@ pub(crate) mod tests {
         face_of(&[(b'Z', 500, true)])
     }
 
+    fn wide_face() -> Arc<GlyphProgram> {
+        face_of(&[
+            (b'A', 500, true),
+            (b'B', 250, true),
+            (b' ', 250, false),
+            (b'Y', 400, true),
+        ])
+    }
+
+    fn thai_only_face() -> Arc<GlyphProgram> {
+        face_of_codes(&[(0x0E01, 450, true)])
+    }
+
+    fn thai_and_latin_face() -> Arc<GlyphProgram> {
+        face_of_codes(&[
+            (u16::from(b'A'), 500, true),
+            (u16::from(b'B'), 250, true),
+            (u16::from(b' '), 250, false),
+            (0x0E01, 450, true),
+        ])
+    }
+
     #[derive(Debug)]
     struct OneFace {
         program: Arc<GlyphProgram>,
         other: Arc<GlyphProgram>,
+        wide: Arc<GlyphProgram>,
+        thai: (Arc<GlyphProgram>, Arc<GlyphProgram>),
+    }
+
+    fn named(family: &str, program: &Arc<GlyphProgram>, hash: &str) -> SubstitutedFace {
+        SubstitutedFace {
+            program: Arc::clone(program),
+            identity: Arc::new(pdf_content::FaceIdentity {
+                family: family.to_owned(),
+                subfamily: "Regular".to_owned(),
+                origin: format!("test:{family}"),
+                sha256: hash.to_owned(),
+                face_index: 0,
+                style: pdf_content::FontStyle::default(),
+            }),
+            reason: pdf_content::SubstitutionReason::ExactFamily,
+        }
     }
 
     impl FontProvider for OneFace {
         fn primary_face(&self, request: &FontRequest) -> Option<SubstitutedFace> {
+            if request.family == "Thai Only" {
+                return Some(named("Thai Only", &self.thai.0, "0e010e010e010e01"));
+            }
+            if request.family == "Noto Sans Thai" {
+                return Some(named("Noto Sans Thai", &self.thai.1, "0e01414242410e01"));
+            }
+            if request.family == "Wide Face" {
+                return Some(SubstitutedFace {
+                    program: Arc::clone(&self.wide),
+                    identity: Arc::new(pdf_content::FaceIdentity {
+                        family: "Wide Face".to_owned(),
+                        subfamily: "Regular".to_owned(),
+                        origin: "test:wide".to_owned(),
+                        sha256: "00112233445566ff".to_owned(),
+                        face_index: 0,
+                        style: pdf_content::FontStyle::default(),
+                    }),
+                    reason: pdf_content::SubstitutionReason::ExactFamily,
+                });
+            }
             if request.family == "Other Face" {
                 return Some(SubstitutedFace {
                     program: Arc::clone(&self.other),
@@ -1006,11 +1101,15 @@ pub(crate) mod tests {
             _request: &FontRequest,
             character: char,
         ) -> Option<SubstitutedFace> {
-            self.primary_face(&FontRequest::for_family(
-                "Test Face",
-                pdf_content::FontStyle::default(),
-            ))
-            .filter(|face| super::draws(face, character))
+            ["Test Face", "Wide Face", "Thai Only"]
+                .into_iter()
+                .find_map(|family| {
+                    self.primary_face(&FontRequest::for_family(
+                        family,
+                        pdf_content::FontStyle::default(),
+                    ))
+                    .filter(|face| super::draws(face, character))
+                })
         }
 
         fn description(&self) -> String {
@@ -1022,6 +1121,8 @@ pub(crate) mod tests {
         Arc::new(OneFace {
             program: face(),
             other: other_face(),
+            wide: wide_face(),
+            thai: (thai_only_face(), thai_and_latin_face()),
         })
     }
 
@@ -1354,6 +1455,51 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn text_is_added_to_a_document_that_asks_for_a_password() {
+        let password = b"panpdf";
+        let locked = ByteStore::new(
+            SourceId::new(7),
+            crate::reprotect::rewrite(
+                &document("0 0 0 rg 10 10 20 20 re f"),
+                b"",
+                &crate::reprotect::Wanted::Protected(Box::new(pdf_security::Wanted {
+                    user: password.to_vec(),
+                    owner: b"owner".to_vec(),
+                    allowed: pdf_security::Allowed::default(),
+                })),
+            )
+            .expect("the document is protected"),
+        );
+        let fonts = provider();
+        let plan = plan_command_with_fonts(
+            &locked,
+            &command("AB", [20.0, 100.0, 180.0, 140.0]),
+            password,
+            Some(Arc::clone(&fonts)),
+        )
+        .expect("the text is planned");
+        let after = plan.commit(&locked, password).expect("the plan commits");
+        let reading = read_page(&after, 0, password, Some(&fonts)).expect("the page reads");
+        let glyphs: usize = reading
+            .graph
+            .atoms
+            .iter()
+            .filter_map(|atom| match &atom.kind {
+                PaintAtomKind::Text(text) => Some(text.glyphs.len()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(glyphs, 2, "both letters are drawn");
+        let facts = crate::info::document_facts(&after, password).expect("it describes itself");
+        let protection = facts.protection.expect("it is still protected");
+        assert_eq!(protection.stream_cipher, pdf_security::CipherMethod::Aes256);
+        assert!(
+            read_page(&after, 0, b"", Some(&fonts)).is_err(),
+            "and nothing of it reads without the password"
+        );
+    }
+
+    #[test]
     fn text_wider_than_its_frame_is_laid_out_on_more_lines() {
         let source = document("0 0 0 rg 10 10 20 20 re f");
         let fonts = provider();
@@ -1424,6 +1570,24 @@ pub(crate) mod tests {
             .expect("the text is planned");
         let after = plan.commit(&source, b"").expect("the plan commits");
         assert_eq!(pens(&after, &fonts), vec![(20.0, 130.0)]);
+    }
+
+    #[test]
+    fn a_line_the_family_draws_only_the_start_of_is_set_in_a_face_that_draws_it_all() {
+        let fonts = provider();
+        let face = super::face_in(&fonts, "AY", ("Test Face", false, false))
+            .expect("a face draws the whole line");
+        assert_eq!(face.identity.family, "Wide Face");
+        let face =
+            super::face_in(&fonts, "AB", ("Test Face", false, false)).expect("the family draws it");
+        assert_eq!(face.identity.family, "Test Face");
+        assert!(
+            super::room_for_new_text(&fonts, "AY", ("Test Face", 10.0, false, false), 100.0)
+                .is_ok()
+        );
+        let face = super::face_in(&fonts, "A \u{0E01}", ("Test Face", false, false))
+            .expect("a face of the script draws the whole line");
+        assert_eq!(face.identity.family, "Noto Sans Thai");
     }
 
     #[test]

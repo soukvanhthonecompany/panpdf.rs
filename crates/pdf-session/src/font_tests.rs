@@ -2502,7 +2502,7 @@ fn a_style_keeps_a_row_a_little_past_its_frame_on_its_line() {
 }
 
 #[test]
-fn right_to_left_text_is_refused_until_it_can_be_ordered() {
+fn right_to_left_text_is_written_in_a_span_that_says_it() {
     let source = page_showing("BT /F1 12 Tf 14 TL 10 150 Td (AAAA) Tj ET");
     let provider: Arc<dyn FontProvider> = Arc::new(Covering {
         covering: Some(square_face_with_advance(300, &[('\u{0627}', 1)], 600)),
@@ -2523,8 +2523,17 @@ fn right_to_left_text_is_refused_until_it_can_be_ordered() {
         },
         text: "\u{0627}".to_owned(),
     };
-    let refused = session.plan(&rewrite).expect_err("right to left");
-    assert!(refused.to_string().contains("right-to-left"), "{refused}");
+    let plan = session.plan(&rewrite).expect("right to left is typed");
+    let written = format!("{plan:?}");
+    let span: String = b"/ActualText <FEFF0627> /PanPDF true"
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        written.contains(&span),
+        "no span says what the alef reads as"
+    );
 }
 
 fn two_square_face(first: char, second: char) -> Arc<GlyphProgram> {

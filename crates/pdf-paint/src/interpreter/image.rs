@@ -2,7 +2,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use pdf_bytes::{ByteStore, SourceId};
-use pdf_content::{ImageXObject, Operation, ResourceEntry};
+use pdf_content::{ImageXObject, Operation, ResourceEntry, StringProtection};
 use pdf_syntax::{ObjectKind, ObjectParser, ParseLimits, Reference};
 
 use crate::ccitt;
@@ -124,6 +124,7 @@ impl Interpreter {
             codec_span: decoded.codec_span,
             codec_parameters: decoded.codec_parameters,
             repairs: decoded.repairs,
+            strings: StringProtection::Plain,
         };
         self.record_stream_repairs(operation, &image.repairs);
         let paint = self.image_paint(operation, &entry, &image, 0)?;
@@ -182,7 +183,7 @@ impl Interpreter {
         let color_space = if image_mask.value {
             None
         } else {
-            Some(self.image_color_space(operation, resource, source, entries)?)
+            Some(self.image_color_space(operation, resource, source, image.strings, entries)?)
         };
         let components = color_space
             .as_ref()
@@ -518,6 +519,7 @@ impl Interpreter {
         operation: &Operation,
         resource: &ResourceEntry,
         source: &ByteStore,
+        strings: StringProtection,
         entries: &[pdf_syntax::DictionaryEntry],
     ) -> Result<Derived<ColorSpace>, InterpretError> {
         let object = unique_resource_entry(
@@ -529,36 +531,46 @@ impl Interpreter {
         )?
         .ok_or_else(|| InterpretError::at(operation, InterpretErrorKind::ImageMissingEntry))?;
         let resolved = match object.kind() {
-            ObjectKind::Reference(reference) => {
-                Some(resource.resolve_object(*reference).map_err(|error| {
-                    InterpretError::at(operation, InterpretErrorKind::ImageResource(error.kind()))
-                })?)
-            }
+            ObjectKind::Reference(reference) => Some(
+                resource
+                    .resolve_protected_object(*reference)
+                    .map_err(|error| {
+                        InterpretError::at(
+                            operation,
+                            InterpretErrorKind::ImageResource(error.kind()),
+                        )
+                    })?,
+            ),
             _ => None,
         };
-        let (definition_source, definition, provenance) = match resolved.as_ref() {
-            Some((definition_source, definition)) => (
-                definition_source,
-                definition,
-                vec![object.span(), definition.span()],
-            ),
-            None => (source, object, vec![object.span()]),
-        };
+        let (definition_source, definition_strings, definition, provenance) =
+            match resolved.as_ref() {
+                Some((definition_source, definition, definition_strings)) => (
+                    definition_source,
+                    *definition_strings,
+                    definition,
+                    vec![object.span(), definition.span()],
+                ),
+                None => (source, strings, object, vec![object.span()]),
+            };
         let load_icc = |reference, limit| resource.icc_profile(reference, limit);
         let load_indexed = |reference, limit| resource.indexed_lookup(reference, limit);
         let load_function = |reference, limit| resource.function(reference, limit);
-        let load_object = |reference| resource.resolve_object(reference);
+        let load_object = |reference| resource.resolve_protected_object(reference);
+        let string_plaintext = |strings, bytes| resource.string_plaintext(strings, bytes);
         let context = ColorSpaceParseContext {
             resources: self.resources.as_ref(),
             load_icc: &load_icc,
             load_indexed: &load_indexed,
             load_function: &load_function,
             load_object: &load_object,
+            string_plaintext: &string_plaintext,
             limits: self.limits,
         };
         let space = parse_color_space_definition(
             operation,
             definition_source,
+            definition_strings,
             definition,
             InterpretErrorKind::UnsupportedColorSpace,
             &context,

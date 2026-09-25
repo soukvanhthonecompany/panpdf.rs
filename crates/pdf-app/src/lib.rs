@@ -20,6 +20,7 @@ pub mod ledger;
 pub mod links;
 pub mod live;
 pub mod ocr_choice;
+pub mod ocr_languages;
 pub mod own_files;
 pub mod painter;
 pub mod pieces;

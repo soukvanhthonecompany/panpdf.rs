@@ -5,8 +5,9 @@ use pdf_bytes::ByteStore;
 use pdf_syntax::{NumberKind, Object, ObjectKind, RecoverLimits, Recovered, Reference, Repair};
 
 use super::{
-    PageContentError, PageContentErrorKind, PageContentLimits, PageTree, UnreadableAnnotation,
-    dictionary, entry, find_page, open_page_tree, open_page_tree_recovering, walk_page_tree,
+    PageContentError, PageContentErrorKind, PageContentLimits, PageTree, StringProtection,
+    UnreadableAnnotation, dictionary, entry, find_page, open_page_tree, open_page_tree_recovering,
+    walk_page_tree,
 };
 
 const MAX_LINKS: usize = 65_536;
@@ -165,13 +166,7 @@ pub fn open_link_resolver_tolerating_damage(
 struct Found {
     source: ByteStore,
     value: Object,
-    strings: Strings,
-}
-
-#[derive(Clone, Copy)]
-enum Strings {
-    Plain,
-    EncryptedWith(Reference),
+    strings: StringProtection,
 }
 
 impl LinkResolver {
@@ -656,12 +651,10 @@ impl LinkResolver {
         let found = self.follow(holder, value).ok()?;
         let bytes =
             pdf_syntax::decode_string(&found.source, &found.value, MAX_STRING_BYTES).ok()?;
-        match (found.strings, self.tree.security.as_ref()) {
-            (Strings::EncryptedWith(reference), Some(security)) => {
-                security.decrypt_string(reference, &bytes).ok()
-            }
-            _ => Some(bytes),
-        }
+        found
+            .strings
+            .plaintext(self.tree.security.as_deref(), bytes)
+            .ok()
     }
 
     fn catalog(&self) -> Option<Found> {
@@ -674,15 +667,10 @@ impl LinkResolver {
             .index
             .resolve_object(&self.source, reference, self.limits.resolve)
             .map_err(|error| PageContentError::new(PageContentErrorKind::Resolve(error)))?;
-        let strings = if self.tree.security.is_none() || resolved.is_compressed() {
-            Strings::Plain
-        } else {
-            Strings::EncryptedWith(reference)
-        };
         Ok(Found {
             source: resolved.source().clone(),
             value: resolved.value().clone(),
-            strings,
+            strings: StringProtection::of(&resolved),
         })
     }
 

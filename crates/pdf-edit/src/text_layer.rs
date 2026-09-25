@@ -43,21 +43,22 @@ pub(crate) fn plan_text_layer(
     layer: &TextLayer,
     share_from: Option<usize>,
 ) -> Result<Plan, SpikeError> {
+    let credential = page.credential;
     let (_, turn) = crate::stamp::shown(&page.program.geometry)?;
     let placed = placed(layer, turn)?;
 
     let mut next = crate::block_rewrite::next_object_number(source)?;
     let mut writes = Vec::new();
-    let found = layer_descendant(source, &page.program.resources).or_else(|| {
+    let found = layer_descendant((source, credential), &page.program.resources).or_else(|| {
         let other = share_from?;
         let program = pdf_content::load_page_program_with_password(
             source,
             other,
             pdf_content::PageContentLimits::default(),
-            b"",
+            credential,
         )
         .ok()?;
-        layer_descendant(source, &program.resources)
+        layer_descendant((source, credential), &program.resources)
     });
     let descendant = if let Some(descendant) = found {
         descendant
@@ -91,11 +92,13 @@ pub(crate) fn plan_text_layer(
             decoded: crate::new_font::to_unicode(&meaning).into_bytes(),
         },
     });
-    let (name, holder) = add_font_resource(source, page.program.page, font)?;
+    let (name, holder) = add_font_resource(source, page.program.page, font, credential)?;
     writes.push(holder);
 
-    let document = crate::block_rewrite::commit_writes(source, &writes, page.restrictions)?;
-    let carrying = crate::spike_move_text::read_page(&document, page_index, b"", page.fonts)?;
+    let document =
+        crate::block_rewrite::commit_writes(source, &writes, (credential, page.restrictions))?;
+    let carrying =
+        crate::spike_move_text::read_page(&document, page_index, credential, page.fonts)?;
     let stream = carrying
         .program
         .streams
@@ -352,34 +355,34 @@ fn descendant_writes(
 }
 
 fn layer_descendant(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     resources: &pdf_content::PageResources,
 ) -> Option<Reference> {
     resources.fonts().iter().find_map(|named| {
-        let top = resolve(source, named.reference()?).ok()?;
+        let top = resolve(source, named.reference()?, credential).ok()?;
         if !pdf_syntax::decode_name(&top.source, entry(&top, &top.value, b"/BaseFont")?)
             .is_ok_and(|base| base == format!("/{FACE_NAME}").as_bytes())
         {
             return None;
         }
         let descendant = only_reference(&top, &top.value, b"/DescendantFonts")?;
-        is_layer_descendant(source, descendant).then_some(descendant)
+        is_layer_descendant((source, credential), descendant).then_some(descendant)
     })
 }
 
-fn is_layer_descendant(source: &ByteStore, descendant: Reference) -> bool {
+fn is_layer_descendant((source, credential): (&ByteStore, &[u8]), descendant: Reference) -> bool {
     let check = || -> Option<bool> {
-        let cid = resolve(source, descendant).ok()?;
+        let cid = resolve(source, descendant, credential).ok()?;
         let descriptor = only_reference(&cid, &cid.value, b"/FontDescriptor")?;
         let map = only_reference(&cid, &cid.value, b"/CIDToGIDMap")?;
-        let described = resolve(source, descriptor).ok()?;
+        let described = resolve(source, descriptor, credential).ok()?;
         let program = only_reference(&described, &described.value, b"/FontFile2")?;
         let face = pdf_content::glyphless().ok()?;
         Some(
             cid.bytes == descendant_body(descriptor, map).as_bytes()
                 && described.bytes == descriptor_body(program).as_bytes()
-                && crate::previous::decoded_stream(source, program, b"").ok()? == face
-                && crate::previous::decoded_stream(source, map, b"").ok()? == cid_map(),
+                && crate::previous::decoded_stream(source, program, credential).ok()? == face
+                && crate::previous::decoded_stream(source, map, credential).ok()? == cid_map(),
         )
     };
     check().unwrap_or(false)
@@ -553,7 +556,7 @@ mod tests {
     }
 
     fn descendant_of(source: &ByteStore, font: pdf_syntax::Reference) -> pdf_syntax::Reference {
-        let top = crate::new_font::resolve(source, font).expect("the font reads");
+        let top = crate::new_font::resolve(source, font, b"").expect("the font reads");
         super::only_reference(&top, &top.value, b"/DescendantFonts").expect("one descendant")
     }
 

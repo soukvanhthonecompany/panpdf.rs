@@ -76,6 +76,7 @@ pub enum Request {
         from: PathBuf,
         pages: Option<Vec<usize>>,
         after: usize,
+        password: Option<String>,
     },
     Undo,
     Redo,
@@ -176,6 +177,7 @@ pub fn parse(name: &str, arguments: &Json) -> Result<Request, String> {
                 None
             },
             after: args.after("after_page")?,
+            password: args.text("password").map(str::to_owned),
         }),
         "undo" => Ok(Request::Undo),
         "redo" => Ok(Request::Redo),

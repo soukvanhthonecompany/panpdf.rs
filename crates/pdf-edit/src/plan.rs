@@ -116,6 +116,26 @@ impl FixedPoint {
     }
 }
 
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Password(pub Vec<u8>);
+
+impl Password {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Password {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(if self.0.is_empty() {
+            "Password(none)"
+        } else {
+            "Password(..)"
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     MoveTextRun {
@@ -370,6 +390,7 @@ pub enum Command {
         beside: usize,
         before: bool,
         document: std::sync::Arc<[u8]>,
+        password: Password,
         pages: Vec<usize>,
     },
     PlaceObject {
@@ -383,7 +404,7 @@ pub enum Command {
         copied: Copied,
         dx: f64,
         dy: f64,
-        elsewhere: Option<pdf_bytes::ByteStore>,
+        elsewhere: Option<(pdf_bytes::ByteStore, Password)>,
     },
 }
 
@@ -610,6 +631,7 @@ pub struct BlockOutcome {
     pub empty: bool,
     pub cropped: bool,
     pub brought_in: Vec<String>,
+    pub stood_in: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

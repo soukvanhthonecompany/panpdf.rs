@@ -1,5 +1,5 @@
 use pdf_bytes::ByteStore;
-use pdf_content::{PageContentLimits, load_page_program_strict, page_references_with_password};
+use pdf_content::{PageContentLimits, page_references_with_password};
 use pdf_syntax::{Object, ObjectKind, Reference};
 
 use crate::new_font::{Body, entry, resolve};
@@ -29,8 +29,8 @@ pub(crate) fn refused(reason: &'static str) -> SpikeError {
     SpikeError::RetypeUnsupported(reason)
 }
 
-pub(crate) fn order(source: &ByteStore) -> Result<Vec<Reference>, SpikeError> {
-    page_references_with_password(source, PageContentLimits::default(), b"")
+pub(crate) fn order(source: &ByteStore, credential: &[u8]) -> Result<Vec<Reference>, SpikeError> {
+    page_references_with_password(source, PageContentLimits::default(), credential)
         .map_err(|_| refused("this document's pages cannot be listed"))
 }
 
@@ -43,12 +43,12 @@ pub(crate) fn plan_blank_page(
     if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
         return Err(refused("a page has a width and a height"));
     }
-    let before = order(source)?;
+    let before = order(source, page.credential)?;
     if blank.beside >= before.len() {
         return Err(refused("a page cannot go beside a page that is not there"));
     }
     let neighbour = page.program.page;
-    let mut tree = TreeEdit::new(source);
+    let mut tree = TreeEdit::new(source, page.credential);
     let parent = tree.parent_of(neighbour)?;
 
     let leaf = crate::block_rewrite::next_object_number(source)?;
@@ -80,10 +80,16 @@ pub(crate) fn plan_blank_page(
     writes.extend(tree.writes()?);
 
     let change = PageChange::Added(vec![blank.at()]);
-    let document = crate::block_rewrite::commit_writes(source, &writes, page.restrictions)?;
-    prove_order(&before, &document, &change, &[added])?;
-    let put = load_page_program_strict(&document, blank.at(), PageContentLimits::default())
-        .map_err(|_| refused("the page added does not read"))?;
+    let document =
+        crate::block_rewrite::commit_writes(source, &writes, (page.credential, page.restrictions))?;
+    prove_order(&before, (&document, page.credential), &change, &[added])?;
+    let put = pdf_content::load_page_program_with_password(
+        &document,
+        blank.at(),
+        PageContentLimits::default(),
+        page.credential,
+    )
+    .map_err(|_| refused("the page added does not read"))?;
     #[expect(clippy::float_cmp, reason = "a written number read back is the number")]
     let sized = put.geometry.media_box == [0.0, 0.0, width, height];
     if !sized {
@@ -110,7 +116,7 @@ pub(crate) fn plan_remove_pages(
     page: PlannerPage<'_>,
     pages: &[usize],
 ) -> Result<Plan, SpikeError> {
-    let before = order(source)?;
+    let before = order(source, page.credential)?;
     let gone = named(pages, before.len())?;
     if gone.len() >= before.len() {
         return Err(refused("a document keeps at least one page"));
@@ -118,14 +124,15 @@ pub(crate) fn plan_remove_pages(
     if before.get(gone[0]) != Some(&page.program.page) {
         return Err(refused("the page to take out is not the page read"));
     }
-    let mut tree = TreeEdit::new(source);
+    let mut tree = TreeEdit::new(source, page.credential);
     for index in &gone {
         tree.remove(before[*index])?;
     }
     let writes = tree.writes()?;
     let change = PageChange::Removed(gone);
-    let document = crate::block_rewrite::commit_writes(source, &writes, page.restrictions)?;
-    prove_order(&before, &document, &change, &[])?;
+    let document =
+        crate::block_rewrite::commit_writes(source, &writes, (page.credential, page.restrictions))?;
+    prove_order(&before, (&document, page.credential), &change, &[])?;
     Ok(structural(writes, change, first_stream(&page)))
 }
 
@@ -134,7 +141,7 @@ pub(crate) fn plan_move_pages(
     page: PlannerPage<'_>,
     (pages, to): (&[usize], usize),
 ) -> Result<Plan, SpikeError> {
-    let before = order(source)?;
+    let before = order(source, page.credential)?;
     named(pages, before.len())?;
     if to + pages.len() > before.len() {
         return Err(refused("pages cannot move past the end of the document"));
@@ -155,7 +162,7 @@ pub(crate) fn plan_move_pages(
     if reorder.iter().enumerate().all(|(old, new)| old == *new) {
         return Err(refused("the pages are already there"));
     }
-    let mut tree = TreeEdit::new(source);
+    let mut tree = TreeEdit::new(source, page.credential);
     for moved in pages {
         tree.remove(before[*moved])?;
     }
@@ -175,8 +182,9 @@ pub(crate) fn plan_move_pages(
     }
     let writes = tree.writes()?;
     let change = PageChange::Reordered(reorder);
-    let document = crate::block_rewrite::commit_writes(source, &writes, page.restrictions)?;
-    prove_order(&before, &document, &change, &[])?;
+    let document =
+        crate::block_rewrite::commit_writes(source, &writes, (page.credential, page.restrictions))?;
+    prove_order(&before, (&document, page.credential), &change, &[])?;
     Ok(structural(writes, change, first_stream(&page)))
 }
 
@@ -197,30 +205,37 @@ pub(crate) fn plan_rotate_pages(
             "a page turned all the way round is the page it was",
         ));
     }
-    let before = order(source)?;
+    let before = order(source, page.credential)?;
     let turned = named(pages, before.len())?;
-    let geometries =
-        pdf_content::page_geometries_with_password(source, PageContentLimits::default(), b"")
-            .map_err(|_| refused("this document's pages cannot be laid out"))?;
+    let geometries = pdf_content::page_geometries_with_password(
+        source,
+        PageContentLimits::default(),
+        page.credential,
+    )
+    .map_err(|_| refused("this document's pages cannot be laid out"))?;
     let mut writes = Vec::new();
     let mut wanted = Vec::new();
     for index in &turned {
         let now = i32::from(geometries[*index].rotate);
         let turn = (now + 90 * quarter_turns).rem_euclid(360);
-        let body = resolve(source, before[*index])?;
+        let body = resolve(source, before[*index], page.credential)?;
         writes.push(match entry(&body, &body.value, b"/Rotate") {
             Some(value) => rewritten(&body, &[(value, turn.to_string())])?,
             None => with_entry(&body, &format!("/Rotate {turn}"))?,
         });
         wanted.push(turn);
     }
-    let document = crate::block_rewrite::commit_writes(source, &writes, page.restrictions)?;
-    if order(&document)? != before {
+    let document =
+        crate::block_rewrite::commit_writes(source, &writes, (page.credential, page.restrictions))?;
+    if order(&document, page.credential)? != before {
         return Err(refused("turning a page moved the pages"));
     }
-    let shown =
-        pdf_content::page_geometries_with_password(&document, PageContentLimits::default(), b"")
-            .map_err(|_| refused("the document with the page turned does not read"))?;
+    let shown = pdf_content::page_geometries_with_password(
+        &document,
+        PageContentLimits::default(),
+        page.credential,
+    )
+    .map_err(|_| refused("the document with the page turned does not read"))?;
     for (index, turn) in turned.iter().zip(&wanted) {
         if shown.get(*index).map(|geometry| i32::from(geometry.rotate)) != Some(*turn) {
             return Err(refused("a page is not at the turn asked for"));
@@ -280,11 +295,11 @@ fn structural(writes: Vec<PlannedWrite>, change: PageChange, target: Reference) 
 
 pub(crate) fn prove_order(
     before: &[Reference],
-    document: &ByteStore,
+    (document, credential): (&ByteStore, &[u8]),
     change: &PageChange,
     added: &[Reference],
 ) -> Result<(), SpikeError> {
-    let after = order(document)
+    let after = order(document, credential)
         .map_err(|_| refused("the document with the pages changed does not read"))?;
     let mut wanted: Vec<Option<Reference>> = vec![None; after.len()];
     for (index, page) in before.iter().enumerate() {
@@ -324,15 +339,17 @@ pub(crate) fn prove_order(
 
 pub(crate) struct TreeEdit<'s> {
     source: &'s ByteStore,
+    credential: &'s [u8],
     nodes: Vec<(Reference, Option<Vec<Reference>>, i64)>,
     parents: Vec<(Reference, Reference)>,
     made: Vec<(Reference, Reference)>,
 }
 
 impl<'s> TreeEdit<'s> {
-    pub(crate) const fn new(source: &'s ByteStore) -> Self {
+    pub(crate) const fn new(source: &'s ByteStore, credential: &'s [u8]) -> Self {
         Self {
             source,
+            credential,
             nodes: Vec::new(),
             parents: Vec::new(),
             made: Vec::new(),
@@ -349,7 +366,7 @@ impl<'s> TreeEdit<'s> {
         {
             return Ok(*node);
         }
-        let body = resolve(self.source, object)?;
+        let body = resolve(self.source, object, self.credential)?;
         match entry(&body, &body.value, b"/Parent").map(Object::kind) {
             Some(ObjectKind::Reference(reference)) => Ok(*reference),
             _ => Err(refused("a page does not say which node holds it")),
@@ -374,7 +391,7 @@ impl<'s> TreeEdit<'s> {
         if let Some(kids) = self.slot(node).1.clone() {
             return Ok(kids);
         }
-        let body = resolve(self.source, node)?;
+        let body = resolve(self.source, node, self.credential)?;
         let unreadable = || refused("this document's page tree cannot be read");
         let kids = entry(&body, &body.value, b"/Kids").ok_or_else(unreadable)?;
         let ObjectKind::Array(values) = kids.kind() else {
@@ -454,7 +471,7 @@ impl<'s> TreeEdit<'s> {
             if kids.is_none() && *gained == 0 {
                 continue;
             }
-            let body = resolve(self.source, *node)?;
+            let body = resolve(self.source, *node, self.credential)?;
             let mut edits: Vec<(&Object, String)> = Vec::new();
             if let Some(kids) = kids {
                 let value = entry(&body, &body.value, b"/Kids")
@@ -474,7 +491,7 @@ impl<'s> TreeEdit<'s> {
             writes.push(rewritten(&body, &edits)?);
         }
         for (page, node) in &self.parents {
-            let body = resolve(self.source, *page)?;
+            let body = resolve(self.source, *page, self.credential)?;
             let value = entry(&body, &body.value, b"/Parent")
                 .ok_or_else(|| refused("a page does not say which node holds it"))?;
             writes.push(rewritten(
@@ -606,6 +623,57 @@ mod tests {
                     .object_number()
             })
             .collect()
+    }
+
+    #[test]
+    fn the_pages_of_a_document_that_asks_for_a_password_are_changed() {
+        let password = b"panpdf";
+        let locked = ByteStore::new(
+            SourceId::new(7),
+            crate::reprotect::rewrite(
+                &two_pages(),
+                b"",
+                &crate::reprotect::Wanted::Protected(Box::new(pdf_security::Wanted {
+                    user: password.to_vec(),
+                    owner: b"owner".to_vec(),
+                    allowed: pdf_security::Allowed::default(),
+                })),
+            )
+            .expect("the document is protected"),
+        );
+        let count = |source: &ByteStore| {
+            pdf_content::page_references_with_password(
+                source,
+                PageContentLimits::default(),
+                password,
+            )
+            .expect("the pages are listed")
+            .len()
+        };
+        for (command, pages) in [
+            (
+                Command::RotatePages {
+                    pages: vec![0],
+                    quarter_turns: 1,
+                },
+                2,
+            ),
+            (added(0, false, A4), 3),
+            (Command::RemovePages { pages: vec![1] }, 1),
+        ] {
+            let plan = plan_command(&locked, &command, password).expect("the change is planned");
+            let after = plan.commit(&locked, password).expect("commits");
+            assert_eq!(count(&after), pages, "{command:?}");
+            assert!(
+                pdf_content::page_references_with_password(
+                    &after,
+                    PageContentLimits::default(),
+                    b""
+                )
+                .is_err(),
+                "and nothing of it reads without the password"
+            );
+        }
     }
 
     fn added(beside: usize, before: bool, size: [f64; 2]) -> Command {

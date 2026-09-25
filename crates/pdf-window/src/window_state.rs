@@ -237,8 +237,12 @@ pub(crate) enum JobNews {
 
 pub(crate) struct OcrDraft {
     pub(crate) engine: Option<pdf_ocr::Tesseract>,
-    pub(crate) languages: Vec<(String, bool)>,
+    pub(crate) ticked: Vec<String>,
     pub(crate) here: Vec<String>,
+    pub(crate) own: Vec<String>,
+    pub(crate) system: Vec<String>,
+    pub(crate) list: Vec<pdf_app::ocr_languages::Language>,
+    pub(crate) search: String,
     pub(crate) choice: pdf_app::ocr_choice::Choice,
     pub(crate) which: OcrWhich,
     pub(crate) range: String,
@@ -317,6 +321,7 @@ pub(crate) struct Clipboard {
     pub(crate) marker: String,
     pub(crate) bounds: [f64; 4],
     pub(crate) from: pdf_bytes::ByteStore,
+    pub(crate) opens: pdf_edit::Password,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -617,6 +622,7 @@ pub(crate) struct Typing {
     pub(crate) at: Option<(usize, usize)>,
     pub(crate) size: Option<String>,
     pub(crate) next: Option<(usize, pdf_edit::TextStyle)>,
+    pub(crate) carry: Option<pdf_edit::TextStyle>,
 }
 
 impl Typing {

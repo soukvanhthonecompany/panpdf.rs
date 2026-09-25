@@ -86,13 +86,9 @@ pub(crate) fn plan_new_field(
     page_index: usize,
     new: &NewField<'_>,
 ) -> Result<Plan, SpikeError> {
+    let credential = page.credential;
     let rect = checked_rect(new)?;
-    let reader = Reader::open(source, b"")?;
-    if reader.is_protected() {
-        return Err(refused(
-            "this document is protected, and a field written into it would not be readable",
-        ));
-    }
+    let reader = Reader::open(source, credential)?;
     let named = crate::form::named_nodes(&reader);
     let name = match new.name {
         Some(name) => checked_name(name)?.to_owned(),
@@ -278,13 +274,17 @@ pub(crate) fn plan_new_field(
         });
     }
 
-    writes.extend(listed_on_page(source, page_reference, &[widget])?);
+    writes.extend(listed_on_page(
+        (source, credential),
+        page_reference,
+        &[widget],
+    )?);
     if let Some(group) = joining {
-        writes.push(added_kid(source, group, widget)?);
+        writes.push(added_kid((source, credential), group, widget)?);
     } else {
         let helvetica = next();
         writes.extend(listed_in_form(
-            source,
+            (source, credential),
             &reader,
             group.unwrap_or(widget),
             helvetica,
@@ -308,7 +308,7 @@ pub(crate) fn plan_new_field(
         _ => {}
     }
     prove_added(
-        source,
+        (source, credential),
         &writes,
         (page_index, page_reference, widget),
         (new, &name, rect),
@@ -389,7 +389,7 @@ fn new_look(width: f64, height: f64, round: bool) -> Look {
 }
 
 pub(crate) fn listed_on_page(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     page: Reference,
     widgets: &[Reference],
 ) -> Result<Vec<PlannedWrite>, SpikeError> {
@@ -397,7 +397,7 @@ pub(crate) fn listed_on_page(
         return Ok(Vec::new());
     }
     let written: Vec<String> = widgets.iter().copied().map(reference_text).collect();
-    let mut edit = ObjectEdit::of(source, page)?;
+    let mut edit = ObjectEdit::of(source, page, credential)?;
     let dictionary = edit.value();
     let annots = crate::object_edit::entry(&edit.body, &dictionary, b"/Annots").cloned();
     match annots.as_ref().map(pdf_syntax::Object::kind) {
@@ -407,7 +407,7 @@ pub(crate) fn listed_on_page(
             edit.append(&annots, &written.join(" "))?;
         }
         Some(ObjectKind::Reference(list)) => {
-            let mut held = ObjectEdit::of(source, *list)?;
+            let mut held = ObjectEdit::of(source, *list, credential)?;
             let array = held.value();
             held.append(&array, &written.join(" "))?;
             return Ok(vec![held.written()?]);
@@ -418,11 +418,11 @@ pub(crate) fn listed_on_page(
 }
 
 fn added_kid(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     group: Reference,
     widget: Reference,
 ) -> Result<PlannedWrite, SpikeError> {
-    let mut edit = ObjectEdit::of(source, group)?;
+    let mut edit = ObjectEdit::of(source, group, credential)?;
     let dictionary = edit.value();
     let kids = crate::object_edit::entry(&edit.body, &dictionary, b"/Kids")
         .cloned()
@@ -430,7 +430,7 @@ fn added_kid(
     match kids.kind() {
         ObjectKind::Array(_) => edit.append(&kids, &reference_text(widget))?,
         ObjectKind::Reference(list) => {
-            let mut held = ObjectEdit::of(source, *list)?;
+            let mut held = ObjectEdit::of(source, *list, credential)?;
             let array = held.value();
             held.append(&array, &reference_text(widget))?;
             return held.written();
@@ -441,7 +441,7 @@ fn added_kid(
 }
 
 fn listed_in_form(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     reader: &Reader,
     field: Reference,
     helvetica: Reference,
@@ -449,7 +449,7 @@ fn listed_in_form(
     let catalog = reader
         .catalog_reference()
         .ok_or_else(|| refused("this document's catalog cannot be read"))?;
-    let mut edit = ObjectEdit::of(source, catalog)?;
+    let mut edit = ObjectEdit::of(source, catalog, credential)?;
     let dictionary = edit.value();
     let font = || PlannedWrite {
         reference: helvetica,
@@ -479,7 +479,7 @@ fn listed_in_form(
             (edit, form)
         }
         Some(ObjectKind::Reference(held)) => {
-            let edit = ObjectEdit::of(source, *held)?;
+            let edit = ObjectEdit::of(source, *held, credential)?;
             let form = edit.value();
             (edit, form)
         }
@@ -497,7 +497,7 @@ fn listed_in_form(
             edit.append(&fields, &reference_text(field))?;
         }
         Some(ObjectKind::Reference(list)) => {
-            let mut held = ObjectEdit::of(source, *list)?;
+            let mut held = ObjectEdit::of(source, *list, credential)?;
             let array = held.value();
             held.append(&array, &reference_text(field))?;
             extra.push(held.written()?);
@@ -517,9 +517,13 @@ fn with_text_drawn(
     (widget, value): (Reference, &FieldValue),
     writes: Vec<PlannedWrite>,
 ) -> Result<Vec<PlannedWrite>, SpikeError> {
-    let document =
-        crate::block_rewrite::commit_writes(source, &writes, crate::Restrictions::SetAside)?;
-    let field = crate::form::fields_of_page(&document, page.program.page, b"")?
+    let credential = page.credential;
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        &writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    let field = crate::form::fields_of_page(&document, page.program.page, credential)?
         .into_iter()
         .find(|field| field.widget == widget)
         .ok_or_else(|| refused("the button added is not read back as a field of the form"))?;
@@ -564,14 +568,17 @@ pub(crate) fn one_write_each(writes: Vec<PlannedWrite>) -> Result<Vec<PlannedWri
 }
 
 fn prove_added(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     writes: &[PlannedWrite],
     (page_index, page, widget): (usize, Reference, Reference),
     (new, name, rect): (&NewField<'_>, &str, [f64; 4]),
 ) -> Result<(), SpikeError> {
-    let document =
-        crate::block_rewrite::commit_writes(source, writes, crate::Restrictions::SetAside)?;
-    let fields = crate::form::fields_of_page(&document, page, b"")?;
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    let fields = crate::form::fields_of_page(&document, page, credential)?;
     let found = fields
         .iter()
         .find(|field| field.widget == widget)
@@ -593,7 +600,7 @@ fn prove_added(
             "the field added does not read back as the field asked for",
         ));
     }
-    let reading = crate::spike_move_text::read_page(&document, page_index, b"", None)?;
+    let reading = crate::spike_move_text::read_page(&document, page_index, credential, None)?;
     let painted = pdf_paint::interpret_annotations(
         &reading.program.annotations,
         reading.program.page,
@@ -617,27 +624,31 @@ pub(crate) fn plan_remove_field(
     page_index: usize,
     widget: Reference,
 ) -> Result<Plan, SpikeError> {
-    let reader = Reader::open(source, b"")?;
-    if reader.is_protected() {
-        return Err(refused(
-            "this document is protected, and a field cannot be taken out of it yet",
-        ));
-    }
+    let credential = page.credential;
+    let reader = Reader::open(source, credential)?;
     let page_reference = page.program.page;
-    let before = crate::form::fields_of_page(source, page_reference, b"")?;
+    let before = crate::form::fields_of_page(source, page_reference, credential)?;
     let field = before
         .iter()
         .find(|field| field.widget == widget)
         .ok_or_else(|| refused("this is not a field of the document's form"))?;
-    let mut writes = vec![unlisted_on_page(source, page_reference, widget)?];
+    let mut writes = vec![unlisted_on_page(
+        (source, credential),
+        page_reference,
+        widget,
+    )?];
     if field.field == widget {
-        writes.push(unlisted_in_form(source, &reader, widget)?);
+        writes.push(unlisted_in_form((source, credential), &reader, widget)?);
     } else {
         let buttons = kids_of(&reader, Some(field.field));
         if buttons <= 1 {
-            writes.push(unlisted_in_form(source, &reader, field.field)?);
+            writes.push(unlisted_in_form(
+                (source, credential),
+                &reader,
+                field.field,
+            )?);
         } else {
-            let mut edit = ObjectEdit::of(source, field.field)?;
+            let mut edit = ObjectEdit::of(source, field.field, credential)?;
             let dictionary = edit.value();
             let kids = crate::object_edit::entry(&edit.body, &dictionary, b"/Kids")
                 .cloned()
@@ -648,7 +659,7 @@ pub(crate) fn plan_remove_field(
                     writes.push(edit.written()?);
                 }
                 ObjectKind::Reference(list) => {
-                    let mut held = ObjectEdit::of(source, *list)?;
+                    let mut held = ObjectEdit::of(source, *list, credential)?;
                     let array = held.value();
                     held.remove(&array, widget)?;
                     writes.push(held.written()?);
@@ -658,9 +669,12 @@ pub(crate) fn plan_remove_field(
         }
     }
     let writes = one_write_each(writes)?;
-    let document =
-        crate::block_rewrite::commit_writes(source, &writes, crate::Restrictions::SetAside)?;
-    let after = crate::form::fields_of_page(&document, page_reference, b"")?;
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        &writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    let after = crate::form::fields_of_page(&document, page_reference, credential)?;
     if after.iter().any(|left| left.widget == widget) || after.len() + 1 != before.len() {
         return Err(refused("the field is still read on the page"));
     }
@@ -682,11 +696,11 @@ pub(crate) fn plan_remove_field(
 }
 
 pub(crate) fn unlisted_on_page(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     page: Reference,
     widget: Reference,
 ) -> Result<PlannedWrite, SpikeError> {
-    let edit = ObjectEdit::of(source, page)?;
+    let edit = ObjectEdit::of(source, page, credential)?;
     let dictionary = edit.value();
     let annots = crate::object_edit::entry(&edit.body, &dictionary, b"/Annots")
         .cloned()
@@ -694,7 +708,7 @@ pub(crate) fn unlisted_on_page(
     let (mut edit, array) = match annots.kind() {
         ObjectKind::Array(_) => (edit, annots),
         ObjectKind::Reference(list) => {
-            let held = ObjectEdit::of(source, *list)?;
+            let held = ObjectEdit::of(source, *list, credential)?;
             let array = held.value();
             (held, array)
         }
@@ -707,13 +721,13 @@ pub(crate) fn unlisted_on_page(
 }
 
 fn unlisted_in_form(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     reader: &Reader,
     field: Reference,
 ) -> Result<PlannedWrite, SpikeError> {
     let unreadable = || refused("this document's form cannot be read");
     let catalog = reader.catalog_reference().ok_or_else(unreadable)?;
-    let edit = ObjectEdit::of(source, catalog)?;
+    let edit = ObjectEdit::of(source, catalog, credential)?;
     let dictionary = edit.value();
     let form = crate::object_edit::entry(&edit.body, &dictionary, b"/AcroForm")
         .cloned()
@@ -721,7 +735,7 @@ fn unlisted_in_form(
     let (edit, form) = match form.kind() {
         ObjectKind::Dictionary(_) => (edit, form),
         ObjectKind::Reference(held) => {
-            let edit = ObjectEdit::of(source, *held)?;
+            let edit = ObjectEdit::of(source, *held, credential)?;
             let form = edit.value();
             (edit, form)
         }
@@ -733,7 +747,7 @@ fn unlisted_in_form(
     let (mut edit, array) = match fields.kind() {
         ObjectKind::Array(_) => (edit, fields),
         ObjectKind::Reference(list) => {
-            let held = ObjectEdit::of(source, *list)?;
+            let held = ObjectEdit::of(source, *list, credential)?;
             let array = held.value();
             (held, array)
         }
@@ -809,7 +823,11 @@ pub(crate) mod tests {
             b"",
             Some(crate::new_text::tests::provider()),
         )?;
-        crate::block_rewrite::commit_writes(source, plan.writes(), crate::Restrictions::Respect)
+        crate::block_rewrite::commit_writes(
+            source,
+            plan.writes(),
+            (b"", crate::Restrictions::Respect),
+        )
     }
 
     fn fields(source: &ByteStore) -> Vec<FormField> {
@@ -1010,7 +1028,7 @@ pub(crate) mod tests {
         let added = crate::block_rewrite::commit_writes(
             &source,
             plan.writes(),
-            crate::Restrictions::Respect,
+            (b"", crate::Restrictions::Respect),
         )
         .expect("added");
         assert_eq!(
@@ -1031,7 +1049,7 @@ pub(crate) mod tests {
         let undone = crate::block_rewrite::commit_writes(
             &added,
             back.writes(),
-            crate::Restrictions::Respect,
+            (b"", crate::Restrictions::Respect),
         )
         .expect("undone");
         assert!(fields(&undone).is_empty());

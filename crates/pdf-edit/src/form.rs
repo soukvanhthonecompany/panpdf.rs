@@ -294,10 +294,6 @@ impl Reader {
         })
     }
 
-    pub(crate) fn is_protected(&self) -> bool {
-        self.security.is_some()
-    }
-
     pub(crate) fn at(&self, reference: Reference) -> Option<Found> {
         let resolved = self
             .index
@@ -892,9 +888,7 @@ fn quadding_of(reader: &Reader, node: &Found) -> Quadding {
 }
 
 fn appearance_of(reader: &Reader, node: &Found) -> Vec<u8> {
-    let from = |found: &Found| {
-        pdf_syntax::decode_string(&found.source, &found.value, MOST_STRING_BYTES).ok()
-    };
+    let from = |found: &Found| reader.bytes(found);
     if let Some(own) = reader.inherited(node, b"/DA").as_ref().and_then(from) {
         return own;
     }

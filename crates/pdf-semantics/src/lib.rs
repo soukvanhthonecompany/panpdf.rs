@@ -933,12 +933,13 @@ impl SemanticIndex {
             &[pdf_paint::FormInvocation],
             &[pdf_paint::PatternInvocation],
         )> = Vec::new();
+        let spoken = graph.actual_texts();
         for (position, atom) in graph.atoms.iter().enumerate() {
             let PaintAtomKind::Text(text) = &atom.kind else {
                 continue;
             };
             let before = index.clusters.len();
-            index.extend_from_run(position, text);
+            index.extend_from_run(position, text, spoken.contains_key(&position));
             if index.clusters.len() == before {
                 index.report.runs_without_glyphs += 1;
             } else {
@@ -2563,7 +2564,7 @@ impl SemanticIndex {
         Ok(spans)
     }
 
-    fn extend_from_run(&mut self, atom: usize, text: &TextShowPaint) {
+    fn extend_from_run(&mut self, atom: usize, text: &TextShowPaint, whole: bool) {
         let Some(direction) = advance_direction(text) else {
             return;
         };
@@ -2606,7 +2607,7 @@ impl SemanticIndex {
                 }
             };
             match open.as_mut() {
-                Some(current) if evidence.joins_previous() => {
+                Some(current) if whole || evidence.joins_previous() => {
                     current.glyphs.end = position + 1;
                     current.advance += glyph_advance(ctm, glyph);
                     current.bounds = text.outline_bounds_in(current.glyphs.clone());

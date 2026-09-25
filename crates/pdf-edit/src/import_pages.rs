@@ -18,6 +18,7 @@ pub(crate) struct Imported<'a> {
     pub beside: usize,
     pub before: bool,
     pub document: &'a Arc<[u8]>,
+    pub password: &'a [u8],
     pub pages: &'a [usize],
 }
 
@@ -30,18 +31,13 @@ pub(crate) fn plan_insert_pages(
         SourceId::new(source.id().get().wrapping_add(0x5157)),
         Arc::clone(imported.document),
     );
-    let (index, protected) = crate::previous::readable_index(&other, b"")
-        .ok_or_else(|| refused("the other document cannot be read"))?;
-    if protected.is_some() {
-        return Err(refused(
-            "pages of a protected document cannot be put into another yet",
-        ));
-    }
+    let password = imported.password;
+    let (index, security) = opened(&other, password, page.restrictions)?;
     let theirs: Vec<Reference> = page_references_recovering(
         &other,
         PageContentLimits::default(),
         RecoverLimits::default(),
-        b"",
+        password,
     )
     .map_err(|_| refused("the other document's pages cannot be listed"))?
     .into_parts()
@@ -50,7 +46,7 @@ pub(crate) fn plan_insert_pages(
         &other,
         PageContentLimits::default(),
         RecoverLimits::default(),
-        b"",
+        password,
     )
     .map_err(|_| refused("the other document's pages cannot be laid out"))?
     .into_parts()
@@ -58,7 +54,7 @@ pub(crate) fn plan_insert_pages(
     if imported.pages.is_empty() || imported.pages.iter().any(|at| *at >= theirs.len()) {
         return Err(refused("the other document does not have a page named"));
     }
-    let before = order(source)?;
+    let before = order(source, page.credential)?;
     if before.get(imported.beside) != Some(&page.program.page) {
         return Err(refused("the page to put pages beside is not the page read"));
     }
@@ -71,8 +67,10 @@ pub(crate) fn plan_insert_pages(
         queue: VecDeque::new(),
         next: crate::block_rewrite::next_object_number(source)?,
         writes: Vec::new(),
+        security,
+        into: crate::previous::readable_index(source, page.credential).and_then(|(_, into)| into),
     };
-    let mut tree = TreeEdit::new(source);
+    let mut tree = TreeEdit::new(source, page.credential);
     let neighbour = page.program.page;
     let node = tree.parent_of(neighbour)?;
     let mut made = Vec::with_capacity(imported.pages.len());
@@ -104,10 +102,16 @@ pub(crate) fn plan_insert_pages(
         imported.beside + 1
     };
     let change = PageChange::Added((first..first + made.len()).collect());
-    let document = crate::block_rewrite::commit_writes(source, &writes, page.restrictions)?;
-    prove_order(&before, &document, &change, &made)?;
+    let document =
+        crate::block_rewrite::commit_writes(source, &writes, (page.credential, page.restrictions))?;
+    prove_order(&before, (&document, page.credential), &change, &made)?;
     for (offset, at) in imported.pages.iter().enumerate() {
-        prove_same_paint(&other, *at, &document, first + offset)?;
+        prove_same_paint(
+            (&other, password),
+            *at,
+            (&document, page.credential),
+            first + offset,
+        )?;
     }
     Ok(Plan::new(
         Capability::Exact,
@@ -120,6 +124,37 @@ pub(crate) fn plan_insert_pages(
         },
     )
     .with_pages(change))
+}
+
+fn opened(
+    other: &ByteStore,
+    password: &[u8],
+    restrictions: crate::Restrictions,
+) -> Result<
+    (
+        RevisionIndex,
+        Option<Arc<pdf_security::AuthenticatedSecurity>>,
+    ),
+    SpikeError,
+> {
+    if crate::info::lock(other, password) == crate::info::Lock::Refused {
+        return Err(refused(
+            "the other document asks for a password, and the one given does not open it",
+        ));
+    }
+    let (index, security) = crate::previous::readable_index(other, password)
+        .ok_or_else(|| refused("the other document cannot be read"))?;
+    if restrictions == crate::Restrictions::Respect
+        && security.as_ref().is_some_and(|security| {
+            security.access_level() != pdf_security::AccessLevel::Owner
+                && security.permissions() & 16 == 0
+        })
+    {
+        return Err(refused(
+            "the other document does not allow its pages to be copied out",
+        ));
+    }
+    Ok((index, security))
 }
 
 fn tree_objects(
@@ -183,6 +218,7 @@ impl Copier<'_> {
             .map_err(|_| refused("a page of the other document cannot be read"))?;
         let source = resolved.source().clone();
         let value = resolved.value().clone();
+        let within = self.within(page, resolved.is_compressed());
         let ObjectKind::Dictionary(entries) = value.kind() else {
             return Err(refused("a page of the other document is not a dictionary"));
         };
@@ -204,7 +240,7 @@ impl Copier<'_> {
             out.push(b' ');
             out.extend_from_slice(raw(&source, entry.key().span())?);
             out.push(b' ');
-            self.value(&source, entry.value(), &mut out)?;
+            self.value((&source, within), entry.value(), &mut out)?;
         }
         out.extend_from_slice(
             format!(" /Parent {} {} R", node.object_number(), node.generation()).as_bytes(),
@@ -212,7 +248,9 @@ impl Copier<'_> {
         if !resources {
             out.extend_from_slice(b" /Resources ");
             match self.inherited_resources(page)? {
-                Some((from, inherited)) => self.value(&from, &inherited, &mut out)?,
+                Some((from, within, inherited)) => {
+                    self.value((&from, within), &inherited, &mut out)?;
+                }
                 None => out.extend_from_slice(b"<< >>"),
             }
         }
@@ -237,7 +275,7 @@ impl Copier<'_> {
     fn inherited_resources(
         &self,
         page: Reference,
-    ) -> Result<Option<(ByteStore, Object)>, SpikeError> {
+    ) -> Result<Option<(ByteStore, crate::carry::Within, Object)>, SpikeError> {
         let mut at = parent(self.other, self.index, page)?;
         let mut steps = 0;
         while let Some(node) = at {
@@ -250,7 +288,11 @@ impl Copier<'_> {
                 .resolve_object(self.other, node, ResolveLimits::default())
                 .map_err(|_| refused("the other document's page tree cannot be read"))?;
             if let Some(resources) = entry_of(resolved.source(), resolved.value(), b"/Resources") {
-                return Ok(Some((resolved.source().clone(), resources.clone())));
+                return Ok(Some((
+                    resolved.source().clone(),
+                    self.within(node, resolved.is_compressed()),
+                    resources.clone(),
+                )));
             }
             at = parent(self.other, self.index, node)?;
         }
@@ -272,15 +314,15 @@ impl TreeEdit<'_> {
 }
 
 fn prove_same_paint(
-    other: &ByteStore,
+    (other, password): (&ByteStore, &[u8]),
     theirs: usize,
-    document: &ByteStore,
+    (document, credential): (&ByteStore, &[u8]),
     ours: usize,
 ) -> Result<(), SpikeError> {
-    let Ok(original) = crate::spike_move_text::read_page(other, theirs, b"", None) else {
+    let Ok(original) = crate::spike_move_text::read_page(other, theirs, password, None) else {
         return Ok(());
     };
-    let copy = crate::spike_move_text::read_page(document, ours, b"", None)
+    let copy = crate::spike_move_text::read_page(document, ours, credential, None)
         .map_err(|_| refused("a copied page does not read where its original does"))?;
     if pdf_paint::glyph_placement_signature(&original.graph)
         != pdf_paint::glyph_placement_signature(&copy.graph)
@@ -399,6 +441,7 @@ mod tests {
                 beside: 0,
                 before: false,
                 document: Arc::clone(&other),
+                password: crate::Password::default(),
                 pages: vec![1, 0],
             },
             b"",
@@ -460,6 +503,7 @@ mod tests {
                 beside: 0,
                 before: true,
                 document: other,
+                password: crate::Password::default(),
                 pages: vec![0],
             },
             b"",
@@ -481,6 +525,7 @@ mod tests {
                         beside,
                         before: true,
                         document: theirs(),
+                        password: crate::Password::default(),
                         pages: pages.clone(),
                     },
                     b"",

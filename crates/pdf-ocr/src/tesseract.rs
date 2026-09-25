@@ -163,7 +163,7 @@ impl Tesseract {
             .lines()
             .skip(1)
             .map(str::trim)
-            .filter(|code| !code.is_empty() && *code != "osd" && is_code(code))
+            .filter(|code| !code.is_empty() && crate::models::is_a_language(code) && is_code(code))
             .map(str::to_owned)
             .collect())
     }

@@ -260,9 +260,10 @@ a check box or radio button takes the state to show (document_info lists them) o
         Tool {
             name: "insert_pages",
             title: "Put in pages from another PDF",
-            description: "Copies pages of another PDF file in after `after_page` (0 puts them first). The other file must not be password-protected.",
+            description: "Copies pages of another PDF file in after `after_page` (0 puts them first). A file that asks for a password needs `password`.",
             input: r#"{"type":"object","properties":{DOCUMENT,
 "from":{"type":"string","description":"The other file's path."},
+"password":{"type":"string","description":"The other file's password, when it asks for one."},
 "pages":{"type":"array","items":{"type":"integer","minimum":1},"description":"Its pages to copy. Default: all."},
 "after_page":{"type":"integer","minimum":0}},
 "required":["document","from","after_page"],"additionalProperties":false}"#,
@@ -1102,15 +1103,22 @@ fn insert_pages(desk: &mut Desk, args: &Args) -> Result<Answer, String> {
         .into();
     let other =
         pdf_bytes::ByteStore::new(pdf_bytes::SourceId::new(1), std::sync::Arc::clone(&bytes));
-    if pdf_edit::info::lock(&other, b"") == pdf_edit::info::Lock::Refused {
-        return Err(format!(
-            "{} is protected by a password, and pages cannot be taken out of a protected \
-             file yet -- not even with the password. Open it in PanPDF, save an unprotected \
-             copy, and take the pages from that.",
-            from.display()
-        ));
+    let password = args
+        .text("password")
+        .unwrap_or_default()
+        .as_bytes()
+        .to_vec();
+    if pdf_edit::info::lock(&other, &password) == pdf_edit::info::Lock::Refused {
+        return Err(if password.is_empty() {
+            format!(
+                "{} is protected by a password: give it as `password`",
+                from.display()
+            )
+        } else {
+            format!("the password given does not open {}", from.display())
+        });
     }
-    let available = pdf_session::Session::new(other, b"")
+    let available = pdf_session::Session::new(other, &password)
         .page_count()
         .map_err(|error| format!("{} has no pages this can read: {error}", from.display()))?;
     let chosen = if args.has("pages") {
@@ -1140,6 +1148,7 @@ fn insert_pages(desk: &mut Desk, args: &Args) -> Result<Answer, String> {
             beside,
             before,
             document: bytes,
+            password: pdf_edit::Password(password),
             pages: chosen,
         },
     )?;

@@ -11,13 +11,14 @@ use pdf_edit::stamp::Only;
 use pdf_ocr::Quality;
 use pdf_paint::PaintAtomKind;
 
+use crate::icons::Icon;
 use crate::window_state::{OcrDraft, OcrFetch, OcrReading, OcrWhich, PageRead, Window};
 
 const PANEL_WIDTH: f32 = 340.0;
 
 const MOST_WORKERS: usize = 4;
 
-const KNOWN: [&str; 3] = ["lao", "tha", "eng"];
+const LIST_HEIGHT: f32 = 240.0;
 
 fn choice_file() -> Option<PathBuf> {
     if cfg!(test) {
@@ -39,7 +40,7 @@ fn remembered() -> Choice {
         .unwrap_or_else(Choice::fresh)
 }
 
-fn remember(choice: Choice) {
+fn remember(choice: &Choice) {
     let Some(file) = choice_file() else {
         return;
     };
@@ -47,7 +48,7 @@ fn remember(choice: Choice) {
         let _ = std::fs::create_dir_all(folder);
     }
     let temporary = file.with_extension("new");
-    if std::fs::write(&temporary, pdf_app::ocr_choice::write(&choice)).is_ok() {
+    if std::fs::write(&temporary, pdf_app::ocr_choice::write(choice)).is_ok() {
         let _ = std::fs::rename(&temporary, &file);
     }
 }
@@ -60,11 +61,12 @@ fn draft() -> OcrDraft {
     }
     let mut draft = OcrDraft {
         engine,
-        languages: KNOWN
-            .iter()
-            .map(|code| ((*code).to_owned(), true))
-            .collect(),
+        ticked: Vec::new(),
         here: Vec::new(),
+        own: Vec::new(),
+        system: Vec::new(),
+        list: pdf_app::ocr_languages::catalogue(),
+        search: String::new(),
         choice,
         which: OcrWhich::default(),
         range: String::new(),
@@ -78,51 +80,55 @@ fn draft() -> OcrDraft {
 
 impl OcrDraft {
     fn take_stock(&mut self) {
+        let quality = self.choice.quality;
         if let Some(engine) = self.engine.as_mut() {
-            engine.own = pdf_ocr::store::models_dir(self.choice.quality);
+            engine.own = pdf_ocr::store::models_dir(quality);
         }
-        let system = self
+        self.system = self
             .engine
             .as_ref()
             .and_then(|engine| engine.installed_languages().ok())
             .unwrap_or_default();
-        let own = pdf_ocr::store::models_dir(self.choice.quality);
-        self.here = KNOWN
-            .iter()
-            .filter(|code| {
-                system.iter().any(|have| have == *code)
-                    || own.as_deref().is_some_and(|dir| {
-                        pdf_ocr::models::model(code, self.choice.quality)
-                            .is_some_and(|model| pdf_ocr::store::have(dir, model))
+        self.own = pdf_ocr::store::models_dir(quality)
+            .map(|dir| {
+                pdf_ocr::store::languages_in(&dir)
+                    .into_iter()
+                    .filter(|code| {
+                        pdf_ocr::models::model(code, quality)
+                            .is_some_and(|model| pdf_ocr::store::have(&dir, model))
                     })
+                    .collect()
             })
-            .map(|code| (*code).to_owned())
+            .unwrap_or_default();
+        let mut here: Vec<String> = self.own.iter().chain(&self.system).cloned().collect();
+        here.sort_unstable();
+        here.dedup();
+        self.here = here;
+        self.ticked = pdf_app::ocr_languages::ticks(&self.choice.languages, &self.here);
+    }
+
+    fn tick(&mut self, code: &str, on: bool) {
+        let mut ticked: Vec<String> = self
+            .ticked
+            .iter()
+            .filter(|ticked| *ticked != code)
+            .cloned()
             .collect();
-        for (code, chosen) in &mut self.languages {
-            if !self.here.contains(code) {
-                *chosen = false;
-            }
+        if on && self.here.iter().any(|here| here == code) {
+            ticked.push(code.to_owned());
         }
-        if self.here.iter().all(|code| {
-            !self
-                .languages
-                .iter()
-                .any(|(name, chosen)| name == code && *chosen)
-        }) {
-            for (code, chosen) in &mut self.languages {
-                if self.here.contains(code) {
-                    *chosen = true;
-                }
-            }
-        }
+        self.ticked = pdf_app::ocr_languages::in_order(&ticked, &self.here);
+        self.choice.languages.clone_from(&self.ticked);
     }
 
     fn chosen(&self) -> Vec<String> {
-        self.languages
-            .iter()
-            .filter(|(_, chosen)| *chosen)
-            .map(|(code, _)| code.clone())
-            .collect()
+        self.ticked.clone()
+    }
+
+    fn split(&self) -> Option<Message> {
+        pdf_app::ocr_languages::one_place(&self.own, &self.system, &self.ticked)
+            .err()
+            .map(Message::OcrNotInOnePlace)
     }
 }
 
@@ -280,11 +286,12 @@ impl Window {
             asked.remember = true;
         }
         if asked.remember {
-            remember(draft.choice);
+            remember(&draft.choice);
         }
         match asked.pressed {
             Pressed::Close => self.ocr_draft = None,
             Pressed::GetModel(code) => self.fetch_model(ctx, &code),
+            Pressed::RemoveModel(code) => self.remove_model(&code),
             Pressed::GetEngine => self.fetch_engine(ctx),
             Pressed::Read => self.start_reading(ctx),
             Pressed::Nothing | Pressed::Stop => {}
@@ -335,6 +342,26 @@ impl Window {
         });
     }
 
+    fn remove_model(&mut self, code: &str) {
+        let Some(draft) = self.ocr_draft.as_mut() else {
+            return;
+        };
+        let quality = draft.choice.quality;
+        let (Some(model), Some(dir)) = (
+            pdf_ocr::models::model(code, quality),
+            pdf_ocr::store::models_dir(quality),
+        ) else {
+            return;
+        };
+        draft.trouble = match pdf_ocr::store::remove(&dir, model) {
+            Ok(_) => None,
+            Err(error) => Some(Message::OcrRemoveFailed(error.to_string())),
+        };
+        draft.take_stock();
+        draft.choice.languages.clone_from(&draft.ticked);
+        remember(&draft.choice);
+    }
+
     fn fetch_engine(&mut self, ctx: &egui::Context) {
         let Some(draft) = self.ocr_draft.as_mut() else {
             return;
@@ -378,6 +405,7 @@ impl Window {
             return;
         };
         let was_a_model = fetch.code.is_some();
+        let landed = fetch.code.clone().filter(|_| answer.is_ok());
         if let Some(worker) = fetch.worker.take() {
             let _ = worker.join();
         }
@@ -396,6 +424,10 @@ impl Window {
             draft.engine = engine;
         }
         draft.take_stock();
+        if let Some(code) = landed {
+            draft.tick(&code, true);
+            remember(&draft.choice);
+        }
         ctx.request_repaint();
     }
 
@@ -573,6 +605,7 @@ enum Pressed {
     Stop,
     Close,
     GetModel(String),
+    RemoveModel(String),
     GetEngine,
 }
 
@@ -599,12 +632,17 @@ fn which_languages(
     lang: pdf_app::wording::Lang,
     asked: &mut Asked,
 ) {
+    let quality = draft.choice.quality;
     ui.horizontal_wrapped(|ui| {
-        for (code, chosen) in &mut draft.languages {
+        for code in pdf_app::ocr_languages::yours(&draft.here, &draft.ticked) {
             let name = Message::OcrLanguage(code.clone()).say(lang);
-            if draft.here.contains(code) {
-                ui.checkbox(chosen, name);
-            } else if let Some(model) = pdf_ocr::models::model(code, draft.choice.quality) {
+            if draft.here.contains(&code) {
+                let mut on = draft.ticked.contains(&code);
+                if ui.checkbox(&mut on, name).changed() {
+                    draft.tick(&code, on);
+                    asked.remember = true;
+                }
+            } else if let Some(model) = pdf_ocr::models::model(&code, quality) {
                 let label = Message::OcrGetModel {
                     code: code.clone(),
                     bytes: model.bytes,
@@ -620,6 +658,139 @@ fn which_languages(
             }
         }
     });
+    more_languages(ui, draft, lang, asked);
+}
+
+fn more_languages(
+    ui: &mut egui::Ui,
+    draft: &mut OcrDraft,
+    lang: pdf_app::wording::Lang,
+    asked: &mut Asked,
+) {
+    let count = draft.list.iter().filter(|language| language.reads).count();
+    egui::CollapsingHeader::new(Message::OcrMoreLanguages(count).say(lang))
+        .id_salt("ocr-more-languages")
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut draft.search)
+                    .hint_text(Message::OcrSearchLanguages.say(lang))
+                    .desired_width(f32::INFINITY),
+            );
+            let found: Vec<pdf_app::ocr_languages::Language> =
+                pdf_app::ocr_languages::search(&draft.list, &draft.search)
+                    .into_iter()
+                    .copied()
+                    .collect();
+            if found.is_empty() {
+                ui.label(
+                    egui::RichText::new(Message::OcrNoLanguageMatches.say(lang))
+                        .color(ui.visuals().weak_text_color()),
+                );
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("ocr-more-languages-list")
+                .max_height(LIST_HEIGHT)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let mut apart = false;
+                    for language in &found {
+                        if !language.reads && !apart {
+                            apart = true;
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new(Message::OcrNotLanguages.say(lang))
+                                    .size(11.0)
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                        }
+                        one_language(ui, draft, language, lang, asked);
+                    }
+                });
+        });
+}
+
+fn one_language(
+    ui: &mut egui::Ui,
+    draft: &mut OcrDraft,
+    language: &pdf_app::ocr_languages::Language,
+    lang: pdf_app::wording::Lang,
+    asked: &mut Asked,
+) {
+    let code = language.code;
+    let name = Message::OcrLanguage(code.to_owned()).say(lang);
+    let model = pdf_ocr::models::model(code, draft.choice.quality);
+    let weak = ui.visuals().weak_text_color();
+    let here = draft.here.iter().any(|have| have == code);
+    let own = draft.own.iter().any(|own| own == code);
+    let size = egui::vec2(ui.available_width(), crate::format::CONTROL_HEIGHT);
+    ui.allocate_ui_with_layout(
+        size,
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            if let Some(model) = model {
+                let bytes = Message::OcrSize(model.bytes).say(lang);
+                if !language.reads {
+                    ui.label(egui::RichText::new(bytes).color(weak));
+                } else if own {
+                    let hover = Message::OcrRemoveModel {
+                        code: code.to_owned(),
+                        bytes: model.bytes,
+                    }
+                    .say(lang);
+                    if crate::format::icon_button(ui, Icon::Delete, &hover, false, true).clicked() {
+                        asked.pressed = Pressed::RemoveModel(code.to_owned());
+                    }
+                    ui.label(egui::RichText::new(bytes).color(weak));
+                } else if here {
+                    ui.label(egui::RichText::new(Message::OcrFromTheSystem.say(lang)).color(weak));
+                } else {
+                    let hover = format!(
+                        "{}\n{}",
+                        Message::OcrDownloadModel {
+                            code: code.to_owned(),
+                            bytes: model.bytes,
+                        }
+                        .say(lang),
+                        model.url()
+                    );
+                    if ui
+                        .small_button(format!("\u{2b07} {bytes}"))
+                        .on_hover_text(hover)
+                        .clicked()
+                    {
+                        asked.pressed = Pressed::GetModel(code.to_owned());
+                    }
+                }
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                if !language.reads {
+                    ui.add(egui::Label::new(egui::RichText::new(&name).color(weak)).truncate())
+                        .on_hover_text(Message::OcrHelperWhy.say(lang));
+                    return;
+                }
+                let mut on = draft.ticked.iter().any(|ticked| ticked == code);
+                let tick = ui.add_enabled(here, egui::Checkbox::without_text(&mut on));
+                let text = if here {
+                    egui::RichText::new(&name)
+                } else {
+                    egui::RichText::new(&name).color(weak)
+                };
+                let label = ui
+                    .add(egui::Label::new(text).truncate().sense(if here {
+                        egui::Sense::click()
+                    } else {
+                        egui::Sense::hover()
+                    }))
+                    .on_hover_text(&name);
+                if tick.changed() || label.clicked() {
+                    let on = if tick.changed() { on } else { !on };
+                    draft.tick(code, on);
+                    asked.remember = true;
+                }
+            });
+        },
+    );
 }
 
 fn which_models(
@@ -639,20 +810,9 @@ fn which_models(
             );
         }
     });
-    let chosen = draft.chosen();
-    let about: Vec<String> = KNOWN
+    let about: Vec<String> = pdf_app::ocr_languages::how_well(&draft.chosen(), asked.quality)
         .iter()
-        .filter(|code| chosen.is_empty() || chosen.iter().any(|ticked| ticked == *code))
-        .filter_map(|code| pdf_ocr::models::model(code, asked.quality))
-        .filter_map(|model| {
-            model.cer.map(|cer| {
-                Message::OcrErrorRate {
-                    code: model.code.to_owned(),
-                    cer,
-                }
-                .say(lang)
-            })
-        })
+        .map(|said| said.say(lang))
         .collect();
     if !about.is_empty() {
         ui.label(
@@ -783,6 +943,11 @@ fn what_stands_in_the_way(
     if draft.engine.is_some() && draft.chosen().is_empty() {
         ui.colored_label(ui.visuals().warn_fg_color, Message::OcrNoLanguage.say(lang));
     }
+    if draft.engine.is_some()
+        && let Some(split) = draft.split()
+    {
+        ui.colored_label(ui.visuals().warn_fg_color, split.say(lang));
+    }
     if let Some(trouble) = &draft.trouble {
         ui.colored_label(ui.visuals().error_fg_color, trouble.say(lang));
     }
@@ -804,7 +969,7 @@ fn the_buttons(
         let count = pages
             .and_then(|pages| pages.as_ref().ok())
             .map_or(0, Vec::len);
-        let ready = count > 0 && !draft.chosen().is_empty();
+        let ready = count > 0 && !draft.chosen().is_empty() && draft.split().is_none();
         if ui
             .add_enabled(
                 ready,

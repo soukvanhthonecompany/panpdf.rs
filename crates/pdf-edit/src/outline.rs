@@ -350,19 +350,15 @@ pub(crate) fn plan_outline_change(
     page_index: usize,
     change: &Change,
 ) -> Result<Plan, SpikeError> {
-    let reader = Reader::open(source, b"")?;
-    if reader.is_protected() {
-        return Err(refused(
-            "this document is protected, and its bookmarks cannot be changed yet",
-        ));
-    }
+    let credential = page.credential;
+    let reader = Reader::open(source, credential)?;
     let pages = pdf_content::page_references_with_password(
         source,
         pdf_content::PageContentLimits::default(),
-        b"",
+        credential,
     )
     .map_err(|_| refused("this document's pages cannot be walked"))?;
-    let before = read_outline(source, b"")?;
+    let before = read_outline(source, credential)?;
 
     let mut number = crate::block_rewrite::next_object_number(source)?;
     let mut writes: Vec<PlannedWrite> = Vec::new();
@@ -384,25 +380,25 @@ pub(crate) fn plan_outline_change(
     };
 
     apply(
-        source,
+        (source, credential),
         change,
         (&mut tree, &mut writes, &mut fresh),
         (&pages, number),
     )?;
 
-    writes.extend(linked(source, &tree, &fresh)?);
+    writes.extend(linked((source, credential), &tree, &fresh)?);
     if root_is_new {
         let catalog = reader
             .catalog_reference()
             .ok_or_else(|| refused("this document's catalog cannot be read"))?;
         writes.push(set_entries(
-            source,
+            (source, credential),
             catalog,
             &[(b"/Outlines", crate::object_edit::reference_text(root))],
         )?);
     }
     let writes = one_write_each(writes)?;
-    prove_outline(source, &writes, (&tree, change))?;
+    prove_outline((source, credential), &writes, (&tree, change))?;
     let target = page
         .program
         .streams
@@ -421,7 +417,7 @@ pub(crate) fn plan_outline_change(
 }
 
 fn apply(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     change: &Change,
     (tree, writes, fresh): (
         &mut Node,
@@ -465,7 +461,7 @@ fn apply(
             let title = checked_title(title)?;
             found(tree, *bookmark)?;
             writes.push(set_entries(
-                source,
+                (source, credential),
                 *bookmark,
                 &[(b"/Title", pdf_text_string(title))],
             )?);
@@ -474,7 +470,7 @@ fn apply(
             found(tree, *bookmark)?;
             let destination = destination_of(pages, *to)?;
             writes.push(set_entries(
-                source,
+                (source, credential),
                 *bookmark,
                 &[(b"/Dest", destination), (b"/A", String::new())],
             )?);
@@ -587,14 +583,14 @@ fn destination_of(pages: &[Reference], page: usize) -> Result<String, SpikeError
 }
 
 fn linked(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     tree: &Node,
     fresh: &HashMap<(u32, u16), String>,
 ) -> Result<Vec<PlannedWrite>, SpikeError> {
     let mut writes = Vec::new();
     let mut wanted: Vec<(Reference, Vec<Entry>)> = Vec::new();
     collect(tree, None, &mut wanted);
-    let reader = Reader::open(source, b"")?;
+    let reader = Reader::open(source, credential)?;
     for (reference, entries) in wanted {
         if let Some(base) = fresh.get(&(reference.object_number(), reference.generation())) {
             let listed: Vec<String> = entries
@@ -613,7 +609,7 @@ fn linked(
         if unchanged(&reader, reference, &entries) {
             continue;
         }
-        writes.push(set_entries(source, reference, &entries)?);
+        writes.push(set_entries((source, credential), reference, &entries)?);
     }
     Ok(writes)
 }
@@ -678,13 +674,16 @@ fn unchanged(reader: &Reader, reference: Reference, entries: &[Entry]) -> bool {
 }
 
 fn prove_outline(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     writes: &[PlannedWrite],
     (tree, change): (&Node, &Change),
 ) -> Result<(), SpikeError> {
-    let document =
-        crate::block_rewrite::commit_writes(source, writes, crate::Restrictions::SetAside)?;
-    let after = read_outline(&document, b"")?;
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    let after = read_outline(&document, credential)?;
     let mut wanted: Vec<(Reference, usize)> = Vec::new();
     flatten(tree, 0, &mut wanted);
     let read: Vec<(Reference, usize)> = after
@@ -856,7 +855,11 @@ pub(crate) mod tests {
             change,
         };
         let plan = plan_command_with_fonts(source, &command, b"", None)?;
-        crate::block_rewrite::commit_writes(source, plan.writes(), crate::Restrictions::Respect)
+        crate::block_rewrite::commit_writes(
+            source,
+            plan.writes(),
+            (b"", crate::Restrictions::Respect),
+        )
     }
 
     fn shown(source: &ByteStore) -> Vec<(String, usize, Option<usize>)> {

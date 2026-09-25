@@ -241,6 +241,8 @@ pub(crate) struct AiState {
     wrapped_rows: usize,
     chips_height: f32,
     second_row_height: f32,
+    drawn: Vec<Option<(TurnShape, f32)>>,
+    drawn_width: f32,
     effort: Effort,
     pub(crate) mode: Mode,
     pub(crate) tools: Tools,
@@ -287,6 +289,8 @@ impl Default for AiState {
             wrapped_rows: ai_layout::LEAST_ROWS,
             chips_height: 0.0,
             second_row_height: 0.0,
+            drawn: Vec::new(),
+            drawn_width: 0.0,
             effort: Effort::Off,
             mode: Mode::default(),
             tools: Tools::default(),
@@ -445,11 +449,13 @@ impl AiState {
             return;
         };
         let mut result = None;
+        let mut fresh = false;
         loop {
             match asking.answers.try_recv() {
                 Ok(Answer::Partial(generation, said)) => {
                     if generation == self.generation {
                         self.partial = Some(said);
+                        fresh = true;
                     }
                 }
                 Ok(answer) => {
@@ -467,7 +473,7 @@ impl AiState {
             }
         }
         let Some(answer) = result else {
-            if self.partial.is_some() {
+            if fresh {
                 ctx.request_repaint();
             }
             return;
@@ -866,7 +872,7 @@ impl AiState {
                 );
                 ui.weak(egui::RichText::new(&self.model).small());
             } else if self.checking {
-                ui.spinner();
+                slow_spinner(ui);
                 ui.weak(egui::RichText::new(Message::AiCheckingConnection.say(lang)).small());
             } else {
                 let missing = if self.key_missing() {
@@ -1060,15 +1066,33 @@ impl AiState {
             .rewound
             .as_ref()
             .map(going_back::Rewound::changed_the_document);
+        let width = ui.available_width();
+        if (width - self.drawn_width).abs() > 0.5 {
+            self.drawn.clear();
+            self.drawn_width = width;
+        }
+        self.drawn.resize(self.turns.len(), None);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .stick_to_bottom(true)
-            .show(ui, |ui| {
+            .show_viewport(ui, |ui, viewport| {
+                let origin = ui.cursor().top();
+                let seen = viewport.expand2(egui::vec2(0.0, viewport.height()));
                 if self.turns.is_empty() && document_stays.is_none() {
                     ui.add_space(GAP);
                     ui.weak(say(Message::AiNothingAskedYet));
                 }
                 for (at, turn) in self.turns.iter().enumerate() {
+                    let shape = TurnShape::of(turn, at, &self.notes);
+                    let top = ui.cursor().top();
+                    if let Some((_, height)) = self.drawn[at].filter(|(was, _)| *was == shape)
+                        && !seen
+                            .y_range()
+                            .intersects(egui::Rangef::new(top - origin, top - origin + height))
+                    {
+                        ui.add_space(height);
+                        continue;
+                    }
                     for (_, said) in self.notes.iter().filter(|(index, _)| *index == at) {
                         a_note(ui, &said.say(lang));
                     }
@@ -1090,6 +1114,7 @@ impl AiState {
                             }
                         }
                     }
+                    self.drawn[at] = Some((shape, ui.cursor().top() - top));
                 }
                 for (_, said) in self
                     .notes
@@ -1126,7 +1151,7 @@ impl AiState {
                 if let Some((icon, doing)) = self.what_is_happening(lang) {
                     ui.add_space(GAP);
                     ui.horizontal(|ui| {
-                        ui.spinner();
+                        slow_spinner(ui);
                         if let Some(icon) = icon {
                             let (rect, _) = ui
                                 .allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
@@ -1383,6 +1408,55 @@ impl AiState {
 enum TurnAction {
     Edit,
     AskAgain,
+}
+
+fn slow_spinner(ui: &mut egui::Ui) {
+    let size = ui.style().spacing.interact_size.y;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(100));
+    let radius = rect.height().min(rect.width()) / 2.0 - 2.0;
+    let time = ui.input(|input| input.time);
+    let start = time * std::f64::consts::TAU;
+    let end = start + 240_f64.to_radians() * time.sin();
+    let points: Vec<egui::Pos2> = (0..24_u32)
+        .map(|at| {
+            let angle = start + (end - start) * f64::from(at) / 24.0;
+            let (sin, cos) = angle.sin_cos();
+            #[expect(clippy::cast_possible_truncation, reason = "a point on the screen")]
+            let offset = egui::vec2(cos as f32, sin as f32);
+            rect.center() + radius * offset
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(
+        points,
+        egui::Stroke::new(3.0, ui.visuals().strong_text_color()),
+    ));
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TurnShape {
+    text: usize,
+    attachments: usize,
+    results: usize,
+    notes: usize,
+}
+
+impl TurnShape {
+    fn of(turn: &Turn, at: usize, notes: &[(usize, Message)]) -> Self {
+        Self {
+            text: turn.text().len(),
+            attachments: turn.attachments().len(),
+            results: match turn {
+                Turn::Results { results } => results.len(),
+                _ => 0,
+            },
+            notes: notes.iter().filter(|(index, _)| *index == at).count(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1719,16 +1793,6 @@ fn what_the_tools_did(
                 .truncate(),
             );
         });
-        if let Some(image) = tools.pictures.get(&result.call_id) {
-            let texture = ui.ctx().load_texture(
-                format!("ai-picture-{}", result.call_id),
-                image.clone(),
-                egui::TextureOptions::LINEAR,
-            );
-            let width = ui.available_width().min(160.0);
-            let scale = width / texture.size_vec2().x;
-            ui.add(egui::Image::new(&texture).fit_to_exact_size(texture.size_vec2() * scale));
-        }
     }
 }
 

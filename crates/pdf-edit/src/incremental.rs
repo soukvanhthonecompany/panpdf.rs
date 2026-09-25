@@ -667,6 +667,29 @@ pub(crate) fn with_strings_encrypted(
     reference: Reference,
     body: &[u8],
 ) -> Result<Vec<u8>, IncrementalWriteError> {
+    with_strings_as(body, |plain| {
+        security
+            .encrypt_string(reference, plain)
+            .map_err(|error| IncrementalWriteError::Encrypt(error.kind()))
+    })
+}
+
+pub(crate) fn with_strings_decrypted(
+    security: &pdf_security::AuthenticatedSecurity,
+    reference: Reference,
+    body: &[u8],
+) -> Result<Vec<u8>, IncrementalWriteError> {
+    with_strings_as(body, |encrypted| {
+        security
+            .decrypt_string(reference, encrypted)
+            .map_err(|error| IncrementalWriteError::Encrypt(error.kind()))
+    })
+}
+
+fn with_strings_as(
+    body: &[u8],
+    mut change: impl FnMut(&[u8]) -> Result<Vec<u8>, IncrementalWriteError>,
+) -> Result<Vec<u8>, IncrementalWriteError> {
     let unreadable = || IncrementalWriteError::UnreadableObjectBody;
     let store = ByteStore::new(pdf_bytes::SourceId::new(0), Arc::<[u8]>::from(body));
     let mut lexer = pdf_syntax::Lexer::new(&store, 0, pdf_syntax::LexLimits::default());
@@ -685,14 +708,12 @@ pub(crate) fn with_strings_encrypted(
                 .parse_next()
                 .map_err(|_| unreadable())?
                 .ok_or_else(unreadable)?;
-        let plain =
+        let bytes =
             pdf_syntax::decode_string(&store, &object, body.len()).map_err(|_| unreadable())?;
-        let encrypted = security
-            .encrypt_string(reference, &plain)
-            .map_err(|error| IncrementalWriteError::Encrypt(error.kind()))?;
+        let changed = change(&bytes)?;
         out.extend_from_slice(&body[copied..span.start()]);
         out.push(b'<');
-        for byte in encrypted {
+        for byte in changed {
             out.extend_from_slice(format!("{byte:02x}").as_bytes());
         }
         out.push(b'>');

@@ -38,12 +38,8 @@ pub(crate) fn plan_fill_field(
     page_index: usize,
     filled: &Filled<'_>,
 ) -> Result<Plan, SpikeError> {
-    let reader = Reader::open(source, b"")?;
-    if reader.is_protected() {
-        return Err(refused(
-            "this document is protected, and a value written into it would not be readable",
-        ));
-    }
+    let credential = page.credential;
+    let reader = Reader::open(source, credential)?;
     let field = crate::form::read_field(&reader, filled.widget)
         .filter(|field| crate::form::field_nodes(&reader).contains(&field.field))
         .ok_or_else(|| refused("this is not a field of the document's form"))?;
@@ -57,7 +53,9 @@ pub(crate) fn plan_fill_field(
                 "a signature field is signed rather than filled in, which this does not do yet",
             ));
         }
-        FieldKind::Checkbox | FieldKind::Radio => turned(source, &reader, &field, filled.value)?,
+        FieldKind::Checkbox | FieldKind::Radio => {
+            turned((source, credential), &reader, &field, filled.value)?
+        }
         FieldKind::Text | FieldKind::Combo | FieldKind::List => typed(
             source,
             page,
@@ -85,7 +83,7 @@ pub(crate) fn plan_fill_field(
 }
 
 fn turned(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     reader: &Reader,
     field: &FormField,
     value: &FieldValue,
@@ -122,7 +120,7 @@ fn turned(
     }
     entries
         .into_values()
-        .map(|(reference, pairs)| set_entries(source, reference, &pairs))
+        .map(|(reference, pairs)| set_entries((source, credential), reference, &pairs))
         .collect()
 }
 
@@ -176,6 +174,7 @@ pub(crate) fn typed(
     (field, beside): (&FormField, &Beside),
     value: &FieldValue,
 ) -> Result<Vec<PlannedWrite>, SpikeError> {
+    let opened = (source, page.credential);
     let text = match value {
         FieldValue::Empty => String::new(),
         FieldValue::Text(text) | FieldValue::State(text) => text.clone(),
@@ -198,7 +197,7 @@ pub(crate) fn typed(
                 decoded: [box_of(field), b"/Tx BMC EMC\n".to_vec()].concat(),
             },
         });
-        writes.extend(answered(source, (field, beside), &text, stream)?);
+        writes.extend(answered(opened, (field, beside), &text, stream)?);
         return merged(writes);
     }
 
@@ -267,11 +266,11 @@ pub(crate) fn typed(
             .concat(),
         },
     });
-    writes.extend(answered(source, (field, beside), &text, stream)?);
+    writes.extend(answered(opened, (field, beside), &text, stream)?);
     let writes = merged(writes)?;
 
     prove_shown(
-        source,
+        opened,
         &writes,
         (page_index, field, page.restrictions),
         &lines,
@@ -280,7 +279,7 @@ pub(crate) fn typed(
 }
 
 fn answered(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     (field, beside): (&FormField, &Beside),
     text: &str,
     stream: Reference,
@@ -310,11 +309,11 @@ fn answered(
         .collect();
     if key_of(field.field) == key_of(field.widget) {
         let both: Vec<Entry> = on_field.into_iter().chain(on_widget).collect();
-        return Ok(vec![set_entries(source, field.field, &both)?]);
+        return Ok(vec![set_entries((source, credential), field.field, &both)?]);
     }
     Ok(vec![
-        set_entries(source, field.field, &on_field)?,
-        set_entries(source, field.widget, &on_widget)?,
+        set_entries((source, credential), field.field, &on_field)?,
+        set_entries((source, credential), field.widget, &on_widget)?,
     ])
 }
 
@@ -558,13 +557,13 @@ fn empty_dictionary(field: &FormField) -> String {
 }
 
 fn prove_shown(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     writes: &[PlannedWrite],
     (page_index, field, restrictions): (usize, &FormField, crate::Restrictions),
     lines: &[PlacedLine],
 ) -> Result<(), SpikeError> {
-    let document = crate::block_rewrite::commit_writes(source, writes, restrictions)?;
-    let reading = crate::spike_move_text::read_page(&document, page_index, b"", None)?;
+    let document = crate::block_rewrite::commit_writes(source, writes, (credential, restrictions))?;
+    let reading = crate::spike_move_text::read_page(&document, page_index, credential, None)?;
     let painted = pdf_paint::interpret_annotations(
         &reading.program.annotations,
         reading.program.page,
@@ -633,40 +632,36 @@ fn merged(writes: Vec<PlannedWrite>) -> Result<Vec<PlannedWrite>, SpikeError> {
 }
 
 pub(crate) fn set_entries(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     reference: Reference,
     pairs: &[(&[u8], String)],
 ) -> Result<PlannedWrite, SpikeError> {
-    let mut edit = crate::object_edit::ObjectEdit::of(source, reference)?;
+    set_entries_of(
+        crate::object_edit::ObjectEdit::of(source, reference, credential)?,
+        pairs,
+    )
+}
+
+pub(crate) fn set_entries_in(
+    write: &PlannedWrite,
+    pairs: &[(&[u8], String)],
+) -> Result<PlannedWrite, SpikeError> {
+    set_entries_of(crate::object_edit::ObjectEdit::of_planned(write)?, pairs)
+}
+
+fn set_entries_of(
+    mut edit: crate::object_edit::ObjectEdit,
+    pairs: &[(&[u8], String)],
+) -> Result<PlannedWrite, SpikeError> {
     let dictionary = edit.value();
     for (key, text) in pairs {
         if text.is_empty() {
             edit.unset(&dictionary, key)?;
         } else {
-            edit.set(&dictionary, key, &as_written_into(source, reference, text)?)?;
+            edit.set(&dictionary, key, text)?;
         }
     }
     edit.written()
-}
-
-fn as_written_into(
-    source: &ByteStore,
-    reference: Reference,
-    text: &str,
-) -> Result<String, SpikeError> {
-    if !text.contains('(') && !text.contains('<') {
-        return Ok(text.to_owned());
-    }
-    let reader = crate::form::Reader::open(source, b"")?;
-    let Some(security) = reader.security.as_ref() else {
-        return Ok(text.to_owned());
-    };
-    if crate::incremental::strings_are_plain(&reader.index, reference) {
-        return Ok(text.to_owned());
-    }
-    let written = crate::incremental::with_strings_encrypted(security, reference, text.as_bytes())
-        .map_err(SpikeError::Write)?;
-    String::from_utf8(written).map_err(|_| refused("this value cannot be written as text"))
 }
 
 pub(crate) fn pdf_text_string(text: &str) -> String {
@@ -879,7 +874,11 @@ mod tests {
 
     fn after(source: &ByteStore, command: &Command) -> Result<ByteStore, SpikeError> {
         let plan = plan_command_with_fonts(source, command, b"", Some(provider()))?;
-        crate::block_rewrite::commit_writes(source, plan.writes(), crate::Restrictions::Respect)
+        crate::block_rewrite::commit_writes(
+            source,
+            plan.writes(),
+            (b"", crate::Restrictions::Respect),
+        )
     }
 
     fn painted(source: &ByteStore, widget: u32) -> Vec<(f64, f64)> {
@@ -1155,7 +1154,7 @@ mod tests {
         let source = crate::incremental::tests::protected_pdf();
         let catalog = Reference::new(1, 0);
         let write = super::set_entries(
-            &source,
+            (&source, b""),
             catalog,
             &[(b"/Foo", crate::field_settings::pdf_literal("hello"))],
         )
@@ -1171,7 +1170,7 @@ mod tests {
         let document = crate::block_rewrite::commit_writes(
             &source,
             std::slice::from_ref(&write),
-            crate::Restrictions::Respect,
+            (b"", crate::Restrictions::Respect),
         )
         .expect("the revision is written");
         let reader = crate::form::Reader::open(&document, b"").expect("the document opens");
@@ -1190,7 +1189,7 @@ mod tests {
             "<< /Length 0 >>\nstream\n\nendstream",
         ]);
         let write = super::set_entries(
-            &source,
+            (&source, b""),
             Reference::new(1, 0),
             &[(b"/Foo", crate::field_settings::pdf_literal("hello"))],
         )

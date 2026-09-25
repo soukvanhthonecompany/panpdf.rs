@@ -14,7 +14,7 @@ fn refused(reason: &'static str) -> SpikeError {
 }
 
 pub(crate) fn in_sequence<T>(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     items: &[T],
     mut step: impl FnMut(&ByteStore, &T) -> Result<Vec<PlannedWrite>, SpikeError>,
 ) -> Result<Vec<PlannedWrite>, SpikeError> {
@@ -24,12 +24,22 @@ pub(crate) fn in_sequence<T>(
     if items.len() > MOST_FIELDS {
         return Err(refused("this is more than one change takes"));
     }
+    let security =
+        crate::previous::readable_index(source, credential).and_then(|(_, security)| security);
     let mut document = source.clone();
     let mut writes: Vec<PlannedWrite> = Vec::new();
     for item in items {
-        let made = step(&document, item)?;
-        document =
-            crate::block_rewrite::commit_writes(&document, &made, crate::Restrictions::SetAside)?;
+        let mut made = step(&document, item)?;
+        if let Some(security) = &security {
+            for write in &mut made {
+                plain_again(security, (source, &document), write)?;
+            }
+        }
+        document = crate::block_rewrite::commit_writes(
+            &document,
+            &made,
+            (credential, crate::Restrictions::SetAside),
+        )?;
         for write in made {
             match writes
                 .iter_mut()
@@ -41,6 +51,24 @@ pub(crate) fn in_sequence<T>(
         }
     }
     Ok(writes)
+}
+
+fn plain_again(
+    security: &pdf_security::AuthenticatedSecurity,
+    (source, document): (&ByteStore, &ByteStore),
+    write: &mut PlannedWrite,
+) -> Result<(), SpikeError> {
+    let crate::plan::PlannedBody::Direct { body } = &mut write.body else {
+        return Ok(());
+    };
+    if crate::previous::defined(source, write.reference)?
+        || !crate::previous::defined(document, write.reference)?
+    {
+        return Ok(());
+    }
+    *body = crate::incremental::with_strings_decrypted(security, write.reference, body)
+        .map_err(SpikeError::Write)?;
+    Ok(())
 }
 
 fn plan_of(
@@ -83,13 +111,14 @@ pub(crate) fn plan_set_field_boxes(
     page_index: usize,
     boxes: &[(Reference, [f64; 4])],
 ) -> Result<Plan, SpikeError> {
+    let credential = page.credential;
     for (at, (widget, _)) in boxes.iter().enumerate() {
         if boxes[..at].iter().any(|(earlier, _)| earlier == widget) {
             return Err(refused("a field was named twice"));
         }
     }
-    let before = crate::form::fields_of_page(source, page.program.page, b"")?;
-    let writes = in_sequence(source, boxes, |document, (widget, rect)| {
+    let before = crate::form::fields_of_page(source, page.program.page, credential)?;
+    let writes = in_sequence((source, credential), boxes, |document, (widget, rect)| {
         let plan = crate::field_settings::plan_set_field_box(
             document,
             page,
@@ -115,14 +144,15 @@ pub(crate) fn plan_remove_fields(
     page_index: usize,
     widgets: &[Reference],
 ) -> Result<Plan, SpikeError> {
-    let before = crate::form::fields_of_page(source, page.program.page, b"")?;
+    let credential = page.credential;
+    let before = crate::form::fields_of_page(source, page.program.page, credential)?;
     let region = union(
         before
             .iter()
             .filter(|field| widgets.contains(&field.widget))
             .map(|field| field.rect),
     );
-    let writes = in_sequence(source, widgets, |document, widget| {
+    let writes = in_sequence((source, credential), widgets, |document, widget| {
         let plan = crate::new_field::plan_remove_field(document, page, page_index, *widget)?;
         Ok(plan.writes().to_vec())
     })?;
@@ -161,14 +191,15 @@ pub(crate) fn plan_copy_fields(
     page_index: usize,
     copies: &[(Reference, [f64; 4])],
 ) -> Result<Plan, SpikeError> {
-    let originals = crate::form::fields_of_page(source, page.program.page, b"")?;
-    let writes = in_sequence(source, copies, |document, (widget, rect)| {
+    let credential = page.credential;
+    let originals = crate::form::fields_of_page(source, page.program.page, credential)?;
+    let writes = in_sequence((source, credential), copies, |document, (widget, rect)| {
         let original = originals
             .iter()
             .find(|field| field.widget == *widget)
             .ok_or_else(|| refused("this is not a field of the document's form"))?;
         let kind = copied_kind(original)?;
-        let taken = crate::form::field_names(document, b"");
+        let taken = crate::form::field_names(document, credential);
         let name = copy_name(original, &taken);
         let widget_number = crate::block_rewrite::next_object_number(document)?;
         let placed = crate::new_field::plan_new_field(
@@ -184,14 +215,17 @@ pub(crate) fn plan_copy_fields(
         )?;
         let mut writes = placed.writes().to_vec();
         let copy = Reference::new(widget_number, 0);
-        let settled =
-            crate::block_rewrite::commit_writes(document, &writes, crate::Restrictions::SetAside)?;
         let looks = looks_of(original);
         if !looks.is_empty() {
-            let write = set_entries(&settled, copy, &looks)?;
-            match writes.iter_mut().find(|held| held.reference == copy) {
-                Some(held) => *held = write,
-                None => writes.push(write),
+            if let Some(held) = writes.iter_mut().find(|held| held.reference == copy) {
+                *held = crate::fill_field::set_entries_in(held, &looks)?;
+            } else {
+                let settled = crate::block_rewrite::commit_writes(
+                    document,
+                    &writes,
+                    (credential, crate::Restrictions::SetAside),
+                )?;
+                writes.push(set_entries((&settled, credential), copy, &looks)?);
             }
         }
         Ok(writes)
@@ -285,7 +319,11 @@ mod tests {
 
     fn after(source: &ByteStore, command: &Command) -> Result<ByteStore, SpikeError> {
         let plan = planned(source, command)?;
-        crate::block_rewrite::commit_writes(source, plan.writes(), crate::Restrictions::Respect)
+        crate::block_rewrite::commit_writes(
+            source,
+            plan.writes(),
+            (b"", crate::Restrictions::Respect),
+        )
     }
 
     fn fields(source: &ByteStore) -> Vec<FormField> {
@@ -367,7 +405,7 @@ mod tests {
         let aligned = crate::block_rewrite::commit_writes(
             &source,
             plan.writes(),
-            crate::Restrictions::Respect,
+            (b"", crate::Restrictions::Respect),
         )
         .expect("aligned");
         let lefts: Vec<f64> = fields(&aligned)[..3]
@@ -380,7 +418,7 @@ mod tests {
         let undone = crate::block_rewrite::commit_writes(
             &aligned,
             back.writes(),
-            crate::Restrictions::Respect,
+            (b"", crate::Restrictions::Respect),
         )
         .expect("undone");
         let lefts: Vec<f64> = fields(&undone)[..3]

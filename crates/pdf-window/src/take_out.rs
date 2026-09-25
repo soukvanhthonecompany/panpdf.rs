@@ -230,7 +230,9 @@ impl Window {
             }
         };
         let original = self.opened.clone();
-        let handle = std::thread::spawn(move || write_each(&original, &bytes, &pieces));
+        let credential = self.editor.credential().to_vec();
+        let handle =
+            std::thread::spawn(move || write_each(&original, (&bytes, &credential), &pieces));
         self.writing = Some(Writing {
             handle,
             pictures: false,
@@ -279,7 +281,11 @@ impl Window {
     }
 }
 
-fn write_each(original: &Path, bytes: &Arc<[u8]>, pieces: &[Piece]) -> Result<Wrote, String> {
+fn write_each(
+    original: &Path,
+    (bytes, credential): (&Arc<[u8]>, &[u8]),
+    pieces: &[Piece],
+) -> Result<Wrote, String> {
     let mut wrote = Wrote {
         files: Vec::with_capacity(pieces.len()),
         bytes: 0,
@@ -288,7 +294,8 @@ fn write_each(original: &Path, bytes: &Arc<[u8]>, pieces: &[Piece]) -> Result<Wr
         let written = if piece.pages.is_empty() {
             bytes.to_vec()
         } else {
-            pdf_session::extract_pages(bytes, &piece.pages).map_err(|error| error.to_string())?
+            pdf_session::extract_pages(bytes, credential, &piece.pages)
+                .map_err(|error| error.to_string())?
         };
         crate::save_file::save(original, &piece.path, &written, None)
             .map_err(|error| format!("{}: {error}", piece.path.display()))?;

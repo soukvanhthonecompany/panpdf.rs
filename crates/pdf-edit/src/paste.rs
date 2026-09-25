@@ -25,8 +25,9 @@ pub(crate) fn plan_paste(
     page_index: usize,
     copied: &Copied,
     (dx, dy): (f64, f64),
-    elsewhere: Option<&ByteStore>,
+    elsewhere: Option<(&ByteStore, &[u8])>,
 ) -> Result<Plan, SpikeError> {
+    let credential = page.credential;
     if copied.objects.is_empty() {
         return Err(refused("there is nothing to paste"));
     }
@@ -41,14 +42,23 @@ pub(crate) fn plan_paste(
     for object in &shifted {
         checked(object)?;
     }
-    let carried = carry_across(source, page.restrictions, copied, &mut shifted, elsewhere)?;
+    let carried = carry_across(
+        (source, credential),
+        page.restrictions,
+        copied,
+        &mut shifted,
+        elsewhere,
+    )?;
     let with_carried;
     let carried_page;
     let (source, page) = if carried.writes.is_empty() {
         (source, page)
     } else {
-        with_carried =
-            crate::block_rewrite::commit_writes(source, &carried.writes, page.restrictions)?;
+        with_carried = crate::block_rewrite::commit_writes(
+            source,
+            &carried.writes,
+            (credential, page.restrictions),
+        )?;
         carried_page = read_again(&with_carried, page_index, page)?;
         (&with_carried, beside(&carried_page, page))
     };
@@ -181,16 +191,16 @@ struct Carried {
 }
 
 fn carry_across(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     restrictions: crate::Restrictions,
     copied: &Copied,
     shifted: &mut [CopiedObject],
-    elsewhere: Option<&ByteStore>,
+    elsewhere: Option<(&ByteStore, &[u8])>,
 ) -> Result<Carried, SpikeError> {
     if copied.from == source.id() {
         return Ok(Carried { writes: Vec::new() });
     }
-    let Some(other) = elsewhere else {
+    let Some((other, password)) = elsewhere else {
         return Err(refused(
             "this was copied from another document, whose objects are not here to be pasted",
         ));
@@ -201,13 +211,8 @@ fn carry_across(
             "the document this was copied from is named as this one, so a span of either would resolve in the other",
         ));
     }
-    let (index, protected) = crate::previous::readable_index(other, b"")
+    let (index, security) = crate::previous::readable_index(other, password)
         .ok_or_else(|| refused("the document this was copied from cannot be read"))?;
-    if protected.is_some() {
-        return Err(refused(
-            "a copy from a protected document cannot be pasted into another one yet",
-        ));
-    }
     let mut carrier = Copier {
         other,
         index: &index,
@@ -216,6 +221,8 @@ fn carry_across(
         queue: VecDeque::new(),
         next: crate::block_rewrite::next_object_number(source)?,
         writes: Vec::new(),
+        security,
+        into: crate::previous::readable_index(source, credential).and_then(|(_, into)| into),
     };
     for object in shifted.iter_mut() {
         match object {
@@ -349,6 +356,7 @@ struct Naming<'a> {
     page: Reference,
     resources: &'a pdf_content::PageResources,
     restrictions: crate::Restrictions,
+    credential: &'a [u8],
     document: ByteStore,
     writes: Vec<PlannedWrite>,
     named: Vec<(Vec<u8>, Reference, String)>,
@@ -362,6 +370,7 @@ impl<'a> Naming<'a> {
             page: page.program.page,
             resources: &page.program.resources,
             restrictions: page.restrictions,
+            credential: page.credential,
             document: source.clone(),
             writes: Vec::new(),
             named: Vec::new(),
@@ -380,8 +389,11 @@ impl<'a> Naming<'a> {
     fn write(&mut self, write: PlannedWrite) -> Result<(), SpikeError> {
         self.writes.retain(|had| had.reference != write.reference);
         self.writes.push(write);
-        self.document =
-            crate::block_rewrite::commit_writes(self.source, &self.writes, self.restrictions)?;
+        self.document = crate::block_rewrite::commit_writes(
+            self.source,
+            &self.writes,
+            (self.credential, self.restrictions),
+        )?;
         Ok(())
     }
 
@@ -404,8 +416,13 @@ impl<'a> Naming<'a> {
         {
             return Ok(name.clone());
         }
-        let (name, holder) =
-            crate::new_font::add_resource(&self.document, self.page, (category, prefix), object)?;
+        let (name, holder) = crate::new_font::add_resource(
+            &self.document,
+            self.page,
+            (category, prefix),
+            object,
+            self.credential,
+        )?;
         self.write(holder)?;
         self.named.push((category.to_vec(), object, name.clone()));
         Ok(name)
@@ -414,7 +431,7 @@ impl<'a> Naming<'a> {
     fn state(&mut self, entries: &str) -> Result<String, SpikeError> {
         let says = |entry: &pdf_content::ResourceEntry| {
             let reference = entry.reference()?;
-            let body = crate::new_font::resolve(self.source, reference).ok()?;
+            let body = crate::new_font::resolve(self.source, reference, self.credential).ok()?;
             (body.bytes == entries.as_bytes()).then_some(reference)
         };
         if let Some(entry) = self
@@ -699,7 +716,7 @@ fn region(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use pdf_bytes::{ByteStore, SourceId};
@@ -785,7 +802,7 @@ mod tests {
         plan.commit(source, b"").expect("commits")
     }
 
-    fn three_kinds() -> ByteStore {
+    pub(crate) fn three_kinds() -> ByteStore {
         let source = document(&[
             "BT /F1 12 Tf 1 0 0 1 20 100 Tm (ABC) Tj ET",
             "0 0 1 rg 0 0 5 5 re f",
@@ -817,7 +834,7 @@ mod tests {
         )
     }
 
-    fn anchors(graph: &PaintGraph) -> Vec<SourceAnchor> {
+    pub(crate) fn anchors(graph: &PaintGraph) -> Vec<SourceAnchor> {
         graph
             .atoms
             .iter()
@@ -846,7 +863,7 @@ mod tests {
             .count()
     }
 
-    fn a_bare_page() -> ByteStore {
+    pub(crate) fn a_bare_page() -> ByteStore {
         let objects: Vec<Vec<u8>> = vec![
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -914,7 +931,7 @@ mod tests {
                 copied,
                 dx: 0.0,
                 dy: 0.0,
-                elsewhere: Some(from.clone()),
+                elsewhere: Some((from.clone(), crate::Password::default())),
             },
         );
         let now = read_page(&after, 0, b"", None).expect("reads");

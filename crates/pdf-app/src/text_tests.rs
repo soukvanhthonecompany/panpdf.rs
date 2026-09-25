@@ -5414,6 +5414,203 @@ fn text_typed_in_a_chosen_style_is_set_in_it() {
 }
 
 #[test]
+fn a_chosen_font_writes_what_it_has_and_a_face_of_its_kind_the_rest() {
+    let chosen = pdf_edit::TextStyle {
+        family: Some("Liberation Serif".to_owned()),
+        ..pdf_edit::TextStyle::default()
+    };
+    for (typed, stand_in) in [
+        ("Hello", None),
+        (
+            "\u{0eaa}\u{0eb0}\u{0e9a}\u{0eb2}\u{0e8d}",
+            Some("Noto Serif Lao"),
+        ),
+    ] {
+        let (mut editor, block) =
+            declared_block(b"0 g BT /F1 10 Tf 1 0 0 1 10 150 Tm (AAAA) Tj ET");
+        let rect = editor.frame_boxes(0)[block];
+        declare_frame(
+            &mut editor,
+            0,
+            block,
+            [rect[0], rect[1], rect[2] + 200.0, rect[3]],
+        );
+        let changed = editor.edit_in_style(0, block, insertion_at(0, 4), typed, chosen.clone());
+        assert!(
+            matches!(changed, Applied::Changed { .. }),
+            "{typed}: {changed:?} {}",
+            editor.status()
+        );
+        let said = editor.status().say(crate::wording::Lang::English);
+        match stand_in {
+            Some(face) => {
+                assert!(said.contains(&format!("written in {face}")), "{said}");
+                assert!(
+                    said.contains("because Liberation Serif has no letter"),
+                    "{said}"
+                );
+            }
+            None => assert!(!said.contains("has no letter"), "{said}"),
+        }
+        read(&mut editor);
+        let lines = editor
+            .block_reading(0, block)
+            .expect("the block reads")
+            .lines;
+        let last = lines.len() - 1;
+        let text = editor
+            .copy_text(0, block, (0, 0), (last, lines[last].clusters.len()))
+            .expect("the block copies");
+        let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(text, format!("AAAA{typed}"));
+    }
+}
+
+#[test]
+fn letters_typed_after_a_chosen_font_stay_in_it() {
+    let (mut editor, block) = declared_block(b"0 g BT /F1 10 Tf 1 0 0 1 10 150 Tm (AAAA) Tj ET");
+    let rect = editor.frame_boxes(0)[block];
+    declare_frame(
+        &mut editor,
+        0,
+        block,
+        [rect[0], rect[1], rect[2] + 200.0, rect[3]],
+    );
+    let chosen = pdf_edit::TextStyle {
+        family: Some("Noto Serif Lao".to_owned()),
+        ..pdf_edit::TextStyle::default()
+    };
+    let changed = editor.edit_in_style(0, block, insertion_at(0, 4), "\u{0eaa}", chosen);
+    assert!(
+        matches!(changed, Applied::Changed { .. }),
+        "{changed:?} {}",
+        editor.status()
+    );
+    for letter in ["\u{0eb0}", "\u{0e9a}"] {
+        let caret = editor.landed_caret().expect("a caret");
+        read(&mut editor);
+        let changed = editor.edit(0, block, insertion_at(caret.0, caret.1), letter);
+        let said = editor.status().say(crate::wording::Lang::English);
+        assert!(
+            matches!(changed, Applied::Changed { .. }),
+            "{changed:?} {said}"
+        );
+        assert!(!said.contains("written in"), "{letter}: {said}");
+    }
+    read(&mut editor);
+    let lines = editor
+        .block_reading(0, block)
+        .expect("the block reads")
+        .lines;
+    let last = lines.len() - 1;
+    let text = editor
+        .copy_text(0, block, (0, 0), (last, lines[last].clusters.len()))
+        .expect("the block copies");
+    assert_eq!(text, "AAAA\u{0eaa}\u{0eb0}\u{0e9a}");
+}
+
+#[test]
+fn text_a_shaper_reorders_reads_back_as_typed() {
+    let (mut editor, block) = declared_block(b"0 g BT /F1 10 Tf 1 0 0 1 10 150 Tm (AAAA) Tj ET");
+    let rect = editor.frame_boxes(0)[block];
+    declare_frame(
+        &mut editor,
+        0,
+        block,
+        [rect[0], rect[1], rect[2] + 300.0, rect[3]],
+    );
+    let whole = |editor: &Editor| -> String {
+        let lines = editor
+            .block_reading(0, block)
+            .expect("the block reads")
+            .lines;
+        let last = lines.len() - 1;
+        editor
+            .copy_text(0, block, (0, 0), (last, lines[last].clusters.len()))
+            .expect("the block copies")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    };
+    let typed = " \u{1019}\u{1031} \u{1ebf}\u{1ebe}";
+    let changed = editor.edit(0, block, insertion_at(0, 4), typed);
+    assert!(
+        matches!(changed, Applied::Changed { .. }),
+        "{changed:?} {}",
+        editor.status()
+    );
+    read(&mut editor);
+    assert_eq!(whole(&editor), "AAAA\u{1019}\u{1031}\u{1ebf}\u{1ebe}");
+    let spans = |editor: &Editor| {
+        let graph = &editor.leaf(0).expect("the page is read").view.graph;
+        let mut seen: Vec<pdf_bytes::SourceSpan> = Vec::new();
+        for atom in &graph.atoms {
+            for mark in atom.marks.iter().filter(|mark| mark.actual_text.is_some()) {
+                if !seen.contains(&mark.operator_span) {
+                    seen.push(mark.operator_span);
+                }
+            }
+        }
+        seen.len()
+    };
+    let first = spans(&editor);
+    assert!(first >= 1, "no span was written");
+    for _ in 0..2 {
+        let caret = editor.landed_caret().expect("a caret");
+        let changed = editor.edit(0, block, insertion_at(caret.0, caret.1), "B");
+        assert!(
+            matches!(changed, Applied::Changed { .. }),
+            "{changed:?} {}",
+            editor.status()
+        );
+        read(&mut editor);
+    }
+    assert_eq!(whole(&editor), "AAAA\u{1019}\u{1031}\u{1ebf}\u{1ebe}BB");
+    assert_eq!(spans(&editor), first, "a rewrite left its old spans behind");
+}
+
+#[test]
+fn a_right_to_left_word_is_shaped_whole_and_reads_back() {
+    let (mut editor, block) = declared_block(b"0 g BT /F1 10 Tf 1 0 0 1 10 150 Tm (AAAA) Tj ET");
+    let rect = editor.frame_boxes(0)[block];
+    declare_frame(
+        &mut editor,
+        0,
+        block,
+        [rect[0], rect[1], rect[2] + 300.0, rect[3]],
+    );
+    let typed = " \u{0645}\u{0631}\u{062d}\u{0628}\u{0627} \u{05e9}\u{05dc}\u{05d5}\u{05dd}";
+    let changed = editor.edit(0, block, insertion_at(0, 4), typed);
+    assert!(
+        matches!(changed, Applied::Changed { .. }),
+        "{changed:?} {}",
+        editor.status()
+    );
+    read(&mut editor);
+    let lines = editor
+        .block_reading(0, block)
+        .expect("the block reads")
+        .lines;
+    let last = lines.len() - 1;
+    let text: String = editor
+        .copy_text(0, block, (0, 0), (last, lines[last].clusters.len()))
+        .expect("the block copies")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(
+        text,
+        "AAAA\u{0645}\u{0631}\u{062d}\u{0628}\u{0627}\u{05e9}\u{05dc}\u{05d5}\u{05dd}"
+    );
+    let stops: usize = lines.iter().map(|line| line.clusters.len()).sum();
+    assert_eq!(
+        stops,
+        4 + 1 + 1 + 1 + 1,
+        "each word one stop, and a stop per space"
+    );
+}
+
+#[test]
 #[expect(
     clippy::cast_possible_truncation,
     reason = "a baseline in hundredths of a point on a 200 pt page"

@@ -181,6 +181,13 @@ written back into one must be encrypted with the same document key before it is
 stored. A writer that knew only how to read would produce a file whose untouched
 streams still decrypt and whose new one does not.
 
+A string has no such load step: parsed values keep their spans in the file's
+bytes, so a string read from a resource is still ciphertext there. Beside each
+value travels `pdf_content::StringProtection`, the indirect object whose key
+protects the strings in it (or `Plain`, for a value in an object stream or in
+decoded content), and a reader of a string asks the resource that reached it
+for the plaintext.
+
 `pdf-session` is where a document stays open. It holds the edit history and,
 beside it, the pages already interpreted from the current revision -- because
 every question a viewer asks about a page is answered from one paint graph, and

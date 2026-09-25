@@ -37,6 +37,7 @@ impl Window {
             marker,
             bounds,
             from,
+            opens: pdf_edit::Password(self.editor.credential().to_vec()),
         });
         self.editor.say(Message::Done(Done::Copied { objects }));
         true
@@ -85,7 +86,7 @@ impl Window {
             .editor
             .source()
             .is_none_or(|into| into.id().get() != clipboard.from.id().get())
-            .then(|| clipboard.from.clone());
+            .then(|| (clipboard.from.clone(), clipboard.opens.clone()));
         let job = self.editor.begin_paste(page, copied, offset, elsewhere);
         if job.is_none() {
             self.editor.say(Message::AnotherEditIsRunning);

@@ -17,19 +17,21 @@ you did not touch.
 
 ## What's new
 
-- **Big documents edit faster.** An edit now writes what it changed instead
-  of copying the whole file. On a 70 MB textbook a preview takes a quarter of
-  the time it did, and undo and redo under half, with no more memory. A page
-  reads each of its fonts once, and a paragraph in an old Lao or Thai font is
-  worked out once instead of on every key.
-- **See-through pictures can be moved.** A picture printed with an opacity
-  could not be chosen before.
-- **Pages with a smooth colour blend can be edited.** One such blend, which
-  Chrome writes for a chosen option in a form, stopped the whole page from
-  being read.
-- **A slow edit says why.** Any edit that takes more than a tenth of a second
-  is written to the session log with the time it spent reading, planning and
-  writing.
+- **Type in any language, in any font.** A font you choose writes what you
+  type; letters it does not have go in a face of the same kind, and the
+  letters after them stay in your font. Arabic and Hebrew words typed into
+  a left-to-right line are shaped and placed whole, and text you type
+  copies out exactly as typed.
+- **Documents that ask for a password can be edited.** Every edit -- text,
+  forms, links, pages, pictures, watermarks -- now works on a file opened
+  with its password, and is saved under the same protection. Pages can be
+  added from another protected file; you are asked for its password.
+- **Pictures in protected files show their true colours.** Pictures with a
+  colour table came out in wrong colours, or not at all, in encrypted files.
+- **The assistant no longer freezes the program.** A bulleted answer could
+  make the window use memory without end. The chat is also lighter while an
+  answer arrives, and a page mixing Thai or Lao with English is written the
+  first time instead of being refused and retried.
 
 ## Download
 

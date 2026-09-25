@@ -90,10 +90,15 @@ struct Piece {
     shaped: Vec<pdf_content::ShapedGlyph>,
     rise: Vec<f64>,
     underline: bool,
+    actual: Option<Box<str>>,
 }
 
 const UNREAD: &str = "\u{FFFD}";
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "nearly every token of a block is a cluster; boxing each would cost an allocation apiece"
+)]
 enum Token {
     Cluster(Piece),
     Break { space: f64 },
@@ -423,7 +428,7 @@ fn plan_laid(
     let groups = line_groups(&reading.lines);
     let alignments = alignments(&reading, &groups, frame, edit.paragraph.flow_round);
 
-    let mut faces = faces::NewFaces::new(page.fonts, page.program, page.restrictions);
+    let mut faces = faces::NewFaces::new(&page);
     let (mut tokens, caret, selected) = edited_tokens(&reading, &groups, edit, &mut faces)?;
     let selection_start = selected.start;
     let settled = styled_and_settled(
@@ -449,18 +454,7 @@ fn plan_laid(
         },
     )?;
     let placed = lines_to_write(edit, &reading, graph, &laid)?;
-    let owner = reading
-        .rows
-        .first()
-        .and_then(|row| row.first())
-        .map(|cluster| cluster.key)
-        .or_else(|| {
-            reading.named.iter().next().map(|atom| ClusterKey {
-                atom: *atom,
-                glyph: 0,
-            })
-        })
-        .ok_or_else(|| unsupported("the block has no text to lay out"))?;
+    let owner = owner_of(&reading)?;
     let written = |lifted: &[lift::ClipEdit], settled: Option<faces::Settled>| {
         write_and_prove(
             page,
@@ -479,10 +473,11 @@ fn plan_laid(
         settled,
     );
 
+    let fonts_said = (faces.typed_families(), faces.stood_in());
     let outcome = BlockOutcome {
         cropped: proved.cropped,
         ..if edit.shift().is_some() {
-            laid_outcome(&laid, &tokens, (reading.pitch, faces.typed_families()))
+            laid_outcome(&laid, &tokens, reading.pitch, fonts_said)
         } else {
             BlockOutcome {
                 caret: planned_caret(&placed, &tokens, caret, &proved.keys),
@@ -492,7 +487,7 @@ fn plan_laid(
                     selection_start,
                     &proved.keys,
                 )),
-                ..laid_outcome(&placed, &tokens, (reading.pitch, faces.typed_families()))
+                ..laid_outcome(&placed, &tokens, reading.pitch, fonts_said)
             }
         }
     };
@@ -741,13 +736,30 @@ fn read_rewritten(
     Ok((graph, writes))
 }
 
+fn owner_of(reading: &Reading<'_>) -> Result<ClusterKey, SpikeError> {
+    reading
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .map(|cluster| cluster.key)
+        .or_else(|| {
+            reading.named.iter().next().map(|atom| ClusterKey {
+                atom: *atom,
+                glyph: 0,
+            })
+        })
+        .ok_or_else(|| unsupported("the block has no text to lay out"))
+}
+
 fn laid_outcome(
     placed: &[PlacedLine],
     tokens: &[Token],
-    (pitch, brought_in): (f64, Vec<String>),
+    pitch: f64,
+    (brought_in, stood_in): (Vec<String>, Vec<(String, String)>),
 ) -> BlockOutcome {
     BlockOutcome {
         brought_in,
+        stood_in,
         caret: None,
         anchor: None,
         pitch,
@@ -1611,12 +1623,17 @@ struct MeasuredRow {
     baseline: f64,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one row at a time through one reading: codes, text, advance, kerns"
+)]
 fn measure_rows(
     style: &Style<'_>,
     graph: &PaintGraph,
     rows: &[Vec<Located>],
 ) -> Result<Vec<MeasuredRow>, SpikeError> {
     let mut measured = Vec::with_capacity(rows.len());
+    let spoken = graph.actual_texts();
     for row in rows {
         let Some(first) = row.first() else {
             return Err(unsupported("the block has an empty row"));
@@ -1634,6 +1651,7 @@ fn measure_rows(
             let adjustments = adjustments_after(text);
             let run = style.run_of.get(&located.ordinal).copied().unwrap_or(0);
             let mut piece = Piece {
+                actual: None,
                 codes: Vec::new(),
                 text: String::new(),
                 advance: 0.0,
@@ -1655,6 +1673,7 @@ fn measure_rows(
                 rise: Vec::new(),
                 underline: false,
             };
+            let actual = spoken.get(&located.ordinal);
             for glyph in &text.glyphs[located.glyphs.0..located.glyphs.1] {
                 let meaning = text.text.text_of(Code {
                     value: glyph.code.value,
@@ -1668,6 +1687,10 @@ fn measure_rows(
                 }
                 piece.advance += advance_of(style, run, &glyph.code);
                 piece.codes.push(glyph.code.clone());
+            }
+            if let Some(actual) = actual {
+                piece.text.clone_from(&actual.text);
+                piece.actual = Some(actual.text.clone().into_boxed_str());
             }
             piece.advance += inner_kern(style, &piece);
             let at = pen_of(
@@ -2556,33 +2579,14 @@ fn edited_tokens(
             (group, run, &around),
         );
     }
-    let mut inserted = Vec::new();
-    for piece in typed_text.split_inclusive(['\n', LINE_BREAK]) {
-        let (segment, end) = if let Some(segment) = piece.strip_suffix('\n') {
-            (segment, Some(Token::Break { space: 0.0 }))
-        } else if let Some(segment) = piece.strip_suffix(LINE_BREAK) {
-            (segment, Some(Token::LineBreak))
-        } else {
-            (piece, None)
-        };
-        if !segment.is_empty() {
-            inserted.extend(
-                typed_pieces(
-                    &reading.style,
-                    Some(&mut *faces),
-                    segment,
-                    group,
-                    (run, &around),
-                )?
-                .into_iter()
-                .map(|mut piece| {
-                    piece.underline = underline;
-                    Token::Cluster(piece)
-                }),
-            );
-        }
-        inserted.extend(end);
-    }
+    let inserted = inserted_tokens(
+        reading,
+        edit,
+        faces,
+        &typed_text,
+        (group, run, underline),
+        &around,
+    )?;
     let caret = from + inserted.len();
     let selected = from..caret;
     tokens.splice(from..to, inserted);
@@ -2621,6 +2625,7 @@ fn styled_and_settled(
         apply_style(style, &mut tokens[selected.clone()], wanted, faces)?;
     } else if let Some(wanted) = typed
         && wanted.changes_face()
+        && wanted.family.is_none()
     {
         typed_face(style, &mut tokens[selected.clone()], wanted, faces)?;
     }
@@ -2906,6 +2911,11 @@ fn restyle_face(
         {
             return Err(unsupported("the font asked for is not on this machine"));
         }
+        if piece.text.chars().any(faces::right_to_left) {
+            return Err(unsupported(
+                "right-to-left text on the page cannot be set in another font yet",
+            ));
+        }
         let mut shown = faces.piece_in(piece.style, &piece.text, piece.group, &face, false)?;
         shown.break_before = piece.break_before;
         shown.underline = piece.underline;
@@ -3045,6 +3055,121 @@ fn stroking(fill: &str) -> String {
     out
 }
 
+fn inserted_tokens(
+    reading: &Reading<'_>,
+    edit: &BlockEdit<'_>,
+    faces: &mut faces::NewFaces<'_>,
+    typed_text: &str,
+    (group, run, underline): (usize, usize, bool),
+    around: &[usize],
+) -> Result<Vec<Token>, SpikeError> {
+    let chosen = edit
+        .typed
+        .filter(|wanted| wanted.family.is_some())
+        .map(|wanted| faces.chosen(&reading.style, run, wanted))
+        .transpose()?;
+    let mut inserted = Vec::new();
+    for piece in typed_text.split_inclusive(['\n', LINE_BREAK]) {
+        let (segment, end) = if let Some(segment) = piece.strip_suffix('\n') {
+            (segment, Some(Token::Break { space: 0.0 }))
+        } else if let Some(segment) = piece.strip_suffix(LINE_BREAK) {
+            (segment, Some(Token::LineBreak))
+        } else {
+            (piece, None)
+        };
+        if !segment.is_empty() {
+            let pieces = match &chosen {
+                Some(chosen) => chosen_pieces(faces, segment, group, run, chosen)?,
+                None => typed_pieces(
+                    &reading.style,
+                    Some(&mut *faces),
+                    segment,
+                    group,
+                    (run, around),
+                )?,
+            };
+            inserted.extend(pieces.into_iter().map(|mut piece| {
+                piece.underline = underline;
+                Token::Cluster(piece)
+            }));
+        }
+        inserted.extend(end);
+    }
+    Ok(inserted)
+}
+
+fn typed_units(typed: &str) -> Vec<(Range<usize>, bool)> {
+    let mut boundaries: Vec<usize> = GraphemeClusterSegmenter::new()
+        .segment_str(typed)
+        .filter(|offset| *offset > 0)
+        .collect();
+    boundaries.dedup();
+    let mut clusters: Vec<Range<usize>> = Vec::with_capacity(boundaries.len());
+    let mut start = 0;
+    for end in boundaries {
+        clusters.push(start..end);
+        start = end;
+    }
+    let script = |range: &Range<usize>| {
+        typed[range.clone()]
+            .chars()
+            .find(|character| faces::right_to_left(*character))
+            .map(|character| match u32::from(character) {
+                0x0590..=0x05FF | 0xFB1D..=0xFB4F => 1,
+                0x0600..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => 2,
+                _ => 3,
+            })
+    };
+    let strong = |range: &Range<usize>| script(range).is_some();
+    let neutral = |range: &Range<usize>| {
+        typed[range.clone()]
+            .chars()
+            .all(|character| !character.is_alphanumeric())
+    };
+    let mut units: Vec<(Range<usize>, bool)> = Vec::with_capacity(clusters.len());
+    let mut at = 0;
+    while at < clusters.len() {
+        if !strong(&clusters[at]) {
+            units.push((clusters[at].clone(), false));
+            at += 1;
+            continue;
+        }
+        let first = clusters[at].start;
+        let written = script(&clusters[at]);
+        let mut last = at;
+        let mut next = at + 1;
+        while next < clusters.len() {
+            if strong(&clusters[next]) && script(&clusters[next]) == written {
+                last = next;
+                next += 1;
+            } else if neutral(&clusters[next]) {
+                next += 1;
+            } else {
+                break;
+            }
+        }
+        units.push((first..clusters[last].end, true));
+        at = last + 1;
+    }
+    units
+}
+
+fn chosen_pieces(
+    faces: &mut faces::NewFaces<'_>,
+    typed: &str,
+    group: usize,
+    run: usize,
+    chosen: &faces::Chosen,
+) -> Result<Vec<Piece>, SpikeError> {
+    if typed.chars().any(char::is_control) {
+        return Err(unsupported("tabs and control characters cannot be typed"));
+    }
+    typed_units(typed)
+        .into_iter()
+        .map(|(range, _)| faces.chosen_piece(run, &typed[range], group, chosen))
+        .collect()
+}
+
 fn typed_pieces(
     style: &Style<'_>,
     mut faces: Option<&mut faces::NewFaces<'_>>,
@@ -3069,16 +3194,17 @@ fn typed_pieces(
     if brought(run) {
         order.push(run);
     }
-    let mut boundaries: Vec<usize> = GraphemeClusterSegmenter::new()
-        .segment_str(typed)
-        .filter(|offset| *offset > 0)
-        .collect();
-    boundaries.dedup();
-    let mut pieces = Vec::with_capacity(boundaries.len());
-    let mut start = 0;
-    for end in boundaries {
-        let cluster = &typed[start..end];
-        start = end;
+    let units = typed_units(typed);
+    let mut pieces = Vec::with_capacity(units.len());
+    for (range, rtl) in units {
+        let cluster = &typed[range];
+        if rtl {
+            let faces = faces.as_deref_mut().ok_or_else(|| {
+                unsupported("right-to-left text is written in a face brought in for it")
+            })?;
+            pieces.push(faces.piece(style, run, cluster, group)?);
+            continue;
+        }
         let encoded = |index: usize, written: &str| {
             let candidate = style.run(index);
             crate::retype::encode(candidate.reference, written).and_then(|bytes| {
@@ -3122,6 +3248,7 @@ fn typed_pieces(
             _ => run,
         };
         pieces.push(Piece {
+            actual: None,
             advance: codes.iter().map(|code| advance_of(style, set, code)).sum(),
             adjust: vec![0.0; codes.len()],
             codes,

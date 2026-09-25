@@ -15,6 +15,7 @@ pub(super) struct NewFaces<'p> {
     fonts: crate::Fonts<'p>,
     program: &'p pdf_content::PageProgram,
     restrictions: crate::Restrictions,
+    credential: &'p [u8],
     faces: Vec<Face>,
 }
 
@@ -28,6 +29,13 @@ struct Face {
     run: usize,
     meaning: BTreeMap<u16, String>,
     typed: bool,
+    instead_of: Option<String>,
+}
+
+pub(super) struct Chosen {
+    face: pdf_content::SubstitutedFace,
+    request: pdf_content::FontRequest,
+    family: String,
 }
 
 type Named = (String, Reference);
@@ -39,15 +47,12 @@ pub(super) struct Settled {
 }
 
 impl<'p> NewFaces<'p> {
-    pub(super) const fn new(
-        fonts: crate::Fonts<'p>,
-        program: &'p pdf_content::PageProgram,
-        restrictions: crate::Restrictions,
-    ) -> Self {
+    pub(super) const fn new(page: &crate::spike_move_text::PlannerPage<'p>) -> Self {
         Self {
-            fonts,
-            program,
-            restrictions,
+            fonts: page.fonts,
+            program: page.program,
+            restrictions: page.restrictions,
+            credential: page.credential,
             faces: Vec::new(),
         }
     }
@@ -77,12 +82,121 @@ impl<'p> NewFaces<'p> {
 
     pub(super) fn typed_families(&self) -> Vec<String> {
         let mut families: Vec<String> = Vec::new();
-        for face in self.faces.iter().filter(|face| face.typed) {
+        for face in self
+            .faces
+            .iter()
+            .filter(|face| face.typed && face.instead_of.is_none())
+        {
             if !face.family.is_empty() && !families.contains(&face.family) {
                 families.push(face.family.clone());
             }
         }
         families
+    }
+
+    pub(super) fn stood_in(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for face in &self.faces {
+            if let Some(chosen) = &face.instead_of {
+                let pair = (chosen.clone(), face.family.clone());
+                if !pairs.contains(&pair) {
+                    pairs.push(pair);
+                }
+            }
+        }
+        pairs
+    }
+
+    pub(super) fn chosen(
+        &self,
+        style: &Style<'_>,
+        run: usize,
+        wanted: &crate::plan::TextStyle,
+    ) -> Result<Chosen, SpikeError> {
+        let absent = || unsupported("the font asked for is not on this machine");
+        let family = wanted.family.clone().ok_or_else(absent)?;
+        let fonts = self.fonts.ok_or_else(absent)?;
+        let mut request = self.request(style, run).unwrap_or_else(|| {
+            pdf_content::FontRequest::for_family(&family, pdf_content::FontStyle::default())
+        });
+        request.family.clone_from(&family);
+        request.base_font = family.replace(' ', "").into_bytes();
+        request.standard_face = None;
+        if let Some(bold) = wanted.bold {
+            request.style.weight = if bold { 700 } else { 400 };
+        }
+        if let Some(italic) = wanted.italic {
+            request.style.italic = italic;
+        }
+        let face = fonts
+            .primary_face(&request)
+            .filter(|face| pdf_content::outline_match::is_same_family(face, &family))
+            .ok_or_else(absent)?;
+        let found = face.identity.style;
+        if wanted.bold.is_some_and(|bold| bold != found.is_bold())
+            || wanted.italic.is_some_and(|italic| italic != found.italic)
+        {
+            return Err(unsupported(
+                "this family has no face in the weight or slope asked for on this machine",
+            ));
+        }
+        Ok(Chosen {
+            face,
+            request,
+            family,
+        })
+    }
+
+    pub(super) fn chosen_piece(
+        &mut self,
+        run: usize,
+        cluster: &str,
+        group: usize,
+        chosen: &Chosen,
+    ) -> Result<Piece, SpikeError> {
+        if shows(&chosen.face, cluster) {
+            return self.piece_in(run, cluster, group, &chosen.face, false);
+        }
+        let character = cluster
+            .chars()
+            .find(|character| !character.is_whitespace())
+            .or_else(|| cluster.chars().next())
+            .ok_or_else(|| unsupported("an empty cluster cannot be typed"))?;
+        let face = self
+            .kindred(chosen, character)
+            .ok_or_else(|| unsupported("no face on this machine shows a typed character"))?;
+        let piece = self.piece_in(run, cluster, group, &face, true)?;
+        if let Some(face) = piece
+            .style
+            .checked_sub(FACE_RUNS)
+            .and_then(|index| self.faces.get_mut(index))
+        {
+            face.instead_of.get_or_insert_with(|| chosen.family.clone());
+        }
+        Ok(piece)
+    }
+
+    fn kindred(&self, chosen: &Chosen, character: char) -> Option<pdf_content::SubstitutedFace> {
+        let fonts = self.fonts?;
+        let serif = |name: &str| {
+            let name = name.to_lowercase();
+            name.contains("serif") && !name.contains("sans")
+        };
+        let wanted_serif = serif(&chosen.family);
+        let mut names: Vec<&str> = pdf_content::coverage_faces(character).to_vec();
+        names.sort_by_key(|name| serif(name) != wanted_serif);
+        for name in names {
+            let mut request = chosen.request.clone();
+            name.clone_into(&mut request.family);
+            request.base_font = name.replace(' ', "").into_bytes();
+            if let Some(face) = fonts.primary_face(&request).filter(|face| {
+                pdf_content::outline_match::is_same_family(face, name)
+                    && face.program.glyph_for_char(character).is_some()
+            }) {
+                return Some(face);
+            }
+        }
+        fonts.fallback_face(&chosen.request, character)
     }
 
     pub(super) fn programs(&self) -> Vec<Arc<GlyphProgram>> {
@@ -103,15 +217,20 @@ impl<'p> NewFaces<'p> {
         let fonts = self.fonts.ok_or_else(no_code)?;
         let request = self.request(style, run).ok_or_else(no_code)?;
         let first = cluster.chars().next().ok_or_else(no_code)?;
-        if cluster.chars().any(right_to_left) {
-            return Err(unsupported(
-                "right-to-left text needs the bidirectional algorithm (a later slice)",
-            ));
-        }
-        let face = fonts
-            .fallback_face(&request, first)
+        let face = unwidened(&request)
+            .and_then(|family| {
+                let mut widthless = request.clone();
+                widthless.family.clone_from(&family);
+                fonts
+                    .fallback_face(&widthless, first)
+                    .filter(|face| pdf_content::outline_match::is_same_family(face, &family))
+            })
+            .or_else(|| fonts.fallback_face(&request, first))
             .ok_or_else(|| unsupported("no face on this machine shows a typed character"))?;
-        self.piece_in(run, cluster, group, &face, true)
+        let own = pdf_content::outline_match::is_same_family(&face, &request.family)
+            || unwidened(&request)
+                .is_some_and(|family| pdf_content::outline_match::is_same_family(&face, &family));
+        self.piece_in(run, cluster, group, &face, !own)
     }
 
     pub(super) fn piece_in(
@@ -122,11 +241,6 @@ impl<'p> NewFaces<'p> {
         face: &pdf_content::SubstitutedFace,
         typed: bool,
     ) -> Result<Piece, SpikeError> {
-        if cluster.chars().any(right_to_left) {
-            return Err(unsupported(
-                "right-to-left text needs the bidirectional algorithm (a later slice)",
-            ));
-        }
         let embeddable = crate::new_font::Embeddable::of(&face.program)
             .ok_or_else(|| unsupported("the face for a typed character cannot be embedded yet"))?;
         let shaped =
@@ -152,6 +266,7 @@ impl<'p> NewFaces<'p> {
                 run,
                 meaning: BTreeMap::new(),
                 typed,
+                instead_of: None,
             });
             self.faces.len() - 1
         };
@@ -173,6 +288,7 @@ impl<'p> NewFaces<'p> {
             }
         }
         Ok(Piece {
+            actual: None,
             codes: Vec::new(),
             text: cluster.to_owned(),
             advance: 0.0,
@@ -202,10 +318,10 @@ impl<'p> NewFaces<'p> {
         };
         let read = match (alone, written) {
             (Some(read), _) => read,
-            (None, Written::Committed(document)) => Self::fonts_in(&document, page_index, &named)?,
+            (None, Written::Committed(document)) => self.fonts_in(&document, page_index, &named)?,
             (None, Written::Alone) => {
-                let document = commit(source, &writes, self.restrictions)?;
-                Self::fonts_in(&document, page_index, &named)?
+                let document = commit(source, &writes, (self.credential, self.restrictions))?;
+                self.fonts_in(&document, page_index, &named)?
             }
         };
         let base = style.runs.len();
@@ -233,7 +349,7 @@ impl<'p> NewFaces<'p> {
         let mut last: Vec<PlannedWrite> = Vec::new();
         for (at, mark) in marks.iter().enumerate() {
             if at > 0 {
-                document = commit(&document, &last, self.restrictions)?;
+                document = commit(&document, &last, (self.credential, self.restrictions))?;
             }
             let sharing: Vec<&Face> = self
                 .faces
@@ -247,7 +363,11 @@ impl<'p> NewFaces<'p> {
             placed.push((name, font));
         }
         let written = if marks.len() > 1 {
-            Written::Committed(commit(&document, &last, self.restrictions)?)
+            Written::Committed(commit(
+                &document,
+                &last,
+                (self.credential, self.restrictions),
+            )?)
         } else {
             Written::Alone
         };
@@ -276,7 +396,8 @@ impl<'p> NewFaces<'p> {
         let embeddable = crate::new_font::Embeddable::of(&sharing[0].program)
             .ok_or_else(|| unsupported("the face for a typed character cannot be embedded yet"))?;
         let existing = self.program.resources.fonts().iter().find_map(|entry| {
-            let objects = crate::new_font::embedded_face(source, entry.reference()?, mark)?;
+            let objects =
+                crate::new_font::embedded_face(source, entry.reference()?, mark, self.credential)?;
             Some((entry, objects))
         });
         let mut meaning = BTreeMap::new();
@@ -308,13 +429,15 @@ impl<'p> NewFaces<'p> {
         }
         let objects = crate::new_font::FontObjects::numbered_from(next_object_number(document)?);
         let font = crate::new_font::embed(embeddable, &meaning, (objects, mark, false))?;
-        let (name, holder) = crate::new_font::add_font_resource(document, page, objects.font)?;
+        let (name, holder) =
+            crate::new_font::add_font_resource(document, page, objects.font, self.credential)?;
         let mut step = font.writes;
         step.push(holder);
         Ok((step, format!("/{name}"), objects.font))
     }
 
     fn fonts_in(
+        &self,
         document: &ByteStore,
         page_index: usize,
         named: &[(String, Reference)],
@@ -324,7 +447,7 @@ impl<'p> NewFaces<'p> {
             document,
             page_index,
             PageContentLimits::default(),
-            b"",
+            self.credential,
         )
         .map_err(|_| unread())?;
         named
@@ -352,7 +475,7 @@ impl<'p> NewFaces<'p> {
             source,
             &object_writes(writes),
             ProtectionPolicy::Preserve {
-                credential: b"",
+                credential: self.credential,
                 restrictions: self.restrictions,
             },
         )
@@ -457,6 +580,18 @@ impl<'p> NewFaces<'p> {
             {
                 return Err(undecoded());
             }
+            let read: String = piece
+                .shaped
+                .iter()
+                .filter_map(|glyph| face.meaning.get(&glyph.glyph))
+                .map(String::as_str)
+                .collect();
+            let silent = piece
+                .shaped
+                .iter()
+                .any(|glyph| face.meaning.get(&glyph.glyph).is_none_or(String::is_empty));
+            piece.actual = (silent || read != piece.text || piece.text.chars().any(right_to_left))
+                .then(|| piece.text.clone().into_boxed_str());
             piece.adjust = adjustments(embeddable.metrics(), &piece.shaped);
             piece.rise = if piece.shaped.iter().all(|glyph| glyph.y == 0) {
                 Vec::new()
@@ -480,7 +615,37 @@ impl<'p> NewFaces<'p> {
     }
 }
 
-const fn right_to_left(character: char) -> bool {
+fn unwidened(request: &pdf_content::FontRequest) -> Option<String> {
+    const WIDTHS: [&str; 7] = [
+        "ExtraCondensed",
+        "SemiCondensed",
+        "Condensed",
+        "Narrow",
+        "SemiExpanded",
+        "Expanded",
+        "Extended",
+    ];
+    let family = request.family.trim_end();
+    WIDTHS.iter().find_map(|width| {
+        let rest = family.strip_suffix(width)?;
+        let rest = rest.trim_end_matches(['-', ' ', '_']);
+        (!rest.is_empty()).then(|| rest.to_owned())
+    })
+}
+
+fn shows(face: &pdf_content::SubstitutedFace, cluster: &str) -> bool {
+    pdf_content::shape_cluster(&face.program, face.identity.face_index, cluster).is_some_and(
+        |shaped| {
+            cluster.contains('\u{25CC}')
+                || face
+                    .program
+                    .glyph_for_char('\u{25CC}')
+                    .is_none_or(|circle| shaped.iter().all(|glyph| glyph.glyph != circle))
+        },
+    )
+}
+
+pub(super) const fn right_to_left(character: char) -> bool {
     matches!(
         character as u32,
         0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x1_0800..=0x1_0FFF | 0x1_E800..=0x1_EFFF
@@ -581,12 +746,12 @@ pub(crate) fn next_object_number(source: &ByteStore) -> Result<u32, SpikeError> 
 pub(crate) fn commit(
     source: &ByteStore,
     writes: &[PlannedWrite],
-    restrictions: crate::Restrictions,
+    (credential, restrictions): (&[u8], crate::Restrictions),
 ) -> Result<ByteStore, SpikeError> {
     commit_with(
         source,
         writes,
-        (b"", restrictions),
+        (credential, restrictions),
         crate::incremental::TrailerExtras::default(),
     )
 }

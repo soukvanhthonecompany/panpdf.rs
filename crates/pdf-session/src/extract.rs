@@ -7,7 +7,11 @@ use pdf_edit::spike_move_text::SpikeError;
 use crate::Session;
 use crate::pictures::PAGE_POINTS;
 
-pub fn extract_pages(document: &Arc<[u8]>, pages: &[usize]) -> Result<Vec<u8>, SpikeError> {
+pub fn extract_pages(
+    document: &Arc<[u8]>,
+    credential: &[u8],
+    pages: &[usize],
+) -> Result<Vec<u8>, SpikeError> {
     if pages.is_empty() {
         return Err(SpikeError::RetypeUnsupported(
             "no page was named to copy out",
@@ -20,6 +24,7 @@ pub fn extract_pages(document: &Arc<[u8]>, pages: &[usize]) -> Result<Vec<u8>, S
             beside: 0,
             before: false,
             document: Arc::clone(document),
+            password: pdf_edit::Password(credential.to_vec()),
             pages: pages.to_vec(),
         },
         Command::RemovePages { pages: vec![0] },
@@ -188,7 +193,8 @@ mod tests {
     #[test]
     fn the_pages_named_come_out_in_that_order() {
         let document = three_pages();
-        let copied: Arc<[u8]> = Arc::from(extract_pages(&document, &[2, 0]).expect("extracted"));
+        let copied: Arc<[u8]> =
+            Arc::from(extract_pages(&document, b"", &[2, 0]).expect("extracted"));
         assert_eq!(
             pdf_content::count_pages_strict(
                 &store(&copied),
@@ -207,7 +213,7 @@ mod tests {
     #[test]
     fn a_page_carries_its_own_objects_and_no_others() {
         let document = three_pages();
-        let copied = extract_pages(&document, &[0]).expect("extracted");
+        let copied = extract_pages(&document, b"", &[0]).expect("extracted");
         let holds = |name: &str| {
             let name = name.as_bytes();
             copied.windows(name.len()).any(|window| window == name)
@@ -225,7 +231,8 @@ mod tests {
     #[test]
     fn a_page_asked_for_twice_comes_out_twice() {
         let document = three_pages();
-        let copied: Arc<[u8]> = Arc::from(extract_pages(&document, &[1, 1]).expect("extracted"));
+        let copied: Arc<[u8]> =
+            Arc::from(extract_pages(&document, b"", &[1, 1]).expect("extracted"));
         assert_eq!(painting(&copied, 0), painting(&copied, 1));
         assert_eq!(painting(&copied, 0), painting(&document, 1));
     }
@@ -233,13 +240,13 @@ mod tests {
     #[test]
     fn nothing_and_no_such_page_are_refused() {
         let document = three_pages();
-        let nothing = extract_pages(&document, &[]).expect_err("refused");
+        let nothing = extract_pages(&document, b"", &[]).expect_err("refused");
         assert!(
             nothing.to_string().contains("no page was named"),
             "{nothing}"
         );
-        assert!(extract_pages(&document, &[3]).is_err());
-        assert!(extract_pages(&document, &[0, 9]).is_err());
+        assert!(extract_pages(&document, b"", &[3]).is_err());
+        assert!(extract_pages(&document, b"", &[0, 9]).is_err());
     }
 
     #[test]

@@ -31,12 +31,19 @@ pub(crate) fn plan_new_image(
     let first = crate::block_rewrite::next_object_number(source)?;
     let object = Reference::new(first, 0);
     let mut writes = image_writes(&image, first);
-    let (name, holder) =
-        crate::new_font::add_resource(source, page.program.page, (b"/XObject", "Im"), object)?;
+    let (name, holder) = crate::new_font::add_resource(
+        source,
+        page.program.page,
+        (b"/XObject", "Im"),
+        object,
+        page.credential,
+    )?;
     writes.push(holder);
 
-    let document = crate::block_rewrite::commit_writes(source, &writes, page.restrictions)?;
-    let carrying = crate::spike_move_text::read_page(&document, page_index, b"", page.fonts)?;
+    let document =
+        crate::block_rewrite::commit_writes(source, &writes, (page.credential, page.restrictions))?;
+    let carrying =
+        crate::spike_move_text::read_page(&document, page_index, page.credential, page.fonts)?;
     let stream = carrying
         .program
         .streams

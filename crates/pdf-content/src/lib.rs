@@ -15,8 +15,8 @@ pub use page::{
     Followed, FormXObject, FunctionData, FunctionObject, IccProfileStream, ImageXObject,
     IndexedLookupStream, Link, LinkAction, LinkResolver, Medium, OptionalContent, PageContentError,
     PageContentErrorKind, PageContentLimits, PageGeometry, PageLinks, PageProgram, PageResources,
-    ResourceEntry, ResourceFontError, ShadingPattern, TilingPattern, Type3Font, Type3Procedure,
-    UnreadableAnnotation, View, count_pages_recovering, count_pages_strict,
+    ResourceEntry, ResourceFontError, ShadingPattern, StringProtection, TilingPattern, Type3Font,
+    Type3Procedure, UnreadableAnnotation, View, count_pages_recovering, count_pages_strict,
     count_pages_with_password, load_page_program_for, load_page_program_recovering,
     load_page_program_recovering_for, load_page_program_strict,
     load_page_program_tolerating_damage, load_page_program_tolerating_damage_for,
@@ -38,7 +38,7 @@ pub use pdf_font::substitute::{
     DecipherScope, FaceIdentity, FontFlags, FontProvider, FontRequest, FontStyle, FontSubstitution,
     GenericFamily, MappingCensus, MappingRoute, ProgramEvidence, SUBSTITUTION_POLICY,
     SubstitutedFace, SubstitutionReason, UnresolvedReason, character_for_glyph_name,
-    is_combining_mark, is_ignorable, standard_encoding_name,
+    coverage_faces, is_combining_mark, is_ignorable, standard_encoding_name,
 };
 pub use pdf_font::system_fonts::{PackagedFace, SystemFontProvider};
 pub use pdf_font::truetype::{GlyphOutline, OutlinePoint, TrueTypeError, TrueTypeFont};

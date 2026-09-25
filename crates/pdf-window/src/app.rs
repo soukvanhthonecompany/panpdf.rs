@@ -63,6 +63,7 @@ fn made(
             tried: false,
             shown: false,
             focus: true,
+            for_pages: None,
         });
     }
     window.remember_here();

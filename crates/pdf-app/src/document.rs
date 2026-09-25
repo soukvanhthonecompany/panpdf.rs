@@ -129,6 +129,7 @@ enum Step {
         beside: usize,
         before: bool,
         document: Arc<[u8]>,
+        password: pdf_edit::Password,
         pages: Vec<usize>,
     },
     PlaceText {
@@ -180,7 +181,7 @@ enum Step {
         copied: Copied,
         dx: f64,
         dy: f64,
-        elsewhere: Option<pdf_bytes::ByteStore>,
+        elsewhere: Option<(pdf_bytes::ByteStore, pdf_edit::Password)>,
     },
     Place {
         page: usize,
@@ -419,6 +420,7 @@ impl Step {
                 before,
                 document,
                 pages,
+                ..
             } => format!(
                 "beside={beside} before={before} bytes={} pages={pages:?}",
                 document.len()
@@ -767,6 +769,7 @@ struct Typed {
     breaks: Breaks,
     overflow: bool,
     brought_in: Option<String>,
+    stood_in: Option<(String, String)>,
     drawn_from: Option<String>,
     cropped: bool,
     note: Option<Refusal>,
@@ -1053,7 +1056,9 @@ impl Editor {
         let places = Arc::new(
             self.session
                 .as_ref()
-                .and_then(|session| pdf_edit::destination::spots_of(session.source()).ok())
+                .and_then(|session| {
+                    pdf_edit::destination::spots_of(session.source(), &self.credential).ok()
+                })
                 .unwrap_or_default(),
         );
         self.named_places = Some(Arc::clone(&places));
@@ -1884,7 +1889,7 @@ impl Editor {
         page: usize,
         copied: Copied,
         (dx, dy): (f64, f64),
-        elsewhere: Option<pdf_bytes::ByteStore>,
+        elsewhere: Option<(pdf_bytes::ByteStore, pdf_edit::Password)>,
     ) -> Option<EditJob> {
         self.begin(Step::Paste {
             page,
@@ -1900,7 +1905,7 @@ impl Editor {
         page: usize,
         copied: Copied,
         (dx, dy): (f64, f64),
-        elsewhere: Option<pdf_bytes::ByteStore>,
+        elsewhere: Option<(pdf_bytes::ByteStore, pdf_edit::Password)>,
     ) -> Applied {
         self.here(Step::Paste {
             page,
@@ -2519,13 +2524,14 @@ impl Editor {
     pub fn begin_insert_pages(
         &mut self,
         (beside, before): (usize, bool),
-        document: Arc<[u8]>,
+        (document, password): (Arc<[u8]>, pdf_edit::Password),
         pages: &[usize],
     ) -> Option<EditJob> {
         self.begin(Step::InsertPages {
             beside,
             before,
             document,
+            password,
             pages: pages.to_vec(),
         })
     }
@@ -2533,13 +2539,14 @@ impl Editor {
     pub fn insert_pages(
         &mut self,
         (beside, before): (usize, bool),
-        document: Arc<[u8]>,
+        (document, password): (Arc<[u8]>, pdf_edit::Password),
         pages: &[usize],
     ) -> Applied {
         self.here(Step::InsertPages {
             beside,
             before,
             document,
+            password,
             pages: pages.to_vec(),
         })
     }
@@ -4769,6 +4776,7 @@ impl EditJob {
                 breaks: self.frames.breaks(page, block),
                 overflow: false,
                 brought_in: None,
+                stood_in: None,
                 drawn_from: None,
                 cropped: false,
                 status: Some(Done::DeletedOnRow {
@@ -4856,6 +4864,7 @@ impl EditJob {
             breaks: self.frames.breaks(page, block),
             overflow: false,
             brought_in: None,
+            stood_in: None,
             drawn_from: pdf_cli::substituted_family_on_row(&view, line, from),
             cropped: false,
             note: Some(note),
@@ -4863,6 +4872,10 @@ impl EditJob {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one typing through the block rewrite, plan to caret, read in the order it happens"
+    )]
     fn type_in_block(
         &mut self,
         view: &pdf_session::PageView,
@@ -4967,6 +4980,7 @@ impl EditJob {
             breaks: Some(outcome.breaks.clone()),
             overflow: outcome.overflow,
             brought_in: outcome.brought_in.first().cloned(),
+            stood_in: outcome.stood_in.first().cloned(),
             drawn_from,
             cropped: outcome.cropped,
             note: None,
@@ -5119,11 +5133,13 @@ impl EditJob {
                 beside,
                 before,
                 document,
+                password,
                 pages,
             } => Command::InsertPages {
                 beside: *beside,
                 before: *before,
                 document: Arc::clone(document),
+                password: password.clone(),
                 pages: pages.clone(),
             },
             _ => return (Applied::Unchanged, Done::NothingChanged.into()),
@@ -5763,7 +5779,7 @@ impl EditJob {
         page: usize,
         copied: Copied,
         (dx, dy): (f64, f64),
-        elsewhere: Option<pdf_bytes::ByteStore>,
+        elsewhere: Option<(pdf_bytes::ByteStore, pdf_edit::Password)>,
     ) -> (Applied, Message) {
         let objects = copied.objects.len();
         if objects == 0 {
@@ -6566,6 +6582,7 @@ fn typed_status(typed: &Typed, deleted: bool) -> Message {
         }),
         overflow: typed.overflow,
         brought_in: typed.brought_in.clone(),
+        stood_in: typed.stood_in.clone(),
         drawn_from: typed.drawn_from.clone(),
         cropped: typed.cropped,
     }

@@ -29,7 +29,6 @@ pub fn rewrite(
     credential: &[u8],
     wanted: &Wanted,
 ) -> Result<Vec<u8>, SpikeError> {
-    let read = Read::open(source, credential)?;
     let made = match wanted {
         Wanted::Open => None,
         Wanted::Protected(asked) => Some(
@@ -37,7 +36,36 @@ pub fn rewrite(
                 .map_err(|_| refused("this document's new protection could not be made"))?,
         ),
     };
-    let new_security = made.as_ref().map(|made| &made.security);
+    let opens = match wanted {
+        Wanted::Open => Vec::new(),
+        Wanted::Protected(asked) => {
+            if asked.owner.is_empty() {
+                asked.user.clone()
+            } else {
+                asked.owner.clone()
+            }
+        }
+    };
+    written_under(
+        source,
+        credential,
+        (
+            made.as_ref()
+                .map(|made| (made.dictionary.as_slice(), &made.security)),
+            None,
+        ),
+        &opens,
+    )
+}
+
+fn written_under(
+    source: &ByteStore,
+    credential: &[u8],
+    (made, identifier): (Option<(&[u8], &AuthenticatedSecurity)>, Option<String>),
+    opens: &[u8],
+) -> Result<Vec<u8>, SpikeError> {
+    let read = Read::open(source, credential)?;
+    let new_security = made.map(|(_, security)| security);
 
     let kept = read.objects()?;
     let encrypt_at = made
@@ -74,14 +102,14 @@ pub fn rewrite(
             }
         }
     }
-    if let (Some(at), Some(made)) = (encrypt_at, made.as_ref()) {
+    if let (Some(at), Some((dictionary, _))) = (encrypt_at, made) {
         let offset = out.len();
         out.extend_from_slice(
             format!(
                 "{} {} obj\n{}\nendobj\n",
                 at.object_number(),
                 at.generation(),
-                String::from_utf8_lossy(&made.dictionary)
+                String::from_utf8_lossy(dictionary)
             )
             .as_bytes(),
         );
@@ -94,7 +122,10 @@ pub fn rewrite(
         );
     }
 
-    let identifier = read.identifier(made.is_some())?;
+    let identifier = match identifier {
+        Some(given) => given,
+        None => read.identifier(made.is_some())?,
+    };
     let tail = Tail {
         root: read.root,
         encrypt: encrypt_at,
@@ -111,18 +142,36 @@ pub fn rewrite(
     }
 
     let written = ByteStore::new(pdf_bytes::SourceId::new(0), Arc::<[u8]>::from(out.clone()));
-    let credential = match wanted {
-        Wanted::Open => Vec::new(),
-        Wanted::Protected(asked) => {
-            if asked.owner.is_empty() {
-                asked.user.clone()
-            } else {
-                asked.owner.clone()
-            }
-        }
-    };
-    prove(&read, &written, &credential, &kept)?;
+    prove(&read, &written, opens, &kept)?;
     Ok(out)
+}
+
+#[cfg(test)]
+pub(crate) fn locked_rc4(plain: &ByteStore) -> ByteStore {
+    let r3 = ByteStore::new(
+        pdf_bytes::SourceId::new(0x7263),
+        &include_bytes!("../tests/data/modifiable-r3.pdf")[..],
+    );
+    let (_, security) =
+        crate::previous::readable_index(&r3, b"view").expect("the fixture opens with `view`");
+    let security = security.expect("the fixture is protected");
+    let dictionary = crate::previous::direct_body(&r3, Reference::new(6, 0), b"view")
+        .expect("the fixture's /Encrypt reads");
+    let identifier = "[<66d36a30a97e0f16f39955c6221e0c2a> <66d36a30a97e0f16f39955c6221e0c2a>]";
+    let written = written_under(
+        plain,
+        b"",
+        (
+            Some((dictionary.as_slice(), &security)),
+            Some(identifier.to_owned()),
+        ),
+        b"view",
+    )
+    .expect("the document is locked");
+    ByteStore::new(
+        pdf_bytes::SourceId::next_document(),
+        Arc::<[u8]>::from(written),
+    )
 }
 
 fn header(read: &Read<'_>, protecting: bool) -> String {
@@ -673,3 +722,6 @@ fn canonical(body: &[u8], is_stream: bool) -> Result<Vec<u8>, SpikeError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod reading_tests;

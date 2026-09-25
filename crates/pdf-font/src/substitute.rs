@@ -935,8 +935,12 @@ pub fn coverage_faces(character: char) -> &'static [&'static str] {
         0x0600..=0x06FF | 0x0750..=0x077F => &["Noto Naskh Arabic", "Noto Sans Arabic"],
         0x0590..=0x05FF => &["Noto Sans Hebrew", "Noto Serif Hebrew"],
         0x0370..=0x052F => &["DejaVu Sans", "Liberation Sans", "Noto Sans"],
-        0x1100..=0x11FF | 0xAC00..=0xD7AF => &["Noto Sans CJK KR", "Noto Serif CJK KR"],
-        0x3040..=0x30FF | 0x31F0..=0x31FF => &["Noto Sans CJK JP", "Noto Serif CJK JP"],
+        0x1100..=0x11FF | 0xAC00..=0xD7AF => {
+            &["Noto Sans CJK KR", "Noto Serif CJK KR", "Noto Sans CJK SC"]
+        }
+        0x3040..=0x30FF | 0x31F0..=0x31FF => {
+            &["Noto Sans CJK JP", "Noto Serif CJK JP", "Noto Sans CJK SC"]
+        }
         0x2E80..=0x2EFF
         | 0x3000..=0x303F
         | 0x3400..=0x4DBF

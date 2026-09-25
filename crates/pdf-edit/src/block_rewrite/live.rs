@@ -54,7 +54,7 @@ pub(crate) fn lay_out_live(
     }
     let groups = line_groups(&reading.lines);
     let aligned = alignments(&reading, &groups, frame, edit.paragraph.flow_round);
-    let mut faces = super::faces::NewFaces::new(page.fonts, page.program, page.restrictions);
+    let mut faces = super::faces::NewFaces::new(&page);
     let (mut tokens, _, selected) = edited_tokens(&reading, &groups, edit, &mut faces)?;
     let base = reading.style.runs.len();
     let programs = faces.programs();

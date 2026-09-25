@@ -44,6 +44,7 @@ pub(crate) fn plan_new_path(
             page.program.page,
             (b"/ExtGState", "GS"),
             object,
+            page.credential,
         )?;
         writes.push(holder);
         state = Some(name);
@@ -52,8 +53,13 @@ pub(crate) fn plan_new_path(
     let page = if writes.is_empty() {
         page
     } else {
-        let document = crate::block_rewrite::commit_writes(source, &writes, page.restrictions)?;
-        carried = crate::spike_move_text::read_page(&document, page_index, b"", page.fonts)?;
+        let document = crate::block_rewrite::commit_writes(
+            source,
+            &writes,
+            (page.credential, page.restrictions),
+        )?;
+        carried =
+            crate::spike_move_text::read_page(&document, page_index, page.credential, page.fonts)?;
         PlannerPage {
             program: &carried.program,
             operations: &carried.operations,

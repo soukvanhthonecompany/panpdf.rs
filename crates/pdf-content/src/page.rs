@@ -163,6 +163,7 @@ impl PageResources {
             reference: None,
             source,
             value,
+            strings: StringProtection::Plain,
             form: None,
             form_error: None,
             document: binding.document.clone(),
@@ -239,6 +240,7 @@ impl PageResources {
             reference: Some(reference),
             source: resolved.source().clone(),
             value: resolved.value().clone(),
+            strings: StringProtection::of(&resolved),
             form: None,
             form_error: None,
             document: objects.clone(),
@@ -309,12 +311,43 @@ impl PageResources {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StringProtection {
+    Plain,
+    ByObject(Reference),
+}
+
+impl StringProtection {
+    #[must_use]
+    pub fn of(resolved: &ResolvedObject) -> Self {
+        resolved
+            .indirect_object()
+            .map_or(Self::Plain, |object| Self::ByObject(object.reference()))
+    }
+
+    fn plaintext(
+        self,
+        security: Option<&AuthenticatedSecurity>,
+        encrypted: Vec<u8>,
+    ) -> Result<Vec<u8>, PageContentError> {
+        match (self, security) {
+            (Self::ByObject(reference), Some(security)) => security
+                .decrypt_string(reference, &encrypted)
+                .map_err(|error| {
+                    PageContentError::new(PageContentErrorKind::Decrypt(error.kind()))
+                }),
+            _ => Ok(encrypted),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ResourceEntry {
     name: Vec<u8>,
     reference: Option<Reference>,
     source: ByteStore,
     value: Object,
+    strings: StringProtection,
     form: Option<Arc<FormXObject>>,
     form_error: Option<PageContentErrorKind>,
     document: ByteStore,
@@ -343,6 +376,34 @@ impl ResourceEntry {
     #[must_use]
     pub const fn value(&self) -> &Object {
         &self.value
+    }
+
+    #[must_use]
+    pub const fn strings(&self) -> StringProtection {
+        self.strings
+    }
+
+    pub fn string_plaintext(
+        &self,
+        strings: StringProtection,
+        encrypted: Vec<u8>,
+    ) -> Result<Vec<u8>, PageContentError> {
+        strings.plaintext(self.security.as_deref(), encrypted)
+    }
+
+    pub fn resolve_protected_object(
+        &self,
+        reference: Reference,
+    ) -> Result<(ByteStore, Object, StringProtection), PageContentError> {
+        let resolved = self
+            .index
+            .resolve_object(&self.document, reference, self.limits.resolve)
+            .map_err(|error| PageContentError::new(PageContentErrorKind::Resolve(error)))?;
+        Ok((
+            resolved.source().clone(),
+            resolved.value().clone(),
+            StringProtection::of(&resolved),
+        ))
     }
 
     #[must_use]
@@ -461,15 +522,9 @@ impl ResourceEntry {
     }
 
     pub fn shading_pattern(&self) -> Result<ShadingPattern, PageContentError> {
-        let (source, value) = match self.reference {
-            Some(reference) => {
-                let resolved = self
-                    .index
-                    .resolve_object(&self.document, reference, self.limits.resolve)
-                    .map_err(|error| PageContentError::new(PageContentErrorKind::Resolve(error)))?;
-                (resolved.source().clone(), resolved.value().clone())
-            }
-            None => (self.source.clone(), self.value.clone()),
+        let (source, value, strings) = match self.reference {
+            Some(reference) => self.resolve_protected_object(reference)?,
+            None => (self.source.clone(), self.value.clone(), self.strings),
         };
         let entries = dictionary(&value)
             .ok_or_else(|| PageContentError::new(PageContentErrorKind::PatternNotDictionary))?;
@@ -480,20 +535,14 @@ impl ResourceEntry {
         }
         let shading_value = unique_pattern_entry(entries, &source, b"/Shading")?
             .ok_or_else(|| PageContentError::new(PageContentErrorKind::PatternMissingShading))?;
-        let (shading_reference, shading_source, shading_object) = match shading_value.kind() {
-            ObjectKind::Reference(reference) => {
-                let resolved = self
-                    .index
-                    .resolve_object(&self.document, *reference, self.limits.resolve)
-                    .map_err(|error| PageContentError::new(PageContentErrorKind::Resolve(error)))?;
-                (
-                    Some(*reference),
-                    resolved.source().clone(),
-                    resolved.value().clone(),
-                )
-            }
-            _ => (None, source.clone(), shading_value.clone()),
-        };
+        let (shading_reference, shading_source, shading_object, shading_strings) =
+            match shading_value.kind() {
+                ObjectKind::Reference(reference) => {
+                    let (source, value, strings) = self.resolve_protected_object(*reference)?;
+                    (Some(*reference), source, value, strings)
+                }
+                _ => (None, source.clone(), shading_value.clone(), strings),
+            };
         Ok(ShadingPattern {
             reference: self.reference,
             source,
@@ -503,6 +552,7 @@ impl ResourceEntry {
                 reference: shading_reference,
                 source: shading_source,
                 value: shading_object,
+                strings: shading_strings,
                 form: None,
                 form_error: None,
                 document: self.document.clone(),
@@ -587,6 +637,7 @@ impl ResourceEntry {
                     &self.index,
                     &self.source,
                     value,
+                    self.strings,
                     self.limits,
                 )?;
                 let mut state = ResourceLoadState {
@@ -736,34 +787,42 @@ impl ResourceEntry {
             .map(|value| {
                 String::from_utf8_lossy(&Self::name_bytes(&self.source, value)).into_owned()
             });
-        let (holder_source, holder) = match entry(entries, &self.source, b"/DescendantFonts") {
-            Some(value) => {
-                let (source, value) = self.follow(value)?;
-                let ObjectKind::Array(items) = value.kind() else {
-                    return Ok(None);
-                };
-                let Some(first) = items.first() else {
-                    return Ok(None);
-                };
-                let (source, holder) = self.follow_in(&source, first)?;
-                if let ObjectKind::Dictionary(holder_entries) = holder.kind() {
-                    cid_subtype = entry(holder_entries, &source, b"/Subtype")
-                        .map(|value| Self::name_bytes(&source, value));
-                    if let Some(info) = entry(holder_entries, &source, b"/CIDSystemInfo") {
-                        let (info_source, info) = self.follow_in(&source, info)?;
-                        if let ObjectKind::Dictionary(info_entries) = info.kind() {
-                            registry = entry(info_entries, &info_source, b"/Registry")
-                                .and_then(|value| Self::string_text(&info_source, value));
-                            ordering = entry(info_entries, &info_source, b"/Ordering")
-                                .and_then(|value| Self::string_text(&info_source, value));
+        let (holder_source, holder, holder_strings) =
+            match entry(entries, &self.source, b"/DescendantFonts") {
+                Some(value) => {
+                    let (source, value, strings) =
+                        self.follow_protected(&self.source, self.strings, value)?;
+                    let ObjectKind::Array(items) = value.kind() else {
+                        return Ok(None);
+                    };
+                    let Some(first) = items.first() else {
+                        return Ok(None);
+                    };
+                    let (source, holder, strings) =
+                        self.follow_protected(&source, strings, first)?;
+                    if let ObjectKind::Dictionary(holder_entries) = holder.kind() {
+                        cid_subtype = entry(holder_entries, &source, b"/Subtype")
+                            .map(|value| Self::name_bytes(&source, value));
+                        if let Some(info) = entry(holder_entries, &source, b"/CIDSystemInfo") {
+                            let (info_source, info, info_strings) =
+                                self.follow_protected(&source, strings, info)?;
+                            if let ObjectKind::Dictionary(info_entries) = info.kind() {
+                                registry = entry(info_entries, &info_source, b"/Registry")
+                                    .and_then(|value| {
+                                        self.string_text(&info_source, info_strings, value)
+                                    });
+                                ordering = entry(info_entries, &info_source, b"/Ordering")
+                                    .and_then(|value| {
+                                        self.string_text(&info_source, info_strings, value)
+                                    });
+                            }
                         }
                     }
+                    (source, holder, strings)
                 }
-                (source, holder)
-            }
-            None => (self.source.clone(), self.value.clone()),
-        };
-        let descriptor = self.font_descriptor(&holder_source, &holder)?;
+                None => (self.source.clone(), self.value.clone(), self.strings),
+            };
+        let descriptor = self.font_descriptor(&holder_source, holder_strings, &holder)?;
         let Descriptor {
             flags,
             italic_angle,
@@ -813,6 +872,7 @@ impl ResourceEntry {
     fn font_descriptor(
         &self,
         holder_source: &ByteStore,
+        holder_strings: StringProtection,
         holder: &Object,
     ) -> Result<Descriptor, PageContentError> {
         let mut found = Descriptor::default();
@@ -822,7 +882,8 @@ impl ResourceEntry {
         let Some(descriptor) = entry(holder_entries, holder_source, b"/FontDescriptor") else {
             return Ok(found);
         };
-        let (source, descriptor) = self.follow_in(holder_source, descriptor)?;
+        let (source, descriptor, strings) =
+            self.follow_protected(holder_source, holder_strings, descriptor)?;
         let ObjectKind::Dictionary(entries) = descriptor.kind() else {
             return Ok(found);
         };
@@ -843,6 +904,7 @@ impl ResourceEntry {
             .map(|value| Self::name_bytes(&source, value));
         found.font_family = entry(entries, &source, b"/FontFamily")
             .and_then(|value| pdf_syntax::decode_string(&source, value, FAMILY_NAME_BYTES).ok())
+            .and_then(|bytes| self.string_plaintext(strings, bytes).ok())
             .map(|bytes| {
                 bytes
                     .iter()
@@ -871,28 +933,25 @@ impl ResourceEntry {
         }
     }
 
-    fn string_text(source: &ByteStore, object: &Object) -> Option<String> {
+    fn string_text(
+        &self,
+        source: &ByteStore,
+        strings: StringProtection,
+        object: &Object,
+    ) -> Option<String> {
         if !matches!(
             object.kind(),
             ObjectKind::LiteralString | ObjectKind::HexString
         ) {
             return None;
         }
-        let bytes = source.resolve(object.span()).ok()?;
-        let inner = bytes
-            .strip_prefix(b"(")
-            .and_then(|rest| rest.strip_suffix(b")"))
-            .or_else(|| {
-                bytes
-                    .strip_prefix(b"<")
-                    .and_then(|rest| rest.strip_suffix(b">"))
-            })
-            .unwrap_or(bytes);
+        let written = pdf_syntax::decode_string(source, object, FAMILY_NAME_BYTES).ok()?;
+        let plaintext = self.string_plaintext(strings, written).ok()?;
         Some(
-            inner
+            plaintext
                 .iter()
                 .filter(|byte| byte.is_ascii_graphic())
-                .map(|byte| *byte as char)
+                .map(|byte| char::from(*byte))
                 .collect(),
         )
     }
@@ -1050,6 +1109,18 @@ impl ResourceEntry {
         }
     }
 
+    fn follow_protected(
+        &self,
+        source: &ByteStore,
+        strings: StringProtection,
+        value: &Object,
+    ) -> Result<(ByteStore, Object, StringProtection), PageContentError> {
+        match value.kind() {
+            ObjectKind::Reference(reference) => self.resolve_protected_object(*reference),
+            _ => Ok((source.clone(), value.clone(), strings)),
+        }
+    }
+
     fn stream_bytes(&self, reference: Reference) -> Result<Arc<[u8]>, PageContentError> {
         let resolved = self
             .index
@@ -1084,14 +1155,15 @@ impl ResourceEntry {
             return Err(ResourceFontError::CMapNotStream);
         };
         let stream = resolved.stream().ok_or(ResourceFontError::CMapNotStream)?;
-        let encoded = resolved
-            .source()
-            .resolve(stream.data_span())
-            .map_err(|_| ResourceFontError::SourceSpanFailure)?;
+        let encoded = stream_plaintext(self.security.as_deref(), &resolved, reference, stream)
+            .map_err(|error| match error.kind() {
+                PageContentErrorKind::Decrypt(kind) => ResourceFontError::Decrypt(kind),
+                _ => ResourceFontError::SourceSpanFailure,
+            })?;
         let decoded = decode_stream_bytes(
             resolved.source(),
             entries,
-            encoded,
+            &encoded,
             stream.data_span().start(),
             self.limits.max_decoded_stream_bytes,
         )
@@ -1136,6 +1208,7 @@ pub struct ImageXObject {
     pub codec_span: Option<pdf_bytes::SourceSpan>,
     pub codec_parameters: Option<Object>,
     pub repairs: Vec<StreamRepair>,
+    pub strings: StringProtection,
 }
 
 #[derive(Clone, Debug)]
@@ -1160,6 +1233,7 @@ pub enum ResourceFontError {
     CMap(CMapError),
     CMapNotStream,
     SourceSpanFailure,
+    Decrypt(SecurityErrorKind),
 }
 
 impl fmt::Display for ResourceFontError {
@@ -1171,6 +1245,7 @@ impl fmt::Display for ResourceFontError {
             Self::CMap(error) => error.fmt(formatter),
             Self::CMapNotStream => formatter.write_str("Type0 CMap is not an indirect stream"),
             Self::SourceSpanFailure => formatter.write_str("CMap stream span cannot be resolved"),
+            Self::Decrypt(error) => write!(formatter, "CMap stream decryption: {error}"),
         }
     }
 }
@@ -1184,6 +1259,7 @@ pub struct FormXObject {
     pub dictionary: Object,
     pub bytes: ByteStore,
     pub resources: Option<PageResources>,
+    strings: StringProtection,
     document: ByteStore,
     index: Arc<RevisionIndex>,
     security: Option<Arc<AuthenticatedSecurity>>,
@@ -1191,6 +1267,34 @@ pub struct FormXObject {
 }
 
 impl FormXObject {
+    #[must_use]
+    pub const fn strings(&self) -> StringProtection {
+        self.strings
+    }
+
+    pub fn string_plaintext(
+        &self,
+        strings: StringProtection,
+        encrypted: Vec<u8>,
+    ) -> Result<Vec<u8>, PageContentError> {
+        strings.plaintext(self.security.as_deref(), encrypted)
+    }
+
+    pub fn resolve_protected_object(
+        &self,
+        reference: Reference,
+    ) -> Result<(ByteStore, Object, StringProtection), PageContentError> {
+        let resolved = self
+            .index
+            .resolve_object(&self.document, reference, self.limits.resolve)
+            .map_err(|error| PageContentError::new(PageContentErrorKind::Resolve(error)))?;
+        Ok((
+            resolved.source().clone(),
+            resolved.value().clone(),
+            StringProtection::of(&resolved),
+        ))
+    }
+
     pub fn resolve_object(
         &self,
         reference: Reference,
@@ -1306,6 +1410,7 @@ impl Type3Font {
 struct ResourceDictionary {
     source: ByteStore,
     value: Object,
+    strings: StringProtection,
 }
 
 #[derive(Clone, Debug)]
@@ -1564,6 +1669,7 @@ fn load_image(
         codec_span: decoded.codec_span,
         codec_parameters: decoded.codec_parameters,
         repairs: decoded.repairs,
+        strings: StringProtection::of(&resolved),
     })
 }
 
@@ -2806,8 +2912,14 @@ fn load_tiling_pattern(
     .map_err(|error| PageContentError::new(PageContentErrorKind::Decode(error)))?;
     let resources_value = unique_pattern_entry(entries, resolved.source(), b"/Resources")?
         .ok_or_else(|| PageContentError::new(PageContentErrorKind::PatternMissingResources))?;
-    let resources_dictionary =
-        resolve_resource_dictionary(document, index, resolved.source(), resources_value, limits)?;
+    let resources_dictionary = resolve_resource_dictionary(
+        document,
+        index,
+        resolved.source(),
+        resources_value,
+        StringProtection::of(&resolved),
+        limits,
+    )?;
     let mut state = ResourceLoadState {
         forms: HashMap::new(),
         visiting: Vec::new(),
@@ -2863,8 +2975,14 @@ fn load_resource_category(
     let Some(category_value) = entry(entries, &resources.source, category) else {
         return Ok(Vec::new());
     };
-    let category_dictionary =
-        resolve_resource_dictionary(document, index, &resources.source, category_value, limits)?;
+    let category_dictionary = resolve_resource_dictionary(
+        document,
+        index,
+        &resources.source,
+        category_value,
+        resources.strings,
+        limits,
+    )?;
     let category_entries = dictionary(&category_dictionary.value).ok_or_else(|| {
         PageContentError::new(PageContentErrorKind::ResourceCategoryNotDictionary)
     })?;
@@ -2879,7 +2997,7 @@ fn load_resource_category(
                 PageContentErrorKind::DuplicateResourceName,
             ));
         }
-        let (reference, source, value) = match resource.value().kind() {
+        let (reference, source, value, strings) = match resource.value().kind() {
             ObjectKind::Reference(reference) => {
                 let resolved = index
                     .resolve_object(document, *reference, limits.resolve)
@@ -2888,12 +3006,14 @@ fn load_resource_category(
                     Some(*reference),
                     resolved.source().clone(),
                     resolved.value().clone(),
+                    StringProtection::of(&resolved),
                 )
             }
             _ => (
                 None,
                 category_dictionary.source.clone(),
                 resource.value().clone(),
+                category_dictionary.strings,
             ),
         };
         let mut form_error = None;
@@ -2924,6 +3044,7 @@ fn load_resource_category(
             security: state.security.clone(),
             source,
             value,
+            strings,
             form,
             form_error,
             document: document.clone(),
@@ -3015,8 +3136,14 @@ fn load_form_stream(
             Arc::<[u8]>::from(decoded),
         );
         let resources = if let Some(value) = entry(entries, resolved.source(), b"/Resources") {
-            let dictionary =
-                resolve_resource_dictionary(document, index, resolved.source(), value, limits)?;
+            let dictionary = resolve_resource_dictionary(
+                document,
+                index,
+                resolved.source(),
+                value,
+                StringProtection::of(&resolved),
+                limits,
+            )?;
             Some(load_resources(document, index, &dictionary, limits, state)?)
         } else {
             None
@@ -3027,6 +3154,7 @@ fn load_form_stream(
             dictionary: resolved.value().clone(),
             bytes,
             resources,
+            strings: StringProtection::of(&resolved),
             document: document.clone(),
             index: Arc::clone(index),
             security: state.security.clone(),
@@ -3044,12 +3172,14 @@ fn resolve_resource_dictionary(
     index: &RevisionIndex,
     source: &ByteStore,
     value: &Object,
+    holder: StringProtection,
     limits: PageContentLimits,
 ) -> Result<ResourceDictionary, PageContentError> {
     match value.kind() {
         ObjectKind::Dictionary(_) => Ok(ResourceDictionary {
             source: source.clone(),
             value: value.clone(),
+            strings: holder,
         }),
         ObjectKind::Reference(reference) => {
             let resolved = index
@@ -3063,6 +3193,7 @@ fn resolve_resource_dictionary(
             Ok(ResourceDictionary {
                 source: resolved.source().clone(),
                 value: resolved.value().clone(),
+                strings: StringProtection::of(&resolved),
             })
         }
         _ => Err(PageContentError::new(
@@ -3175,6 +3306,7 @@ fn find_page(
                     index,
                     node.source(),
                     value,
+                    StringProtection::of(node),
                     limits,
                 )?),
                 None => inherited_resources.clone(),

@@ -233,9 +233,10 @@ impl Window {
             return;
         };
         let beside = pages[pages.len() - 1];
+        let opens = pdf_edit::Password(self.editor.credential().to_vec());
         let job = self
             .editor
-            .begin_insert_pages((beside, false), bytes, &pages);
+            .begin_insert_pages((beside, false), (bytes, opens), &pages);
         if job.is_some() {
             let first = beside + 1;
             self.renumber = Some(Renumber::copied(self.editor.page_count(), &pages, first));
@@ -246,25 +247,46 @@ impl Window {
     }
 
     pub(crate) fn insert_pages_from(&mut self, path: &Path, before: bool) -> usize {
-        let name = path
-            .file_name()
-            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
         let bytes: Arc<[u8]> = match std::fs::read(path) {
             Ok(bytes) => Arc::from(bytes),
             Err(error) => {
                 self.editor.say(Message::PagesNotRead {
-                    name,
+                    name: crate::app::name_of(path),
                     why: error.to_string(),
                 });
                 return 0;
             }
         };
         let source = pdf_bytes::ByteStore::new(pdf_bytes::SourceId::new(0), Arc::clone(&bytes));
+        if pdf_edit::info::lock(&source, b"") == pdf_edit::info::Lock::Refused {
+            self.unlocking = Some(crate::unlock::Unlock {
+                path: path.to_path_buf(),
+                page: 0,
+                source,
+                typed: String::new(),
+                tried: false,
+                shown: false,
+                focus: true,
+                for_pages: Some(before),
+            });
+            return 0;
+        }
+        self.insert_pages_opened(path, (bytes, Vec::new()), before)
+    }
+
+    pub(crate) fn insert_pages_opened(
+        &mut self,
+        path: &Path,
+        (bytes, password): (Arc<[u8]>, Vec<u8>),
+        before: bool,
+    ) -> usize {
+        let name = crate::app::name_of(path);
+        let source = pdf_bytes::ByteStore::new(pdf_bytes::SourceId::new(0), Arc::clone(&bytes));
         let count = match pdf_content::count_pages_recovering(
             &source,
             pdf_content::PageContentLimits::default(),
             pdf_content::RecoverLimits::default(),
-            b"",
+            &password,
         )
         .map(|recovered| recovered.into_parts().0)
         {
@@ -291,9 +313,11 @@ impl Window {
             pages[pages.len() - 1]
         };
         let all: Vec<usize> = (0..count).collect();
-        let job = self
-            .editor
-            .begin_insert_pages((beside, before), bytes, &all);
+        let job = self.editor.begin_insert_pages(
+            (beside, before),
+            (bytes, pdf_edit::Password(password)),
+            &all,
+        );
         let sent = job.is_some();
         if sent {
             let first = if before { beside } else { beside + 1 };

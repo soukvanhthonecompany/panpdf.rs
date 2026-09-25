@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 
 use pdf_bytes::{ByteStore, SourceSpan};
-use pdf_content::{FormXObject, Operation, PageResources, ResourceEntry, Type3Font};
+use pdf_content::{
+    FormXObject, Operation, PageResources, ResourceEntry, StringProtection, Type3Font,
+};
 use pdf_syntax::{Object, ObjectKind};
 
 use crate::color::ColorSpace;
@@ -147,14 +149,20 @@ pub(crate) fn transparency_group_metadata(
 ) -> Result<TransparencyGroupMetadata, InterpretError> {
     let group_entry = unique_form_entry(form, b"/Group", invocation)?
         .ok_or_else(|| InterpretError::at(invocation, InterpretErrorKind::GroupMissingEntry))?;
-    let (group_source, group, group_reference_span) = match group_entry.kind() {
+    let (group_source, group, group_strings, group_reference_span) = match group_entry.kind() {
         ObjectKind::Reference(reference) => {
-            let (source, value) = form.resolve_object(*reference).map_err(|error| {
-                InterpretError::at(invocation, InterpretErrorKind::GroupResource(error.kind()))
-            })?;
-            (source, value, Some(group_entry.span()))
+            let (source, value, strings) =
+                form.resolve_protected_object(*reference).map_err(|error| {
+                    InterpretError::at(invocation, InterpretErrorKind::GroupResource(error.kind()))
+                })?;
+            (source, value, strings, Some(group_entry.span()))
         }
-        _ => (form.source.clone(), group_entry.clone(), None),
+        _ => (
+            form.source.clone(),
+            group_entry.clone(),
+            form.strings(),
+            None,
+        ),
     };
     let ObjectKind::Dictionary(entries) = group.kind() else {
         return Err(InterpretError::at(
@@ -197,6 +205,7 @@ pub(crate) fn transparency_group_metadata(
             group_color_space(
                 form,
                 &group_source,
+                group_strings,
                 value,
                 invocation,
                 effective_resources,
@@ -290,6 +299,7 @@ fn group_boolean(value: &Object, invocation: &Operation) -> Result<bool, Interpr
 fn group_color_space(
     form: &FormXObject,
     source: &ByteStore,
+    strings: StringProtection,
     value: &Object,
     invocation: &Operation,
     resources: Option<&PageResources>,
@@ -298,10 +308,12 @@ fn group_color_space(
     let load_icc = |reference, limit| form.icc_profile(reference, limit);
     let load_indexed = |reference, limit| form.indexed_lookup(reference, limit);
     let load_function = |reference, limit| form.function(reference, limit);
-    let load_object = |reference| form.resolve_object(reference);
+    let load_object = |reference| form.resolve_protected_object(reference);
+    let string_plaintext = |strings, bytes| form.string_plaintext(strings, bytes);
     let context = ColorSpaceParseContext {
         load_function: &load_function,
         load_object: &load_object,
+        string_plaintext: &string_plaintext,
         resources,
         load_icc: &load_icc,
         load_indexed: &load_indexed,
@@ -310,6 +322,7 @@ fn group_color_space(
     let space = parse_color_space_definition(
         invocation,
         source,
+        strings,
         value,
         InterpretErrorKind::UnsupportedGroupColorSpace,
         &context,

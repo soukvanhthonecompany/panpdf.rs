@@ -15,6 +15,7 @@ pub(crate) struct Unlock {
     pub(crate) tried: bool,
     pub(crate) shown: bool,
     pub(crate) focus: bool,
+    pub(crate) for_pages: Option<bool>,
 }
 
 impl Window {
@@ -68,7 +69,13 @@ impl Window {
             });
         });
         if gave_up || modal.should_close() {
-            self.editor.say(Message::LeftLocked);
+            self.editor.say(match unlock.for_pages {
+                None => Message::LeftLocked,
+                Some(_) => Message::PagesNotRead {
+                    name: name_of(&unlock.path),
+                    why: "it asks for a password".to_owned(),
+                },
+            });
             return;
         }
         if answered && !unlock.typed.is_empty() {
@@ -79,6 +86,28 @@ impl Window {
     }
 
     pub(crate) fn try_the_password(&mut self, unlock: Unlock) {
+        if let Some(before) = unlock.for_pages {
+            if pdf_edit::info::lock(&unlock.source, unlock.typed.as_bytes())
+                == pdf_edit::info::Lock::Refused
+            {
+                self.unlocking = Some(Unlock {
+                    typed: String::new(),
+                    tried: true,
+                    focus: true,
+                    ..unlock
+                });
+                return;
+            }
+            let Unlock {
+                path,
+                source,
+                typed,
+                ..
+            } = unlock;
+            let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(source.to_vec());
+            self.insert_pages_opened(&path, (bytes, typed.into_bytes()), before);
+            return;
+        }
         let Unlock {
             path,
             page,
@@ -167,6 +196,7 @@ mod tests {
             tried: false,
             shown: false,
             focus: true,
+            for_pages: None,
         });
         let unlock = window.unlocking.take().expect("the question is up");
         window.try_the_password(unlock);

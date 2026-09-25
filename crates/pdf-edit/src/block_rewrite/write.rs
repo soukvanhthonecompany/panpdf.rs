@@ -7,11 +7,17 @@ use super::{
 
 pub(super) fn shows(segment: &[Piece]) -> Vec<Show> {
     let mut out: Vec<Show> = Vec::new();
+    let own = |index: usize| segment[index].actual.is_some().then_some(index);
     for (index, piece) in segment.iter().enumerate() {
         for position in 0..piece.codes.len() {
             let rise = piece.rise.get(position).copied().unwrap_or(0.0);
             match out.last_mut() {
-                Some((last, codes)) if last.to_bits() == rise.to_bits() => {
+                Some((last, codes))
+                    if last.to_bits() == rise.to_bits()
+                        && codes
+                            .last()
+                            .is_none_or(|(before, _)| own(*before) == own(index)) =>
+                {
                     codes.push((index, position));
                 }
                 _ => out.push((rise, vec![(index, position)])),
@@ -40,7 +46,21 @@ pub(super) fn show_segment(
     let raised = groups.iter().any(|(rise, _)| *rise != 0.0);
     let mut body = Vec::new();
     let mut carry = carry;
+    let mut spanned: Option<usize> = None;
     for (rise, codes) in &groups {
+        let piece = codes
+            .first()
+            .map(|(index, _)| *index)
+            .filter(|index| segment[*index].actual.is_some());
+        if piece != spanned {
+            if spanned.is_some() {
+                body.extend_from_slice(b"EMC ");
+            }
+            if let Some(index) = piece {
+                body.extend_from_slice(&span_begin(segment[index].actual.as_deref().unwrap_or("")));
+            }
+            spanned = piece;
+        }
         if raised {
             body.extend_from_slice(format!("{} Ts ", base + rise).as_bytes());
         }
@@ -74,10 +94,22 @@ pub(super) fn show_segment(
         }
         body.extend_from_slice(b">] TJ ");
     }
+    if spanned.is_some() {
+        body.extend_from_slice(b"EMC ");
+    }
     if raised {
         body.extend_from_slice(format!("{base} Ts ").as_bytes());
     }
     (body, groups.len(), carry)
+}
+
+fn span_begin(text: &str) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let mut hex = String::from("FEFF");
+    for unit in text.encode_utf16() {
+        let _ = write!(hex, "{unit:04X}");
+    }
+    format!("/Span <</ActualText <{hex}> /PanPDF true>> BDC ").into_bytes()
 }
 
 fn gap_number(style: &Style<'_>, piece: &Piece, gap: f64) -> f64 {
@@ -266,6 +298,18 @@ fn actual_text_around(
                             .windows(b"/ActualText".len())
                             .any(|window| window == b"/ActualText")
                     {
+                        continue;
+                    }
+                    if text_of(properties.span())
+                        .windows(b"/PanPDF".len())
+                        .any(|window| window == b"/PanPDF")
+                    {
+                        rewritten.push((begin.span().start(), begin.span().end(), b" ".to_vec()));
+                        rewritten.push((
+                            operation.span().start(),
+                            operation.span().end(),
+                            b" ".to_vec(),
+                        ));
                         continue;
                     }
                     let mut replacement = b" ".to_vec();

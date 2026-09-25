@@ -65,7 +65,7 @@ impl Window {
             .live
             .as_ref()
             .is_some_and(|live| !live.written && live.page == page && live.block == block);
-        if !continuing && self.typing.next.is_some() {
+        if !continuing && (self.typing.next.is_some() || self.typing.carry.is_some()) {
             return LiveStep::NotMine;
         }
         if !continuing {

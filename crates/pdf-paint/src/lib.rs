@@ -39,10 +39,10 @@ pub use function::{
 };
 pub use geometry::{FillRule, Matrix, MulAdd, Path, PathSegment, Point, Shape};
 pub use graph::{
-    FormInvocation, GroupBackdrop, InterpretRepair, MarkedContent, MarkedProperties, ObjectScope,
-    PaintAtom, PaintAtomKind, PaintGraph, PaintId, PathPaint, PatternInvocation, PositionedGlyph,
-    RepairKind, ShadingPatternPaint, SoftMaskPaint, SubstitutedGlyph, TextShowElement,
-    TextShowPaint, TilingPatternPaint, TransparencyGroupPaint, Type3Glyph,
+    ActualText, FormInvocation, GroupBackdrop, InterpretRepair, MarkedContent, MarkedProperties,
+    ObjectScope, PaintAtom, PaintAtomKind, PaintGraph, PaintId, PathPaint, PatternInvocation,
+    PositionedGlyph, RepairKind, ShadingPatternPaint, SoftMaskPaint, SubstitutedGlyph,
+    TextShowElement, TextShowPaint, TilingPatternPaint, TransparencyGroupPaint, Type3Glyph,
 };
 pub use image::{DctColorTransform, DctParameterLocation, ImageMask, ImagePaint};
 pub use interpreter::{

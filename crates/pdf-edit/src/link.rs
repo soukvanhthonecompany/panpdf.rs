@@ -131,7 +131,7 @@ fn refused(reason: &'static str) -> SpikeError {
 }
 
 fn entries_of(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     target: &Target,
     pages: &[Reference],
 ) -> Result<Vec<(&'static [u8], String)>, SpikeError> {
@@ -146,7 +146,7 @@ fn entries_of(
                     format!(
                         "[{} {}]",
                         crate::object_edit::reference_text(*reference),
-                        destination_view(source, *reference, *arrival)?
+                        destination_view((source, credential), *reference, *arrival)?
                     ),
                 ),
                 (b"/A", String::new()),
@@ -181,7 +181,10 @@ fn entries_of(
             if name.is_empty() || name.len() > LONGEST_NAME || name.chars().any(char::is_control) {
                 return Err(refused("a destination's name is one line of text"));
             }
-            if !named_here(source).iter().any(|held| held == name) {
+            if !named_here((source, credential))
+                .iter()
+                .any(|held| held == name)
+            {
                 return Err(refused("this document does not name that destination"));
             }
             Ok(vec![
@@ -209,12 +212,12 @@ fn entries_of(
 }
 
 pub(crate) fn destination_view(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     page: Reference,
     arrival: Arrival,
 ) -> Result<String, SpikeError> {
     let corner = if arrival.takes_a_corner() {
-        top_left_of(source, page)
+        top_left_of((source, credential), page)
     } else {
         None
     };
@@ -238,8 +241,8 @@ pub(crate) fn destination_view(
     })
 }
 
-fn top_left_of(source: &ByteStore, page: Reference) -> Option<(f64, f64)> {
-    let reader = crate::form::Reader::open(source, b"").ok()?;
+fn top_left_of((source, credential): (&ByteStore, &[u8]), page: Reference) -> Option<(f64, f64)> {
+    let reader = crate::form::Reader::open(source, credential).ok()?;
     let node = reader.at(page)?;
     let found = reader.inherited(&node, b"/MediaBox")?;
     let pdf_syntax::ObjectKind::Array(items) = found.value.kind() else {
@@ -289,11 +292,11 @@ fn checked_box(rect: [f64; 4]) -> Result<[f64; 4], SpikeError> {
     Ok(rect)
 }
 
-fn pages_of(source: &ByteStore) -> Result<Vec<Reference>, SpikeError> {
+fn pages_of((source, credential): (&ByteStore, &[u8])) -> Result<Vec<Reference>, SpikeError> {
     pdf_content::page_references_with_password(
         source,
         pdf_content::PageContentLimits::default(),
-        b"",
+        credential,
     )
     .map_err(|_| refused("this document's pages cannot be walked"))
 }
@@ -336,13 +339,14 @@ pub(crate) fn plan_add_links(
     page_index: usize,
     wanted: &[([f64; 4], Target, Look)],
 ) -> Result<Plan, SpikeError> {
+    let credential = page.credential;
     if wanted.is_empty() {
         return Err(refused("there is nothing here to link"));
     }
     if wanted.len() > MOST_AT_ONCE {
         return Err(refused("this is more links than one page is given at once"));
     }
-    let pages = pages_of(source)?;
+    let pages = pages_of((source, credential))?;
     let first = crate::block_rewrite::next_object_number(source)?;
     let mut writes = Vec::new();
     let mut made = Vec::new();
@@ -354,7 +358,7 @@ pub(crate) fn plan_add_links(
                 "a link's border is between no points and a hundred",
             ));
         }
-        let mut entries = entries_of(source, target, &pages)?;
+        let mut entries = entries_of((source, credential), target, &pages)?;
         entries.extend(look_entries(*look));
         let written: Vec<String> = entries
             .iter()
@@ -393,13 +397,18 @@ pub(crate) fn plan_add_links(
     }
     let references: Vec<Reference> = made.iter().map(|(link, ..)| *link).collect();
     writes.extend(crate::new_field::listed_on_page(
-        source,
+        (source, credential),
         page.program.page,
         &references,
     )?);
     for (link, rect, target, look) in &made {
-        prove_link(source, &writes, (page_index, *link), (*rect, target))?;
-        prove_look(source, &writes, (page_index, *link), *look)?;
+        prove_link(
+            (source, credential),
+            &writes,
+            (page_index, *link),
+            (*rect, target),
+        )?;
+        prove_look((source, credential), &writes, (page_index, *link), *look)?;
     }
     let region = region.ok_or_else(|| refused("there is nothing here to link"))?;
     Ok(plan_of(&page, page_index, writes, region))
@@ -411,14 +420,15 @@ pub(crate) fn plan_set_link_properties(
     page_index: usize,
     (link, target, look): (Reference, Option<&Target>, Option<Look>),
 ) -> Result<Plan, SpikeError> {
-    let rect = link_box(source, page_index, link)?;
+    let credential = page.credential;
+    let rect = link_box((source, credential), page_index, link)?;
     if target.is_none() && look.is_none() {
         return Err(refused("this asks for no change to the link"));
     }
     let mut entries: Vec<(&[u8], String)> = Vec::new();
     if let Some(target) = target {
-        let pages = pages_of(source)?;
-        entries.extend(entries_of(source, target, &pages)?);
+        let pages = pages_of((source, credential))?;
+        entries.extend(entries_of((source, credential), target, &pages)?);
     }
     if let Some(look) = look {
         if !look.width.is_finite() || !(0.0..=100.0).contains(&look.width) {
@@ -428,12 +438,17 @@ pub(crate) fn plan_set_link_properties(
         }
         entries.extend(look_entries(look));
     }
-    let writes = vec![set_entries(source, link, &entries)?];
+    let writes = vec![set_entries((source, credential), link, &entries)?];
     if let Some(target) = target {
-        prove_link(source, &writes, (page_index, link), (rect, target))?;
+        prove_link(
+            (source, credential),
+            &writes,
+            (page_index, link),
+            (rect, target),
+        )?;
     }
     if let Some(look) = look {
-        prove_look(source, &writes, (page_index, link), look)?;
+        prove_look((source, credential), &writes, (page_index, link), look)?;
     }
     Ok(plan_of(&page, page_index, writes, rect))
 }
@@ -444,17 +459,18 @@ pub(crate) fn plan_set_link_box(
     page_index: usize,
     (link, rect): (Reference, [f64; 4]),
 ) -> Result<Plan, SpikeError> {
-    let was = link_box(source, page_index, link)?;
+    let credential = page.credential;
+    let was = link_box((source, credential), page_index, link)?;
     let rect = checked_box(rect)?;
     let writes = vec![set_entries(
-        source,
+        (source, credential),
         link,
         &[(
             b"/Rect",
             format!("[{} {} {} {}]", rect[0], rect[1], rect[2], rect[3]),
         )],
     )?];
-    prove_box(source, &writes, (page_index, link), rect)?;
+    prove_box((source, credential), &writes, (page_index, link), rect)?;
     let region = [
         was[0].min(rect[0]),
         was[1].min(rect[1]),
@@ -470,16 +486,18 @@ pub(crate) fn plan_set_link_boxes(
     page_index: usize,
     boxes: &[(Reference, [f64; 4])],
 ) -> Result<Plan, SpikeError> {
+    let credential = page.credential;
     for (at, (link, _)) in boxes.iter().enumerate() {
         if boxes[..at].iter().any(|(earlier, _)| earlier == link) {
             return Err(refused("a link was named twice"));
         }
     }
-    let before = links_of(source, page_index)?;
-    let writes = crate::field_group::in_sequence(source, boxes, |document, (link, rect)| {
-        let plan = plan_set_link_box(document, page, page_index, (*link, *rect))?;
-        Ok(plan.writes().to_vec())
-    })?;
+    let before = links_of(source, credential, page_index)?;
+    let writes =
+        crate::field_group::in_sequence((source, credential), boxes, |document, (link, rect)| {
+            let plan = plan_set_link_box(document, page, page_index, (*link, *rect))?;
+            Ok(plan.writes().to_vec())
+        })?;
     let region = region_of(
         boxes.iter().map(|(_, rect)| *rect).chain(
             before
@@ -498,7 +516,8 @@ pub(crate) fn plan_remove_links(
     page_index: usize,
     links: &[Reference],
 ) -> Result<Plan, SpikeError> {
-    let before = links_of(source, page_index)?;
+    let credential = page.credential;
+    let before = links_of(source, credential, page_index)?;
     let region = region_of(
         before
             .iter()
@@ -506,7 +525,7 @@ pub(crate) fn plan_remove_links(
             .map(|(_, rect, _)| *rect),
     )
     .ok_or_else(|| refused("this is not a link of this page"))?;
-    let writes = crate::field_group::in_sequence(source, links, |document, link| {
+    let writes = crate::field_group::in_sequence((source, credential), links, |document, link| {
         let plan = plan_remove_link(document, page, page_index, *link)?;
         Ok(plan.writes().to_vec())
     })?;
@@ -530,15 +549,19 @@ pub(crate) fn plan_remove_link(
     page_index: usize,
     link: Reference,
 ) -> Result<Plan, SpikeError> {
-    let rect = link_box(source, page_index, link)?;
+    let credential = page.credential;
+    let rect = link_box((source, credential), page_index, link)?;
     let writes = vec![crate::new_field::unlisted_on_page(
-        source,
+        (source, credential),
         page.program.page,
         link,
     )?];
-    let document =
-        crate::block_rewrite::commit_writes(source, &writes, crate::Restrictions::SetAside)?;
-    if links_of(&document, page_index)?
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        &writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    if links_of(&document, credential, page_index)?
         .iter()
         .any(|(reference, _, _)| *reference == link)
     {
@@ -549,10 +572,17 @@ pub(crate) fn plan_remove_link(
 
 pub type Listed = (Reference, [f64; 4], Option<Target>);
 
-pub fn links_of(source: &ByteStore, page_index: usize) -> Result<Vec<Listed>, SpikeError> {
-    let resolver =
-        pdf_content::open_link_resolver(source, pdf_content::PageContentLimits::default(), b"")
-            .map_err(|_| refused("this document's links cannot be read"))?;
+pub fn links_of(
+    source: &ByteStore,
+    credential: &[u8],
+    page_index: usize,
+) -> Result<Vec<Listed>, SpikeError> {
+    let resolver = pdf_content::open_link_resolver(
+        source,
+        pdf_content::PageContentLimits::default(),
+        credential,
+    )
+    .map_err(|_| refused("this document's links cannot be read"))?;
     let links = resolver
         .links(page_index)
         .map_err(|_| refused("this page's links cannot be read"))?;
@@ -561,7 +591,7 @@ pub fn links_of(source: &ByteStore, page_index: usize) -> Result<Vec<Listed>, Sp
         .iter()
         .filter_map(|link| link.reference)
         .collect();
-    let named = names_of(source, b"", &listed).unwrap_or_else(|_| vec![None; listed.len()]);
+    let named = names_of(source, credential, &listed).unwrap_or_else(|_| vec![None; listed.len()]);
     let mut named = named.into_iter();
     Ok(links
         .links
@@ -578,10 +608,12 @@ pub fn links_of(source: &ByteStore, page_index: usize) -> Result<Vec<Listed>, Sp
         .collect())
 }
 
-fn named_here(source: &ByteStore) -> Vec<String> {
-    let Ok(resolver) =
-        pdf_content::open_link_resolver(source, pdf_content::PageContentLimits::default(), b"")
-    else {
+fn named_here((source, credential): (&ByteStore, &[u8])) -> Vec<String> {
+    let Ok(resolver) = pdf_content::open_link_resolver(
+        source,
+        pdf_content::PageContentLimits::default(),
+        credential,
+    ) else {
         return Vec::new();
     };
     resolver
@@ -597,7 +629,7 @@ pub fn names_of(
     links: &[Reference],
 ) -> Result<Vec<Option<String>>, SpikeError> {
     let reader = crate::form::Reader::open(source, credential)?;
-    let held = named_here(source);
+    let held = named_here((source, credential));
     Ok(links
         .iter()
         .map(|link| {
@@ -737,20 +769,23 @@ fn trimmed(number: f64) -> String {
 }
 
 fn prove_look(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     writes: &[PlannedWrite],
     (page_index, link): (usize, Reference),
     look: Look,
 ) -> Result<(), SpikeError> {
-    let document =
-        crate::block_rewrite::commit_writes(source, writes, crate::Restrictions::SetAside)?;
-    if !links_of(&document, page_index)?
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    if !links_of(&document, credential, page_index)?
         .iter()
         .any(|(reference, _, _)| *reference == link)
     {
         return Err(refused("the link does not read back on the page"));
     }
-    let read = look_of(&document, b"", link)?;
+    let read = look_of(&document, credential, link)?;
     let close = |one: f64, other: f64| (one - other).abs() < 1e-4;
     if !close(read.width, look.width)
         || read.style != look.style
@@ -817,11 +852,11 @@ pub fn arrival_of(view: pdf_content::View) -> Arrival {
 }
 
 fn link_box(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     page_index: usize,
     link: Reference,
 ) -> Result<[f64; 4], SpikeError> {
-    links_of(source, page_index)?
+    links_of(source, credential, page_index)?
         .into_iter()
         .find(|(reference, _, _)| *reference == link)
         .map(|(_, rect, _)| rect)
@@ -829,14 +864,17 @@ fn link_box(
 }
 
 fn prove_link(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     writes: &[PlannedWrite],
     (page_index, link): (usize, Reference),
     (rect, target): ([f64; 4], &Target),
 ) -> Result<(), SpikeError> {
-    let document =
-        crate::block_rewrite::commit_writes(source, writes, crate::Restrictions::SetAside)?;
-    let found = links_of(&document, page_index)?
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    let found = links_of(&document, credential, page_index)?
         .into_iter()
         .find(|(reference, _, _)| *reference == link)
         .ok_or_else(|| refused("the link does not read back on the page"))?;
@@ -858,14 +896,17 @@ fn prove_link(
 }
 
 fn prove_box(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     writes: &[PlannedWrite],
     (page_index, link): (usize, Reference),
     rect: [f64; 4],
 ) -> Result<(), SpikeError> {
-    let document =
-        crate::block_rewrite::commit_writes(source, writes, crate::Restrictions::SetAside)?;
-    let found = links_of(&document, page_index)?
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    let found = links_of(&document, credential, page_index)?
         .into_iter()
         .find(|(reference, _, _)| *reference == link)
         .ok_or_else(|| refused("the link does not read back on the page"))?;
@@ -907,11 +948,15 @@ mod tests {
 
     fn after(source: &ByteStore, command: &Command) -> Result<ByteStore, SpikeError> {
         let plan = plan_command_with_fonts(source, command, b"", None)?;
-        crate::block_rewrite::commit_writes(source, plan.writes(), crate::Restrictions::Respect)
+        crate::block_rewrite::commit_writes(
+            source,
+            plan.writes(),
+            (b"", crate::Restrictions::Respect),
+        )
     }
 
     fn links(source: &ByteStore) -> Vec<super::Listed> {
-        super::links_of(source, 0).expect("the page's links read")
+        super::links_of(source, b"", 0).expect("the page's links read")
     }
 
     fn added(rect: [f64; 4], target: Target) -> Command {
@@ -983,7 +1028,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, link);
         assert_eq!(found[0].2, Some(Target::Page(1, Arrival::InheritZoom)));
-        let body = crate::object_edit::ObjectEdit::of(&sent, link)
+        let body = crate::object_edit::ObjectEdit::of(&sent, link, b"")
             .expect("the link object reads")
             .body
             .bytes;
@@ -1115,7 +1160,7 @@ mod tests {
         )
         .expect("the look is set");
         assert_eq!(super::look_of(&drawn, b"", link).expect("reads"), look);
-        let body = crate::object_edit::ObjectEdit::of(&drawn, link)
+        let body = crate::object_edit::ObjectEdit::of(&drawn, link, b"")
             .expect("the link object reads")
             .body
             .bytes;
@@ -1168,7 +1213,7 @@ mod tests {
         .expect("the look is set again");
         let look = super::look_of(&hidden, b"", link).expect("the look reads");
         assert_eq!(look, super::Look::default());
-        let body = crate::object_edit::ObjectEdit::of(&hidden, link)
+        let body = crate::object_edit::ObjectEdit::of(&hidden, link, b"")
             .expect("the link object reads")
             .body
             .bytes;
@@ -1243,7 +1288,7 @@ mod tests {
             .expect("the link is added");
             let found = links(&source);
             assert_eq!(found[0].2, Some(Target::Page(1, arrival)), "read back");
-            let body = crate::object_edit::ObjectEdit::of(&source, found[0].0)
+            let body = crate::object_edit::ObjectEdit::of(&source, found[0].0, b"")
                 .expect("the link object reads")
                 .body
                 .bytes;
@@ -1409,7 +1454,7 @@ mod tests {
         .expect("the link is added");
         let found = links(&source);
         assert_eq!(found[0].2, Some(target));
-        let body = crate::object_edit::ObjectEdit::of(&source, found[0].0)
+        let body = crate::object_edit::ObjectEdit::of(&source, found[0].0, b"")
             .expect("the link object reads")
             .body
             .bytes;

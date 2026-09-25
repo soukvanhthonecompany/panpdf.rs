@@ -1054,6 +1054,7 @@ impl Window {
                     tried: loading.tried_a_password,
                     shown: false,
                     focus: true,
+                    for_pages: None,
                 });
             }
             Ok(Opened::Refused(reason)) => self.editor.say(Message::Plain(reason)),

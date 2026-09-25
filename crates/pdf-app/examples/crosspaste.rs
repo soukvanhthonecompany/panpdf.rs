@@ -86,7 +86,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let applied = editor.paste_objects(into_page, copied, (0.0, 0.0), Some(source));
+    let applied = editor.paste_objects(
+        into_page,
+        copied,
+        (0.0, 0.0),
+        Some((source, pdf_edit::Password::default())),
+    );
     println!("pasted\t{applied:?}");
 
     let after = editor

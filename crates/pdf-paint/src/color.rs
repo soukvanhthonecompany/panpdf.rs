@@ -4,6 +4,7 @@ use std::sync::Arc;
 use pdf_bytes::{ByteStore, SourceSpan};
 use pdf_content::{
     IccProfileStream, IndexedLookupStream, Operation, PageContentError, PageResources,
+    StringProtection,
 };
 use pdf_syntax::{Object, ObjectKind, Reference, decode_name, decode_string};
 
@@ -11,7 +12,7 @@ use crate::error::{InterpretError, InterpretErrorKind};
 use crate::function::{Function, FunctionLoader, FunctionParseState, parse_function};
 use crate::graph::{ShadingPatternPaint, TilingPatternPaint};
 use crate::operand::{
-    ObjectLoader, source_exact_integer, source_number, source_number_vector, source_numbers,
+    source_exact_integer, source_number, source_number_vector, source_numbers,
     unique_resource_entry,
 };
 use crate::provenance::Derived;
@@ -211,18 +212,54 @@ type IccProfileLoader<'a> =
 type IndexedLookupLoader<'a> =
     dyn Fn(Reference, usize) -> Result<IndexedLookupStream, PageContentError> + 'a;
 
+pub(crate) type ProtectedObjectLoader<'a> =
+    dyn Fn(Reference) -> Result<(ByteStore, Object, StringProtection), PageContentError> + 'a;
+
+pub(crate) type StringDecryptor<'a> =
+    dyn Fn(StringProtection, Vec<u8>) -> Result<Vec<u8>, PageContentError> + 'a;
+
 pub(crate) struct ColorSpaceParseContext<'a> {
     pub(crate) resources: Option<&'a PageResources>,
     pub(crate) load_icc: &'a IccProfileLoader<'a>,
     pub(crate) load_indexed: &'a IndexedLookupLoader<'a>,
     pub(crate) load_function: &'a FunctionLoader<'a>,
-    pub(crate) load_object: &'a ObjectLoader<'a>,
+    pub(crate) load_object: &'a ProtectedObjectLoader<'a>,
+    pub(crate) string_plaintext: &'a StringDecryptor<'a>,
     pub(crate) limits: PaintLimits,
 }
+
+fn follow_color_space(
+    operation: &Operation,
+    reference: Reference,
+    unsupported: InterpretErrorKind,
+    context: &ColorSpaceParseContext<'_>,
+) -> Result<(ByteStore, Object, StringProtection), InterpretError> {
+    let resolved = (context.load_object)(reference).map_err(|error| {
+        InterpretError::at(
+            operation,
+            InterpretErrorKind::ColorSpaceResource(error.kind()),
+        )
+    })?;
+    if matches!(resolved.1.kind(), ObjectKind::Reference(_)) {
+        return Err(InterpretError::at(operation, unsupported));
+    }
+    Ok(resolved)
+}
+
+type ArraySpaceParser = fn(
+    &Operation,
+    &ByteStore,
+    StringProtection,
+    SourceSpan,
+    &[Object],
+    &ColorSpaceParseContext<'_>,
+    usize,
+) -> Result<ColorSpace, InterpretError>;
 
 pub(crate) fn parse_color_space_definition(
     operation: &Operation,
     source: &ByteStore,
+    strings: StringProtection,
     value: &Object,
     unsupported: InterpretErrorKind,
     context: &ColorSpaceParseContext<'_>,
@@ -235,18 +272,12 @@ pub(crate) fn parse_color_space_definition(
         ));
     }
     if let ObjectKind::Reference(reference) = value.kind() {
-        let (resolved_source, resolved) = (context.load_object)(*reference).map_err(|error| {
-            InterpretError::at(
-                operation,
-                InterpretErrorKind::ColorSpaceResource(error.kind()),
-            )
-        })?;
-        if matches!(resolved.kind(), ObjectKind::Reference(_)) {
-            return Err(InterpretError::at(operation, unsupported));
-        }
+        let (source, resolved, strings) =
+            follow_color_space(operation, *reference, unsupported, context)?;
         return parse_color_space_definition(
             operation,
-            &resolved_source,
+            &source,
+            strings,
             &resolved,
             unsupported,
             context,
@@ -266,6 +297,7 @@ pub(crate) fn parse_color_space_definition(
         return parse_color_space_definition(
             operation,
             alias.source(),
+            alias.strings(),
             alias.value(),
             unsupported,
             context,
@@ -283,31 +315,39 @@ pub(crate) fn parse_color_space_definition(
     };
     let family = decode_name(source, family_object)
         .map_err(|_| InterpretError::at(operation, InterpretErrorKind::InvalidColorSpaceEntry))?;
+    if family == b"/Pattern" {
+        return parse_pattern_space(
+            operation,
+            source,
+            strings,
+            parts,
+            unsupported,
+            context,
+            depth,
+        );
+    }
+    let array: Option<ArraySpaceParser> = match family.as_slice() {
+        b"/Indexed" | b"/I" => Some(parse_indexed),
+        b"/Separation" => Some(parse_separation),
+        b"/DeviceN" => Some(parse_device_n),
+        _ => None,
+    };
+    if let Some(parse) = array {
+        return parse(
+            operation,
+            source,
+            strings,
+            value.span(),
+            parts,
+            context,
+            depth,
+        );
+    }
     if !matches!(
         family.as_slice(),
-        b"/CalGray"
-            | b"/CalRGB"
-            | b"/Lab"
-            | b"/ICCBased"
-            | b"/Indexed"
-            | b"/I"
-            | b"/Separation"
-            | b"/DeviceN"
-            | b"/Pattern"
+        b"/CalGray" | b"/CalRGB" | b"/Lab" | b"/ICCBased"
     ) {
         return Err(InterpretError::at(operation, unsupported));
-    }
-    if family == b"/Pattern" {
-        return parse_pattern_space(operation, source, parts, unsupported, context, depth);
-    }
-    if matches!(family.as_slice(), b"/Indexed" | b"/I") {
-        return parse_indexed(operation, source, value.span(), parts, context, depth);
-    }
-    if family == b"/Separation" {
-        return parse_separation(operation, source, value.span(), parts, context, depth);
-    }
-    if family == b"/DeviceN" {
-        return parse_device_n(operation, source, value.span(), parts, context, depth);
     }
     if parts.len() != 2 {
         return Err(InterpretError::at(
@@ -526,6 +566,7 @@ fn parse_icc_based(
         let space = parse_color_space_definition(
             operation,
             &profile.source,
+            StringProtection::ByObject(profile.reference),
             value,
             InterpretErrorKind::UnsupportedIccAlternate,
             context,
@@ -579,6 +620,7 @@ fn parse_icc_based(
 fn parse_separation(
     operation: &Operation,
     source: &ByteStore,
+    strings: StringProtection,
     array_span: SourceSpan,
     parts: &[Object],
     context: &ColorSpaceParseContext<'_>,
@@ -591,7 +633,7 @@ fn parse_separation(
         ));
     }
     let colorant = colorant_name(operation, source, &parts[1])?;
-    let alternate = parse_tint_alternate(operation, source, &parts[2], context, depth)?;
+    let alternate = parse_tint_alternate(operation, source, strings, &parts[2], context, depth)?;
     let tint_transform =
         parse_tint_transform(operation, source, &parts[3], alternate.0, 1, context, depth)?;
     Ok(ColorSpace::Separation(Arc::new(SeparationSpace {
@@ -605,6 +647,7 @@ fn parse_separation(
 fn parse_device_n(
     operation: &Operation,
     source: &ByteStore,
+    strings: StringProtection,
     array_span: SourceSpan,
     parts: &[Object],
     context: &ColorSpaceParseContext<'_>,
@@ -639,7 +682,7 @@ fn parse_device_n(
         }
         colorants.push(colorant);
     }
-    let alternate = parse_tint_alternate(operation, source, &parts[2], context, depth)?;
+    let alternate = parse_tint_alternate(operation, source, strings, &parts[2], context, depth)?;
     let tint_transform = parse_tint_transform(
         operation,
         source,
@@ -691,6 +734,7 @@ fn colorant_name(
 fn parse_tint_alternate(
     operation: &Operation,
     source: &ByteStore,
+    strings: StringProtection,
     value: &Object,
     context: &ColorSpaceParseContext<'_>,
     depth: usize,
@@ -698,6 +742,7 @@ fn parse_tint_alternate(
     let space = parse_color_space_definition(
         operation,
         source,
+        strings,
         value,
         InterpretErrorKind::UnsupportedTintAlternate,
         context,
@@ -761,6 +806,7 @@ fn parse_tint_transform(
 fn parse_indexed(
     operation: &Operation,
     source: &ByteStore,
+    strings: StringProtection,
     array_span: SourceSpan,
     parts: &[Object],
     context: &ColorSpaceParseContext<'_>,
@@ -775,6 +821,7 @@ fn parse_indexed(
     let base_space = parse_color_space_definition(
         operation,
         source,
+        strings,
         &parts[1],
         InterpretErrorKind::UnsupportedIndexedBase,
         context,
@@ -810,12 +857,7 @@ fn parse_indexed(
     let lookup_object = &parts[3];
     let (lookup, lookup_source) = match lookup_object.kind() {
         ObjectKind::LiteralString | ObjectKind::HexString => {
-            let bytes = decode_string(
-                source,
-                lookup_object,
-                context.limits.max_indexed_lookup_bytes,
-            )
-            .map_err(|_| InterpretError::at(operation, InterpretErrorKind::InvalidIndexedLookup))?;
+            let bytes = indexed_string_lookup(operation, source, strings, lookup_object, context)?;
             (
                 Derived::assigned(Arc::<[u8]>::from(bytes), lookup_object.span()),
                 IndexedLookupSource::String(lookup_object.span()),
@@ -862,6 +904,27 @@ fn parse_indexed(
     })))
 }
 
+fn indexed_string_lookup(
+    operation: &Operation,
+    source: &ByteStore,
+    strings: StringProtection,
+    lookup_object: &Object,
+    context: &ColorSpaceParseContext<'_>,
+) -> Result<Vec<u8>, InterpretError> {
+    let bytes = decode_string(
+        source,
+        lookup_object,
+        context.limits.max_indexed_lookup_bytes,
+    )
+    .map_err(|_| InterpretError::at(operation, InterpretErrorKind::InvalidIndexedLookup))?;
+    (context.string_plaintext)(strings, bytes).map_err(|error| {
+        InterpretError::at(
+            operation,
+            InterpretErrorKind::IndexedLookupResource(error.kind()),
+        )
+    })
+}
+
 fn indexed_lookup_of_declared_length(
     operation: &Operation,
     lookup: Derived<Arc<[u8]>>,
@@ -888,6 +951,7 @@ fn indexed_lookup_of_declared_length(
 fn parse_pattern_space(
     operation: &Operation,
     source: &ByteStore,
+    strings: StringProtection,
     parts: &[Object],
     unsupported: InterpretErrorKind,
     context: &ColorSpaceParseContext<'_>,
@@ -899,6 +963,7 @@ fn parse_pattern_space(
     let base = parse_color_space_definition(
         operation,
         source,
+        strings,
         base_object,
         unsupported,
         context,

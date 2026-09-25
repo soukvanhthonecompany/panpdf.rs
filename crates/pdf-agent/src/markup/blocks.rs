@@ -15,6 +15,7 @@ fn read(lines: &[String]) -> Vec<Block> {
     let mut out = Vec::new();
     let mut at = 0;
     while at < lines.len() {
+        let was = at;
         let line = &lines[at];
         if line.trim().is_empty() {
             at += 1;
@@ -46,6 +47,7 @@ fn read(lines: &[String]) -> Vec<Block> {
             out.push(block);
             at = used;
         }
+        at = at.max(was + 1);
     }
     out
 }
@@ -305,7 +307,7 @@ fn listed(lines: &[String], at: usize) -> Option<(Block, usize)> {
                 own.push(next.clone());
                 end += 1;
             }
-            while own.last().is_some_and(|last| last.trim().is_empty()) {
+            while own.len() > 1 && own.last().is_some_and(|last| last.trim().is_empty()) {
                 own.pop();
                 blanks = 1;
             }

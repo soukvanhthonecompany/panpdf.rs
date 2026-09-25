@@ -238,7 +238,9 @@ mod words {
                     plural(pages.len())
                 )
             }
-            Request::InsertPages { from, pages, after } => {
+            Request::InsertPages {
+                from, pages, after, ..
+            } => {
                 let file = from.display();
                 let which = match pages {
                     Some(pages) => {

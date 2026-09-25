@@ -690,6 +690,7 @@ fn plan_one_command_in_page(
         beside,
         before,
         document,
+        password,
         pages,
     } = command
     {
@@ -700,6 +701,7 @@ fn plan_one_command_in_page(
                 beside: *beside,
                 before: *before,
                 document,
+                password: password.as_bytes(),
                 pages,
             },
         );
@@ -872,7 +874,9 @@ fn plan_one_command_in_page(
             *page_index,
             copied,
             (*dx, *dy),
-            elsewhere.as_ref(),
+            elsewhere
+                .as_ref()
+                .map(|(other, password)| (other, password.as_bytes())),
         );
     }
     if let Command::DrawPath {

@@ -39,10 +39,13 @@ pub enum Naming {
     },
 }
 
-pub fn spots_of(source: &ByteStore) -> Result<Vec<Spot>, SpikeError> {
-    let resolver =
-        pdf_content::open_link_resolver(source, pdf_content::PageContentLimits::default(), b"")
-            .map_err(|_| refused("this document's names cannot be read"))?;
+pub fn spots_of(source: &ByteStore, credential: &[u8]) -> Result<Vec<Spot>, SpikeError> {
+    let resolver = pdf_content::open_link_resolver(
+        source,
+        pdf_content::PageContentLimits::default(),
+        credential,
+    )
+    .map_err(|_| refused("this document's names cannot be read"))?;
     Ok(resolver
         .destinations()
         .into_iter()
@@ -57,10 +60,17 @@ pub fn spots_of(source: &ByteStore) -> Result<Vec<Spot>, SpikeError> {
         .collect())
 }
 
-pub fn spot_named(source: &ByteStore, name: &str) -> Result<Option<Spot>, SpikeError> {
-    let resolver =
-        pdf_content::open_link_resolver(source, pdf_content::PageContentLimits::default(), b"")
-            .map_err(|_| refused("this document's names cannot be read"))?;
+pub fn spot_named(
+    source: &ByteStore,
+    credential: &[u8],
+    name: &str,
+) -> Result<Option<Spot>, SpikeError> {
+    let resolver = pdf_content::open_link_resolver(
+        source,
+        pdf_content::PageContentLimits::default(),
+        credential,
+    )
+    .map_err(|_| refused("this document's names cannot be read"))?;
     Ok(resolver
         .destination_named(name.as_bytes())
         .and_then(|destination| {
@@ -189,11 +199,15 @@ fn written(holder: &Found, value: &pdf_syntax::Object) -> Result<String, SpikeEr
         .map_err(|_| refused("this document writes a destination this cannot copy"))
 }
 
-fn place(source: &ByteStore, page: usize, arrival: Arrival) -> Result<String, SpikeError> {
+fn place(
+    (source, credential): (&ByteStore, &[u8]),
+    page: usize,
+    arrival: Arrival,
+) -> Result<String, SpikeError> {
     let pages = pdf_content::page_references_with_password(
         source,
         pdf_content::PageContentLimits::default(),
-        b"",
+        credential,
     )
     .map_err(|_| refused("this document's pages cannot be walked"))?;
     let reference = pages
@@ -202,7 +216,7 @@ fn place(source: &ByteStore, page: usize, arrival: Arrival) -> Result<String, Sp
     Ok(format!(
         "[{} {}]",
         crate::object_edit::reference_text(*reference),
-        crate::link::destination_view(source, *reference, arrival)?
+        crate::link::destination_view((source, credential), *reference, arrival)?
     ))
 }
 
@@ -212,10 +226,11 @@ pub(crate) fn plan_naming(
     page_index: usize,
     change: &Naming,
 ) -> Result<Plan, SpikeError> {
-    let reader = Reader::open(source, b"")?;
-    let before = spots_of(source)?;
+    let credential = page.credential;
+    let reader = Reader::open(source, credential)?;
+    let before = spots_of(source, credential)?;
     let mut names = names_of(&reader)?;
-    let wanted = wanted_pairs(source, &mut names.pairs, change)?;
+    let wanted = wanted_pairs((source, credential), &mut names.pairs, change)?;
 
     let mut number = crate::block_rewrite::next_object_number(source)?;
     let root = Reference::new(number, 0);
@@ -231,7 +246,7 @@ pub(crate) fn plan_naming(
         crate::object_edit::reference_text(root),
     );
     if let Some(holder) = names.holder {
-        writes.push(set_entries(source, holder, &[pointed])?);
+        writes.push(set_entries((source, credential), holder, &[pointed])?);
     } else {
         let catalog = reader
             .catalog_reference()
@@ -250,7 +265,7 @@ pub(crate) fn plan_naming(
             },
         });
         writes.push(set_entries(
-            source,
+            (source, credential),
             catalog,
             &[(b"/Names", crate::object_edit::reference_text(holder))],
         )?);
@@ -258,11 +273,11 @@ pub(crate) fn plan_naming(
     if let Naming::Remove { name } | Naming::Rename { from: name, .. } = change {
         writes.extend(out_of_the_dictionary(
             &reader,
-            source,
+            (source, credential),
             name.trim().as_bytes(),
         )?);
     }
-    prove_names(source, &writes, (&before, change))?;
+    prove_names((source, credential), &writes, (&before, change))?;
     let target = page
         .program
         .streams
@@ -281,7 +296,7 @@ pub(crate) fn plan_naming(
 }
 
 fn wanted_pairs(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     pairs: &mut Vec<Pair>,
     change: &Naming,
 ) -> Result<Vec<Pair>, SpikeError> {
@@ -293,7 +308,7 @@ fn wanted_pairs(
             arrival,
         } => {
             let key = checked_name(name)?;
-            let value = place(source, *page, *arrival)?;
+            let value = place((source, credential), *page, *arrival)?;
             wanted.retain(|(held, _)| held != &key);
             wanted.push((key, value));
         }
@@ -348,7 +363,7 @@ fn leaf(pairs: &[Pair]) -> Result<String, SpikeError> {
 
 fn out_of_the_dictionary(
     reader: &Reader,
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     name: &[u8],
 ) -> Result<Vec<PlannedWrite>, SpikeError> {
     let Some(catalog) = reader.catalog() else {
@@ -367,20 +382,23 @@ fn out_of_the_dictionary(
         return Ok(Vec::new());
     }
     Ok(vec![set_entries(
-        source,
+        (source, credential),
         reference,
         &[(&key, String::new())],
     )?])
 }
 
 fn prove_names(
-    source: &ByteStore,
+    (source, credential): (&ByteStore, &[u8]),
     writes: &[PlannedWrite],
     (before, change): (&[Spot], &Naming),
 ) -> Result<(), SpikeError> {
-    let document =
-        crate::block_rewrite::commit_writes(source, writes, crate::Restrictions::SetAside)?;
-    let after = spots_of(&document)?;
+    let document = crate::block_rewrite::commit_writes(
+        source,
+        writes,
+        (credential, crate::Restrictions::SetAside),
+    )?;
+    let after = spots_of(&document, credential)?;
     let at = |spots: &[Spot], name: &str| {
         spots
             .iter()
@@ -425,7 +443,7 @@ fn prove_names(
         }
     }
     for spot in &after {
-        if spot_named(&document, &spot.name)?.as_ref() != Some(spot) {
+        if spot_named(&document, credential, &spot.name)?.as_ref() != Some(spot) {
             return Err(refused("a name in this document could not be followed"));
         }
     }
@@ -475,7 +493,11 @@ mod tests {
             change,
         };
         let plan = plan_command_with_fonts(source, &command, b"", None)?;
-        crate::block_rewrite::commit_writes(source, plan.writes(), crate::Restrictions::Respect)
+        crate::block_rewrite::commit_writes(
+            source,
+            plan.writes(),
+            (b"", crate::Restrictions::Respect),
+        )
     }
 
     fn naming(name: &str, page: usize, arrival: Arrival) -> Naming {
@@ -497,7 +519,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            spots_of(&source).expect("the names read"),
+            spots_of(&source, b"").expect("the names read"),
             vec![
                 Spot {
                     name: "alpha".to_owned(),
@@ -518,7 +540,7 @@ mod tests {
         let source =
             named(&bare(), naming("start", 2, Arrival::FitPage)).expect("the name is made");
         assert_eq!(
-            spots_of(&source).expect("the names read"),
+            spots_of(&source, b"").expect("the names read"),
             vec![Spot {
                 name: "start".to_owned(),
                 page: 2,
@@ -531,7 +553,7 @@ mod tests {
     fn a_new_name_leaves_the_others_where_they_were() {
         let source =
             named(&with_names(), naming("three", 2, Arrival::FitWidth)).expect("the name is made");
-        let spots = spots_of(&source).expect("the names read");
+        let spots = spots_of(&source, b"").expect("the names read");
         assert_eq!(
             spots,
             vec![
@@ -567,12 +589,12 @@ mod tests {
         );
         let after =
             named(&source, naming("middle", 1, Arrival::FitPage)).expect("the name is made");
-        let spots = spots_of(&after).expect("the names read");
+        let spots = spots_of(&after, b"").expect("the names read");
         let names: Vec<&str> = spots.iter().map(|spot| spot.name.as_str()).collect();
         assert_eq!(names, ["alpha", "middle", "omega"]);
         for spot in &spots {
             assert_eq!(
-                super::spot_named(&after, &spot.name).expect("the name reads"),
+                super::spot_named(&after, b"", &spot.name).expect("the name reads"),
                 Some(spot.clone()),
                 "{}",
                 spot.name
@@ -586,7 +608,7 @@ mod tests {
             .expect("the first name is made");
         let twice =
             named(&once, naming("preface", 2, Arrival::FitWidth)).expect("the second name is made");
-        let spots = spots_of(&twice).expect("the names read");
+        let spots = spots_of(&twice, b"").expect("the names read");
         let names: Vec<&str> = spots.iter().map(|spot| spot.name.as_str()).collect();
         assert_eq!(names, ["chapter two", "preface"]);
         assert_eq!((spots[1].page, spots[1].arrival), (2, Arrival::FitWidth));
@@ -596,7 +618,7 @@ mod tests {
     fn naming_a_place_twice_moves_the_name() {
         let once =
             named(&with_names(), naming("one", 2, Arrival::ActualSize)).expect("the name is moved");
-        let spots = spots_of(&once).expect("the names read");
+        let spots = spots_of(&once, b"").expect("the names read");
         assert_eq!(spots.len(), 2);
         assert_eq!(spots[0].name, "one");
         assert_eq!((spots[0].page, spots[0].arrival), (2, Arrival::ActualSize));
@@ -612,7 +634,7 @@ mod tests {
             },
         )
         .expect("the name is changed");
-        let spots = spots_of(&source).expect("the names read");
+        let spots = spots_of(&source, b"").expect("the names read");
         let names: Vec<&str> = spots.iter().map(|spot| spot.name.as_str()).collect();
         assert_eq!(names, ["appendix", "one"]);
         assert_eq!((spots[0].page, spots[0].arrival), (1, Arrival::FitVisible));
@@ -636,7 +658,7 @@ mod tests {
         )
         .expect("the name is taken away");
         assert_eq!(
-            spots_of(&after).expect("the names read"),
+            spots_of(&after, b"").expect("the names read"),
             vec![Spot {
                 name: "kept".to_owned(),
                 page: 1,
@@ -684,10 +706,10 @@ mod tests {
         let with_link = crate::block_rewrite::commit_writes(
             &source,
             plan.writes(),
-            crate::Restrictions::Respect,
+            (b"", crate::Restrictions::Respect),
         )
         .expect("the link is written");
-        let links = crate::link::links_of(&with_link, 0).expect("the links read");
+        let links = crate::link::links_of(&with_link, b"", 0).expect("the links read");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].2, Some(Target::Name("chapter two".to_owned())));
     }
@@ -699,15 +721,18 @@ mod tests {
             &["<< /Type /Annot /Subtype /Link /Rect [20 200 180 220] /F 4 /Dest (nowhere) >>"],
         );
         let listed = crate::new_field::listed_on_page(
-            &source,
+            (&source, b"".as_slice()),
             pdf_syntax::Reference::new(3, 0),
             &[pdf_syntax::Reference::new(7, 0)],
         )
         .expect("the link is listed on the page");
-        let page =
-            crate::block_rewrite::commit_writes(&source, &listed, crate::Restrictions::Respect)
-                .expect("the page is written");
-        let links = crate::link::links_of(&page, 0).expect("the links read");
+        let page = crate::block_rewrite::commit_writes(
+            &source,
+            &listed,
+            (b"", crate::Restrictions::Respect),
+        )
+        .expect("the page is written");
+        let links = crate::link::links_of(&page, b"", 0).expect("the links read");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].2, None);
     }

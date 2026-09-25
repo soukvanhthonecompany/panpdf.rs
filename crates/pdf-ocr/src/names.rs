@@ -15,16 +15,16 @@ const NAMES: [(&str, &str); 125] = [
     ("ceb", "Cebuano"),
     ("ces", "Czech"),
     ("chi_sim", "Chinese (Simplified)"),
-    ("chi_sim_vert", "chi_sim_vert"),
+    ("chi_sim_vert", "Chinese (Simplified, vertical)"),
     ("chi_tra", "Chinese (Traditional)"),
-    ("chi_tra_vert", "chi_tra_vert"),
+    ("chi_tra_vert", "Chinese (Traditional, vertical)"),
     ("chr", "Cherokee"),
     ("cos", "Corsican"),
     ("cym", "Welsh"),
     ("dan", "Danish"),
     ("deu", "German"),
     ("deu_latf", "German (Fraktur Latin)"),
-    ("div", "div"),
+    ("div", "Divehi; Dhivehi; Maldivian"),
     ("dzo", "Dzongkha"),
     ("ell", "Greek, Modern (1453-)"),
     ("eng", "English"),
@@ -58,7 +58,7 @@ const NAMES: [(&str, &str); 125] = [
     ("ita_old", "Italian (Old)"),
     ("jav", "Javanese"),
     ("jpn", "Japanese"),
-    ("jpn_vert", "jpn_vert"),
+    ("jpn_vert", "Japanese (vertical)"),
     ("kan", "Kannada"),
     ("kat", "Georgian"),
     ("kat_old", "Georgian (Old)"),
@@ -152,6 +152,8 @@ mod tests {
             "frk is not in the catalogue: see catalogue.rs"
         );
         assert_eq!(name_of("osd"), Some("Orientation and script detection"));
+        assert_eq!(name_of("div"), Some("Divehi; Dhivehi; Maldivian"));
+        assert_eq!(name_of("jpn_vert"), Some("Japanese (vertical)"));
     }
 
     #[test]
@@ -165,7 +167,14 @@ mod tests {
     #[test]
     fn every_catalogue_code_has_a_name() {
         for model in &ROWS {
-            assert!(name_of(model.code).is_some(), "{} has no name", model.code);
+            let name = name_of(model.code);
+            assert!(name.is_some(), "{} has no name", model.code);
+            assert_ne!(
+                name,
+                Some(model.code),
+                "{} is named by its code",
+                model.code
+            );
         }
     }
 

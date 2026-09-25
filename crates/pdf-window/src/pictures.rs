@@ -285,9 +285,11 @@ impl Window {
                 pages,
             } => {
                 let all: Vec<usize> = (0..pages).collect();
-                let job = self
-                    .editor
-                    .begin_insert_pages((beside, before), Arc::from(bytes), &all);
+                let job = self.editor.begin_insert_pages(
+                    (beside, before),
+                    (Arc::from(bytes), pdf_edit::Password::default()),
+                    &all,
+                );
                 if job.is_some() {
                     let first = if before { beside } else { beside + 1 };
                     self.renumber = Some(crate::page_motion::Renumber::inserted(

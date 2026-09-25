@@ -258,7 +258,7 @@ pub fn landing_on(
         graph: &reading.graph,
         fonts,
         restrictions: crate::Restrictions::Respect,
-        credential: b"",
+        credential,
     };
     landing(&page, stamp, facts)
 }

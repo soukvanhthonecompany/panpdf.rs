@@ -23,6 +23,8 @@ pub mod incremental;
 pub mod info;
 pub mod layout;
 pub mod link;
+#[cfg(test)]
+mod locked_tests;
 pub mod new_field;
 mod new_font;
 mod new_image;
@@ -68,8 +70,8 @@ pub use layout::{
 pub use new_text::{Room, room_for_new_text};
 pub use plan::{
     BlockOutcome, BlockRange, Capability, ClusterRef, ClustersAfter, Command, Effect, FixedPoint,
-    GlyphChange, LINE_BREAK, ObjectSelection, PageChange, ParagraphLayout, PenBlend, PenStep,
-    PenStroke, Plan, PlannedCaret, RowEnds, RunRewrite, Showing, SourceAnchor, TextRange,
+    GlyphChange, LINE_BREAK, ObjectSelection, PageChange, ParagraphLayout, Password, PenBlend,
+    PenStep, PenStroke, Plan, PlannedCaret, RowEnds, RunRewrite, Showing, SourceAnchor, TextRange,
     TextRunSelection, TextStyle,
 };
 use spike_move_text::{SpikeError, plan_command};

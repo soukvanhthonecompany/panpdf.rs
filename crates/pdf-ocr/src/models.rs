@@ -73,7 +73,14 @@ impl Model {
     }
 }
 
-pub const LANGUAGES: [&str; 3] = ["lao", "tha", "eng"];
+pub const FIRST: [&str; 3] = ["lao", "tha", "eng"];
+
+pub const HELPERS: [&str; 2] = ["equ", "osd"];
+
+#[must_use]
+pub fn is_a_language(code: &str) -> bool {
+    !HELPERS.contains(&code)
+}
 
 #[must_use]
 pub fn model(code: &str, quality: Quality) -> Option<&'static Model> {
@@ -103,12 +110,12 @@ pub fn every_language() -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LANGUAGES, Quality, every_language, model, of_language};
+    use super::{FIRST, HELPERS, Quality, every_language, is_a_language, model, of_language};
     use crate::catalogue::ROWS;
 
     #[test]
     fn the_catalogue_says_what_it_was_asked() {
-        for code in LANGUAGES {
+        for code in FIRST {
             for quality in Quality::ALL {
                 let model = model(code, quality).expect("every language, both qualities");
                 assert_eq!(model.code, code);
@@ -206,6 +213,19 @@ mod tests {
         assert!(all.contains(&"lao"));
         assert!(all.contains(&"khm"));
         assert!(!all.contains(&"frk"), "frk is a symlink, not a model");
+    }
+
+    #[test]
+    fn the_helpers_are_published_and_are_not_languages() {
+        let all = every_language();
+        for helper in HELPERS {
+            assert!(all.contains(&helper), "{helper} is published");
+            assert!(!is_a_language(helper), "{helper} is not a language");
+        }
+        for code in FIRST.into_iter().chain(["khm"]) {
+            assert!(is_a_language(code), "{code}");
+        }
+        assert_eq!(all.iter().filter(|code| is_a_language(code)).count(), 123);
     }
 
     #[test]
